@@ -4,10 +4,22 @@
 
 For feature worktrees, prefer smaller same-worktree worker terminals over creating nested worktrees.
 
-Use this pattern from inside the feature worktree:
+Use this default parent-agent launch pattern for every new feature worktree:
 
 ```bash
-orca terminal create --worktree active --title "<specific-subtask>" --command "omp" --json
+omp --advisor --model "openai-codex/gpt-5.5" --thinking xhigh
+```
+
+Implementation workers spawned inside that worktree may use either DeepSeek V4 or GPT-5.5 at medium thinking:
+
+```bash
+orca terminal create --worktree active --title "<specific-subtask>" --command 'omp --model "openrouter/deepseek/deepseek-v4-pro" --thinking medium' --json
+orca terminal create --worktree active --title "<specific-subtask>" --command 'omp --model "openai-codex/gpt-5.5" --thinking medium' --json
+```
+
+Then wait for the worker and send the task:
+
+```bash
 orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
 orca terminal send --terminal <handle> --text '<narrow task prompt>' --enter --json
 ```

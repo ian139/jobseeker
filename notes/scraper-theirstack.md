@@ -22,6 +22,19 @@ job-scraper daemon --filters config/filters.yaml
 
 The daemon runs one sync immediately, then schedules the same sync every 24 hours. It uses TheirStack as the third-party job scraper source and SQLite at `data/jobs.sqlite3` for dedupe and checkpoints.
 
+## BotDog outreach
+
+BotDog outreach is queue/manual-send only: it prints or opens LinkedIn profiles and records outcomes; it does not automate LinkedIn browser clicks.
+
+```bash
+job-scraper outreach init
+job-scraper outreach import-contacts --csv config/contacts.csv
+job-scraper outreach queue --config config/outreach.yaml
+job-scraper outreach next --limit 5 --open
+job-scraper outreach mark ACTION_ID --status sent
+job-scraper outreach mark-contact --linkedin-url https://www.linkedin.com/in/example --status connected
+```
+
 ## Credits and checkpointing
 
 TheirStack charges 1 API credit per returned job. `preview-count` uses `blur_company_data: true`, `include_total_results: true`, and `limit: 1` so you can estimate match volume before saving jobs. Repeated pulls store `last_successful_discovered_at` in SQLite and send `discovered_at_gte` with a 10-minute overlap, so already-seen jobs are deduped locally and old result windows are avoided.

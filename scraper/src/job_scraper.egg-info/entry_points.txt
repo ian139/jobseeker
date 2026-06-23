@@ -1,2 +1,0 @@
-[console_scripts]
-job-scraper = job_scraper.cli:main

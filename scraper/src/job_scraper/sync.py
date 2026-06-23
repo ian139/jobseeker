@@ -27,9 +27,7 @@ def sync_once(client: SearchClient, storage: JobStorage, config: ScraperConfig) 
     storage.initialize()
     checkpoint_before = storage.get_state("last_successful_discovered_at")
     discovered_at_gte = (
-        _subtract_overlap(checkpoint_before, config.search.discovered_overlap_minutes)
-        if checkpoint_before
-        else None
+        _subtract_overlap(checkpoint_before, config.search.discovered_overlap_minutes) if checkpoint_before else None
     )
 
     pages_fetched = 0
@@ -38,17 +36,21 @@ def sync_once(client: SearchClient, storage: JobStorage, config: ScraperConfig) 
     updated = 0
     skipped = 0
     saved_discovered_at: list[str] = []
+    result_set_complete = False
 
     for page in range(config.search.max_pages):
         payload = build_search_payload(config, page=page, discovered_at_gte=discovered_at_gte)
         response = client.search_jobs(payload)
-        data = response.get("data", [])
+        if "data" not in response:
+            raise ValueError("TheirStack response missing required field 'data'")
+        data = response["data"]
         if not isinstance(data, list):
             raise ValueError("TheirStack response field 'data' must be a list")
 
         pages_fetched += 1
         jobs_returned += len(data)
         if not data:
+            result_set_complete = True
             break
 
         for item in data:
@@ -66,10 +68,11 @@ def sync_once(client: SearchClient, storage: JobStorage, config: ScraperConfig) 
                 saved_discovered_at.append(result.discovered_at)
 
         if len(data) < config.search.limit:
+            result_set_complete = True
             break
 
-    checkpoint_after = _max_checkpoint(checkpoint_before, saved_discovered_at)
-    storage.record_run(checkpoint_after if saved_discovered_at else None)
+    checkpoint_after = _max_checkpoint(checkpoint_before, saved_discovered_at) if result_set_complete else checkpoint_before
+    storage.record_run(checkpoint_after if result_set_complete and saved_discovered_at else None)
     return SyncSummary(
         pages_fetched=pages_fetched,
         jobs_returned=jobs_returned,
@@ -81,10 +84,10 @@ def sync_once(client: SearchClient, storage: JobStorage, config: ScraperConfig) 
     )
 
 
-def _subtract_overlap(checkpoint: str, minutes: int) -> str:
+def _subtract_overlap(checkpoint: str, minutes: int) -> str | None:
     parsed = _parse_datetime(checkpoint)
     if parsed is None:
-        return checkpoint
+        return None
     return (parsed - timedelta(minutes=minutes)).isoformat(timespec="seconds")
 
 
@@ -94,8 +97,6 @@ def _max_checkpoint(current: str | None, candidates: list[str]) -> str | None:
     for candidate in candidates:
         candidate_datetime = _parse_datetime(candidate)
         if candidate_datetime is None:
-            if best_value is None or candidate > best_value:
-                best_value = candidate
             continue
         if best_datetime is None or candidate_datetime > best_datetime:
             best_datetime = candidate_datetime

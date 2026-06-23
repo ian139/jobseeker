@@ -98,9 +98,19 @@ def build_search_payload(
     return _drop_empty(_compact(payload))
 
 
+COMPANY_IDENTIFIER_FILTER_PREFIXES = (
+    "company_domain",
+    "company_id",
+    "company_linkedin_url",
+    "company_name",
+)
+
+
 def has_company_identifier_filters(config: ScraperConfig) -> bool:
     filter_data = config.filters.model_dump()
-    for key in ("company_domain_or", "company_linkedin_url_or", "company_name_or"):
+    for key in filter_data:
+        if not key.startswith(COMPANY_IDENTIFIER_FILTER_PREFIXES):
+            continue
         value = filter_data.get(key)
         if value not in (None, [], ""):
             return True

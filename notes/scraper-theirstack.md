@@ -7,7 +7,7 @@ Run these commands from `scraper/` unless noted.
 1. Create or copy a TheirStack API key from TheirStack settings.
 2. Copy `.env.example` to `.env` and set `THEIRSTACK_API_KEY`.
 3. Copy `config/filters.example.yaml` to `config/filters.yaml`; keep personal filter edits in this untracked local file.
-4. Install dependencies: `python -m pip install -e '.[dev]'`. If your Python is externally managed, create a venv first with `python -m venv .venv` and use `.venv/bin/python -m pip install -e '.[dev]'`.
+4. Install dependencies: `python -m pip install -e '.[dev]'`. If your Python is externally managed, create and activate a venv first with `python -m venv .venv`, `source .venv/bin/activate`, then `python -m pip install -e '.[dev]'`.
 5. Initialize SQLite: `job-scraper init`.
 6. Estimate matches without saving jobs: `job-scraper preview-count --filters config/filters.yaml`.
 7. Run one pull: `job-scraper run-once --filters config/filters.yaml`.

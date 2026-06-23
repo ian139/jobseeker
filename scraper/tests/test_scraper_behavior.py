@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from job_scraper.cli import preview_count
-from job_scraper.config import load_config
+from job_scraper.config import has_company_identifier_filters, load_config
 from job_scraper.storage import JobStorage
 from job_scraper.sync import sync_once
 
@@ -111,6 +113,73 @@ def test_preview_count_uses_blur_count_payload_and_does_not_write_jobs(tmp_path:
     assert payload["page"] == 0
     assert response["metadata"] == {"total_results": 42}
     assert storage.count_jobs() == 0
+
+
+def test_page_cap_does_not_advance_checkpoint_when_results_are_truncated(tmp_path: Path) -> None:
+    config = _example_config()
+    config.search.limit = 2
+    config.search.max_pages = 1
+    storage = JobStorage(tmp_path / "jobs.sqlite3")
+    client = FakeTheirStackClient(
+        [
+            {
+                "data": [
+                    _job("job-1", discovered_at="2026-06-23T12:00:00+00:00"),
+                    _job("job-2", discovered_at="2026-06-23T11:00:00+00:00"),
+                ]
+            }
+        ]
+    )
+
+    summary = sync_once(client, storage, config)
+
+    assert summary.checkpoint_after is None
+    assert storage.get_state("last_successful_discovered_at") is None
+    assert storage.count_jobs() == 2
+
+
+def test_missing_data_response_fails_without_recording_success(tmp_path: Path) -> None:
+    config = _example_config()
+    storage = JobStorage(tmp_path / "jobs.sqlite3")
+    client = FakeTheirStackClient([{}])
+
+    with pytest.raises(ValueError, match="missing required field 'data'"):
+        sync_once(client, storage, config)
+
+    assert storage.get_state("last_run_at") is None
+
+
+def test_malformed_discovered_at_does_not_poison_checkpoint(tmp_path: Path) -> None:
+    config = _example_config()
+    storage = JobStorage(tmp_path / "jobs.sqlite3")
+    client = FakeTheirStackClient([{"data": [_job("job-1", discovered_at="not-a-date")]}])
+
+    summary = sync_once(client, storage, config)
+
+    assert summary.checkpoint_after is None
+    assert storage.get_state("last_successful_discovered_at") is None
+
+    storage.set_state("last_successful_discovered_at", "not-a-date")
+    next_client = FakeTheirStackClient([{"data": []}])
+    sync_once(next_client, storage, config)
+
+    assert "discovered_at_gte" not in next_client.payloads[0]
+
+
+def test_preview_guard_blocks_extra_company_identifier_filters(tmp_path: Path) -> None:
+    config_path = tmp_path / "filters.yaml"
+    config_path.write_text(
+        """
+search: {}
+filters:
+  company_id_or:
+    - "company-1"
+""",
+        encoding="utf-8",
+    )
+    config = load_config(config_path)
+
+    assert has_company_identifier_filters(config)
 
 
 def _example_config() -> Any:

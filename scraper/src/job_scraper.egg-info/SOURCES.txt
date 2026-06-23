@@ -2,6 +2,7 @@ pyproject.toml
 src/job_scraper/__init__.py
 src/job_scraper/cli.py
 src/job_scraper/config.py
+src/job_scraper/resume.py
 src/job_scraper/scheduler.py
 src/job_scraper/storage.py
 src/job_scraper/sync.py

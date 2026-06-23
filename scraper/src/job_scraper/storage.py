@@ -19,6 +19,48 @@ class UpsertResult:
     discovered_at: str | None = None
 
 
+ApplicationStatus = Literal["queued", "tailored", "applied", "interviewing", "offer", "rejected", "withdrawn"]
+APPLICATION_STATUSES: tuple[str, ...] = (
+    "queued",
+    "tailored",
+    "applied",
+    "interviewing",
+    "offer",
+    "rejected",
+    "withdrawn",
+)
+
+
+@dataclass(frozen=True)
+class JobRecord:
+    theirstack_id: str
+    title: str | None
+    company: str | None
+    company_domain: str | None
+    country_code: str | None
+    remote: int | None
+    date_posted: str | None
+    discovered_at: str | None
+    url: str | None
+    source_url: str | None
+    final_url: str | None
+    raw: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ApplicationRecord:
+    id: int
+    theirstack_id: str
+    status: str
+    notes: str
+    contact_name: str | None
+    contact_email: str | None
+    applied_at: str | None
+    follow_up_at: str | None
+    resume_path: str | None
+    created_at: str
+    updated_at: str
+
 class JobStorage:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -53,6 +95,40 @@ class JobStorage:
                 CREATE TABLE IF NOT EXISTS sync_state (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS applications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    theirstack_id TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    notes TEXT NOT NULL DEFAULT '',
+                    contact_name TEXT,
+                    contact_email TEXT,
+                    applied_at TEXT,
+                    follow_up_at TEXT,
+                    resume_path TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(theirstack_id) REFERENCES jobs(theirstack_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS resume_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    application_id INTEGER NOT NULL,
+                    resume_markdown TEXT NOT NULL,
+                    selected_bullets_json TEXT NOT NULL,
+                    keywords_json TEXT NOT NULL,
+                    llm_used INTEGER NOT NULL DEFAULT 0,
+                    model TEXT,
+                    output_path TEXT,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(application_id) REFERENCES applications(id)
                 )
                 """
             )
@@ -158,10 +234,196 @@ class JobStorage:
             row = connection.execute("SELECT COUNT(*) AS count FROM jobs").fetchone()
         return int(row["count"])
 
+    def get_job(self, theirstack_id: str) -> JobRecord | None:
+        self.initialize()
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT theirstack_id, title, company, company_domain, country_code, remote,
+                       date_posted, discovered_at, url, source_url, final_url, raw_json
+                FROM jobs
+                WHERE theirstack_id = ?
+                """,
+                (theirstack_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _job_record_from_row(row)
+
+    def ensure_application(self, theirstack_id: str, *, notes: str = "") -> ApplicationRecord:
+        if self.get_job(theirstack_id) is None:
+            raise ValueError(f"Unknown job id: {theirstack_id}")
+
+        self.initialize()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO applications (theirstack_id, status, notes, created_at, updated_at)
+                VALUES (?, 'queued', ?, ?, ?)
+                ON CONFLICT(theirstack_id) DO NOTHING
+                """,
+                (theirstack_id, notes, now, now),
+            )
+            row = connection.execute(
+                """
+                SELECT id, theirstack_id, status, notes, contact_name, contact_email,
+                       applied_at, follow_up_at, resume_path, created_at, updated_at
+                FROM applications
+                WHERE theirstack_id = ?
+                """,
+                (theirstack_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"Unknown job id: {theirstack_id}")
+        return _application_record_from_row(row)
+
+    def update_application(
+        self,
+        theirstack_id: str,
+        *,
+        status: ApplicationStatus | None = None,
+        notes: str | None = None,
+        contact_name: str | None = None,
+        contact_email: str | None = None,
+        applied_at: str | None = None,
+        follow_up_at: str | None = None,
+        resume_path: str | None = None,
+    ) -> ApplicationRecord:
+        if status is not None and status not in APPLICATION_STATUSES:
+            raise ValueError(f"Invalid application status: {status}")
+
+        self.ensure_application(theirstack_id)
+        fields: dict[str, Any] = {
+            "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        }
+        for name, value in (
+            ("status", status),
+            ("notes", notes),
+            ("contact_name", contact_name),
+            ("contact_email", contact_email),
+            ("applied_at", applied_at),
+            ("follow_up_at", follow_up_at),
+            ("resume_path", resume_path),
+        ):
+            if value is not None:
+                fields[name] = value
+
+        assignments = ", ".join(f"{name} = :{name}" for name in fields)
+        fields["theirstack_id"] = theirstack_id
+        with self._connect() as connection:
+            connection.execute(f"UPDATE applications SET {assignments} WHERE theirstack_id = :theirstack_id", fields)
+            row = connection.execute(
+                """
+                SELECT id, theirstack_id, status, notes, contact_name, contact_email,
+                       applied_at, follow_up_at, resume_path, created_at, updated_at
+                FROM applications
+                WHERE theirstack_id = ?
+                """,
+                (theirstack_id,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"Unknown job id: {theirstack_id}")
+        return _application_record_from_row(row)
+
+    def list_applications(self, *, status: ApplicationStatus | None = None) -> list[ApplicationRecord]:
+        if status is not None and status not in APPLICATION_STATUSES:
+            raise ValueError(f"Invalid application status: {status}")
+
+        self.initialize()
+        query = """
+            SELECT id, theirstack_id, status, notes, contact_name, contact_email,
+                   applied_at, follow_up_at, resume_path, created_at, updated_at
+            FROM applications
+        """
+        params: tuple[str, ...] = ()
+        if status is not None:
+            query += " WHERE status = ?"
+            params = (status,)
+        query += " ORDER BY updated_at DESC, id DESC"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [_application_record_from_row(row) for row in rows]
+
+    def save_resume_version(
+        self,
+        *,
+        application_id: int,
+        resume_markdown: str,
+        selected_bullets_json: str,
+        keywords_json: str,
+        llm_used: bool,
+        model: str | None,
+        output_path: str | None,
+    ) -> int:
+        self.initialize()
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO resume_versions (
+                    application_id, resume_markdown, selected_bullets_json, keywords_json,
+                    llm_used, model, output_path, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    application_id,
+                    resume_markdown,
+                    selected_bullets_json,
+                    keywords_json,
+                    1 if llm_used else 0,
+                    model,
+                    output_path,
+                    now,
+                ),
+            )
+        return int(cursor.lastrowid)
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
+        connection.execute("PRAGMA foreign_keys = ON")
         connection.row_factory = sqlite3.Row
         return connection
+
+
+def _job_record_from_row(row: sqlite3.Row) -> JobRecord:
+    try:
+        raw = json.loads(str(row["raw_json"]))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Stored job raw_json is invalid for {row['theirstack_id']}") from exc
+    if not isinstance(raw, dict):
+        raise ValueError(f"Stored job raw_json is invalid for {row['theirstack_id']}")
+    return JobRecord(
+        theirstack_id=str(row["theirstack_id"]),
+        title=_string_or_none(row["title"]),
+        company=_string_or_none(row["company"]),
+        company_domain=_string_or_none(row["company_domain"]),
+        country_code=_string_or_none(row["country_code"]),
+        remote=int(row["remote"]) if row["remote"] is not None else None,
+        date_posted=_string_or_none(row["date_posted"]),
+        discovered_at=_string_or_none(row["discovered_at"]),
+        url=_string_or_none(row["url"]),
+        source_url=_string_or_none(row["source_url"]),
+        final_url=_string_or_none(row["final_url"]),
+        raw=raw,
+    )
+
+
+def _application_record_from_row(row: sqlite3.Row) -> ApplicationRecord:
+    return ApplicationRecord(
+        id=int(row["id"]),
+        theirstack_id=str(row["theirstack_id"]),
+        status=str(row["status"]),
+        notes=str(row["notes"]),
+        contact_name=_string_or_none(row["contact_name"]),
+        contact_email=_string_or_none(row["contact_email"]),
+        applied_at=_string_or_none(row["applied_at"]),
+        follow_up_at=_string_or_none(row["follow_up_at"]),
+        resume_path=_string_or_none(row["resume_path"]),
+        created_at=str(row["created_at"]),
+        updated_at=str(row["updated_at"]),
+    )
 
 
 def _normalized_row(job: dict[str, Any], theirstack_id: str, raw_json: str, now: str) -> dict[str, Any]:

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 
+from job_scraper.applications import _merged_job_mapping, prepare_application_pack
 from job_scraper.config import AppSettings, build_search_payload, has_company_identifier_filters, load_config
+from job_scraper.llm import OpenAIResumeLLM, ResumeLLMError
+from job_scraper.resume import load_resume_profile, tailor_resume
 from job_scraper.scheduler import run_daemon
-from job_scraper.storage import JobStorage
+from job_scraper.storage import APPLICATION_STATUSES, JobStorage
 from job_scraper.sync import SyncSummary, sync_once
 from job_scraper.theirstack import TheirStackClient
 
@@ -23,6 +27,88 @@ def main(argv: list[str] | None = None) -> int:
         storage = JobStorage(settings.job_scraper_db_path)
         storage.initialize()
         print(f"Initialized SQLite database at {storage.db_path}")
+        return 0
+
+    if args.command == "generate-resume":
+        storage = JobStorage(settings.job_scraper_db_path)
+        job = storage.get_job(args.job_id)
+        if job is None:
+            raise ValueError(f"Unknown job id: {args.job_id}")
+        profile = load_resume_profile(Path(args.profile))
+        llm = _resume_llm(settings, no_llm=args.no_llm)
+        merged_job = _merged_job_mapping(job)
+        try:
+            resume = tailor_resume(profile, merged_job, llm=llm)
+        except ResumeLLMError as exc:
+            print(f"Warning: LLM resume rewrite failed; using deterministic resume: {exc}", file=sys.stderr)
+            resume = tailor_resume(profile, merged_job, llm=None)
+        if args.output:
+            output_path = Path(args.output)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(resume.markdown, encoding="utf-8")
+            print(f"Wrote resume to {output_path}")
+        else:
+            print(resume.markdown, end="")
+        return 0
+
+    if args.command == "prepare-application":
+        storage = JobStorage(settings.job_scraper_db_path)
+        llm = _resume_llm(settings, no_llm=args.no_llm)
+        try:
+            pack = prepare_application_pack(
+                storage,
+                job_id=args.job_id,
+                profile_path=Path(args.profile),
+                output_dir=Path(args.output_dir) if args.output_dir else settings.application_pack_dir,
+                llm=llm,
+                notes=args.notes or "",
+            )
+        except ResumeLLMError as exc:
+            print(f"Warning: LLM resume rewrite failed; using deterministic resume: {exc}", file=sys.stderr)
+            pack = prepare_application_pack(
+                storage,
+                job_id=args.job_id,
+                profile_path=Path(args.profile),
+                output_dir=Path(args.output_dir) if args.output_dir else settings.application_pack_dir,
+                llm=None,
+                notes=args.notes or "",
+            )
+        print(f"Prepared application {pack.application.id} for {args.job_id}: {pack.resume_path}")
+        return 0
+
+    if args.command == "list-applications":
+        storage = JobStorage(settings.job_scraper_db_path)
+        applications = storage.list_applications(status=args.status)
+        if not applications:
+            print("No applications found")
+            return 0
+        for application in applications:
+            print(
+                "\t".join(
+                    [
+                        str(application.id),
+                        application.status,
+                        application.theirstack_id,
+                        application.resume_path or "",
+                        application.updated_at,
+                        application.notes,
+                    ]
+                )
+            )
+        return 0
+
+    if args.command == "update-application":
+        storage = JobStorage(settings.job_scraper_db_path)
+        application = storage.update_application(
+            args.job_id,
+            status=args.status,
+            notes=args.notes,
+            contact_name=args.contact_name,
+            contact_email=args.contact_email,
+            applied_at=args.applied_at,
+            follow_up_at=args.follow_up_at,
+        )
+        print(f"Updated application {application.id}: {application.status}")
         return 0
 
     filters_path = Path(args.filters)
@@ -59,6 +145,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.error(f"Unknown command: {args.command}")
     return 2
 
+
+
+
+def _resume_llm(settings: AppSettings, *, no_llm: bool) -> OpenAIResumeLLM | None:
+    if no_llm or not settings.openai_api_key.strip():
+        return None
+    return OpenAIResumeLLM(settings.openai_api_key, settings.openai_model)
 
 def preview_count(client: TheirStackClient, config: Any) -> dict[str, object]:
     payload = build_search_payload(config, page=0, preview_count=True)
@@ -111,6 +204,31 @@ def _build_parser() -> argparse.ArgumentParser:
 
     preview = subparsers.add_parser("preview-count", help="Fetch a blurred TheirStack total count without saving jobs")
     preview.add_argument("--filters", default="config/filters.yaml", help="Path to the YAML filter file")
+
+    generate_resume = subparsers.add_parser("generate-resume", help="Generate a tailored Markdown resume for a saved job")
+    generate_resume.add_argument("--job-id", required=True, help="Saved TheirStack job id")
+    generate_resume.add_argument("--profile", required=True, help="Path to resume profile YAML")
+    generate_resume.add_argument("--output", help="Path to write Markdown; stdout when omitted")
+    generate_resume.add_argument("--no-llm", action="store_true", help="Disable optional OpenAI rewrite")
+
+    prepare_application = subparsers.add_parser("prepare-application", help="Create a local application pack and CRM row")
+    prepare_application.add_argument("--job-id", required=True, help="Saved TheirStack job id")
+    prepare_application.add_argument("--profile", required=True, help="Path to resume profile YAML")
+    prepare_application.add_argument("--notes", default="", help="Application notes")
+    prepare_application.add_argument("--output-dir", help="Directory for application packs")
+    prepare_application.add_argument("--no-llm", action="store_true", help="Disable optional OpenAI rewrite")
+
+    list_applications = subparsers.add_parser("list-applications", help="List local application CRM rows")
+    list_applications.add_argument("--status", choices=APPLICATION_STATUSES, help="Filter by application status")
+
+    update_application = subparsers.add_parser("update-application", help="Update a local application CRM row")
+    update_application.add_argument("--job-id", required=True, help="Saved TheirStack job id")
+    update_application.add_argument("--status", choices=APPLICATION_STATUSES, help="New application status")
+    update_application.add_argument("--notes", help="Application notes")
+    update_application.add_argument("--contact-name", help="Contact name")
+    update_application.add_argument("--contact-email", help="Contact email")
+    update_application.add_argument("--applied-at", help="Applied date")
+    update_application.add_argument("--follow-up-at", help="Follow-up date")
 
     return parser
 

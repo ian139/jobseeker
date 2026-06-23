@@ -11,6 +11,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class AppSettings(BaseSettings):
     theirstack_api_key: str = Field(default="", alias="THEIRSTACK_API_KEY")
     job_scraper_db_path: Path = Field(default=Path("data/jobs.sqlite3"), alias="JOB_SCRAPER_DB_PATH")
+    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
+    openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
+    application_pack_dir: Path = Field(default=Path("data/application_packs"), alias="APPLICATION_PACK_DIR")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

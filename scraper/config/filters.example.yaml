@@ -1,0 +1,50 @@
+search:
+  posted_at_max_age_days: 1
+  discovered_overlap_minutes: 10
+  limit: 100
+  max_pages: 5
+  include_total_results: false
+  order_by:
+    - field: date_posted
+      desc: true
+    - field: discovered_at
+      desc: true
+filters:
+  is_closed: false
+  company_type: direct_employer
+  company_description_pattern_or:
+    - "(?i)\\b(software|technology|internet|cloud|saas|developer platform|artificial intelligence|machine learning|data platform|cybersecurity|fintech)\\b"
+  job_title_pattern_or:
+    - "(?i)\\b(fall|autumn)\\b.*\\b(co[- ]?op|coop|intern(ship)?)\\b"
+    - "(?i)\\b(co[- ]?op|coop|intern(ship)?)\\b.*\\b(fall|autumn)\\b"
+  job_title_not:
+    - sales
+    - marketing
+    - recruiter
+    - talent acquisition
+    - human resources
+    - account executive
+    - customer success
+    - finance
+    - accounting
+    - legal
+  job_description_pattern_or:
+    - "(?i)\\b(software|engineer|developer|data|machine learning|ml|artificial intelligence|ai|product|security|cloud|platform|frontend|front[- ]end|backend|back[- ]end|full[- ]stack|devops|sre|site reliability)\\b"
+  job_description_pattern_not:
+    - "(?i)\\b(unpaid|volunteer)\\b"
+  employment_statuses_or:
+    - internship
+    - temporary
+  job_country_code_or: []
+  remote: null
+  job_seniority_or: []
+  min_salary_usd: null
+  url_domain_or:
+    - linkedin.com
+    - myworkdayjobs.com
+    - rippling.com
+    - oraclecloud.com
+    - taleo.net
+    - greenhouse.io
+    - ashbyhq.com
+    - smartrecruiters.com

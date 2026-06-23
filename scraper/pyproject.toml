@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "job-scraper"
+version = "0.1.0"
+description = "TheirStack job scraper with SQLite dedupe and 24-hour scheduling"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "pydantic-settings>=2.2",
+    "PyYAML>=6.0",
+    "APScheduler>=3.10",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+job-scraper = "job_scraper.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

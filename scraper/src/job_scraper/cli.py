@@ -13,6 +13,7 @@ from job_scraper.config import AppSettings, build_search_payload, has_company_id
 from job_scraper.llm import OpenAIResumeLLM, ResumeLLMError
 from job_scraper.outreach import load_outreach_config, normalize_linkedin_profile_url
 from job_scraper.outreach_storage import OutreachStorage
+from job_scraper.public_json import PublicJsonClient, import_public_json
 from job_scraper.resume import load_resume_profile, tailor_resume
 from job_scraper.scheduler import run_daemon
 from job_scraper.storage import APPLICATION_STATUSES, JobStorage
@@ -116,6 +117,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(f"Updated application {application.id}: {application.status}")
         return 0
+    if args.command == "import-public-json":
+        storage = JobStorage(settings.job_scraper_db_path)
+        client = PublicJsonClient(base_url=args.base_url)
+        summary = import_public_json(client, storage)
+        print(_format_public_json_summary(summary))
+        return 0
+
 
     filters_path = Path(args.filters)
     if not filters_path.exists():
@@ -246,6 +254,14 @@ def format_summary(summary: SyncSummary) -> str:
         f"checkpoint_after={summary.checkpoint_after or 'none'}"
     )
 
+def _format_public_json_summary(summary: Any) -> str:
+    return (
+        f"Public JSON import snapshot={summary.snapshot_date} generated_at={summary.generated_at} "
+        f"pages={summary.pages_fetched} jobs={summary.jobs_returned} inserted={summary.inserted} "
+        f"updated={summary.updated} skipped={summary.skipped} duplicates={summary.duplicates}"
+    )
+
+
 
 def _preview_count_line(response: dict[str, object]) -> str:
     total = _find_total_results(response)
@@ -281,6 +297,16 @@ def _build_parser() -> argparse.ArgumentParser:
     preview = subparsers.add_parser("preview-count", help="Fetch a blurred TheirStack total count without saving jobs")
     preview.add_argument("--filters", default="config/filters.yaml", help="Path to the YAML filter file")
 
+
+    import_public = subparsers.add_parser(
+        "import-public-json",
+        help="Import supplemental public JSON jobs without changing TheirStack sync behavior",
+    )
+    import_public.add_argument(
+        "--base-url",
+        default="https://doomersareretardedcommunists.com/",
+        help="Public JSON homepage URL",
+    )
     generate_resume = subparsers.add_parser("generate-resume", help="Generate a tailored Markdown resume for a saved job")
     generate_resume.add_argument("--job-id", required=True, help="Saved TheirStack job id")
     generate_resume.add_argument("--profile", required=True, help="Path to resume profile YAML")

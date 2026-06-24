@@ -82,9 +82,55 @@ def build_tailored_resume_prompt(*, job: JobRecord, industry: str, analysis: Upl
     if len(resume_text) > MAX_PROMPT_RESUME_CHARS:
         resume_text = f"{resume_text[:MAX_PROMPT_RESUME_CHARS]}\n... [truncated]"
 
-    return f"""# Tailor Resume Prompt
+    format_guidance = {
+        "pdf": (
+            "The resume was uploaded as a PDF. Analyze the extracted text below, note any parsing/order risks, "
+            "and recommend edits to the source document before re-exporting to PDF."
+        ),
+        "latex": (
+            "The resume was uploaded as LaTeX. Treat the extracted text as semantic content and make recommendations "
+            "that can be applied safely to the `.tex` source without unnecessary template churn."
+        ),
+        "text": (
+            "The resume was uploaded as plain text or Markdown. Review the text directly and include formatting / ATS "
+            "guidance for producing the final submission file."
+        ),
+    }.get(analysis.kind, "Review the uploaded resume text directly.")
 
-You are tailoring a resume for a specific job and target industry. Use only facts present in the uploaded resume text. Do not invent employers, dates, degrees, certifications, tools, metrics, or contact details. Emphasize experience relevant to the target industry and the job description.
+    return f"""# Resume Review Report Generator — {job.title or 'Target Role'}
+
+You are an expert resume reviewer and technical hiring strategist. Produce a verbose Markdown report for tailoring the uploaded resume to the selected job and target industry. The report must be detailed enough for another writing or coding agent to implement step by step.
+
+## Non-Negotiable Rules
+- Use only facts present in the uploaded resume and job context. Do not invent employers, dates, titles, degrees, certifications, tools, metrics, or contact details.
+- Preserve nearly all existing resume content unless you explicitly say to change, add, remove, or reorder it.
+- Prefer precise targeted edits over broad rewrites.
+- Rewritten bullets must preserve the original claim and seniority. Use `[add metric if true]` placeholders instead of fabricated numbers.
+- Separate missing job/industry keywords from evidence the resume actually supports.
+- Warn against edits that would make the resume worse: keyword stuffing, inflated claims, generic phrasing, deleting differentiating projects, or damaging ATS readability.
+- Return Markdown only, suitable to save as a `.md` file.
+
+## Required Markdown Report Structure
+Use these headings:
+1. `# Resume Review Report — {job.title or 'Target Role'}`
+2. `## Executive Summary`
+3. `## Source and Parsing Notes`
+4. `## What the Resume Does Well`
+5. `## Weaknesses and Risks`
+6. `## What to Preserve`
+7. `## Recommended Changes`
+8. `## Tailoring Plan for {industry}`
+9. `## Specific Edits and Rewritten Bullets`
+10. `## Missing Keywords and Evidence`
+11. `## Structure, Formatting, and ATS Feedback`
+12. `## Project and Experience Prioritization`
+13. `## Warnings: Changes That Would Make This Worse`
+14. `## Agent TODO Checklist`
+
+The `Agent TODO Checklist` must contain checkbox subsections for `Keep`, `Change`, `Add`, `Remove`, and `Do Not Touch`.
+
+## Input Guidance
+{format_guidance}
 
 ## Target Industry
 {industry}
@@ -101,14 +147,13 @@ You are tailoring a resume for a specific job and target industry. Use only fact
 {job_json}
 ```
 
-## Uploaded Resume Analysis
+## Uploaded Resume Metadata
 {analysis.facts_markdown}
 
-## Uploaded Resume Text
+## Uploaded Resume Text to Review
+```text
 {resume_text}
-
-## Requested Output
-Return a tailored Markdown resume draft, followed by a short bullet list of original resume facts used and job/industry keywords matched.
+```
 """
 
 

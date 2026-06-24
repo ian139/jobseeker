@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from job_scraper.storage import JobRecord
-from job_scraper.resume_uploads import UploadedResumeAnalysis
+from job_scraper.resume_uploads import MAX_PROMPT_RESUME_CHARS, UploadedResumeAnalysis
 
 # ── Public dataclasses ───────────────────────────────────────────────────────
 
@@ -121,7 +121,9 @@ def score_jobs(
             )
         )
 
-    scored.sort(key=lambda s: (-s.score, s.job.date_posted or "", s.job.discovered_at or "", s.job.theirstack_id))
+    scored.sort(key=lambda s: s.job.theirstack_id)
+    scored.sort(key=lambda s: (s.job.date_posted or "", s.job.discovered_at or ""), reverse=True)
+    scored.sort(key=lambda s: s.score, reverse=True)
     return scored
 
 
@@ -142,8 +144,6 @@ def summarize_categories(scored_jobs: Sequence[ScoredJob]) -> list[CategorySumma
 
     summaries.sort(key=lambda cs: cs.avg_score, reverse=True)
     return summaries
-
-
 def build_improvement_prompt(
     scored_job: ScoredJob,
     analysis: UploadedResumeAnalysis,
@@ -151,136 +151,414 @@ def build_improvement_prompt(
     target_roles: Sequence[str],
     target_industries: Sequence[str],
 ) -> str:
-    """Build a comprehensive resume-improvement prompt for one scored job.
-
-    The prompt covers:
-      1. LaTeX / PDF input guidance (based on the uploaded file kind)
-      2. Role fit assessment
-      3. Missing skills / gaps
-      4. Industry alignment
-      5. Evidence gaps
-      6. Step-by-step revision prompts
-    """
+    """Build a Markdown prompt that generates a comprehensive resume review report."""
     job = scored_job.job
-    job_text = _job_text(job)
-
-    # ── Format guidance ──────────────────────────────────────────────────
     format_map = {
         "pdf": (
-            "# PDF Input Guidance\n"
-            "Your resume was uploaded as a **PDF**. The text extracted below was used for analysis. "
-            "When revising, edit the source document (Word/InDesign/LaTeX) rather than the PDF, "
-            "then re-export to PDF for submission."
+            "The resume was uploaded as a PDF. Analyze only the extracted text below; if text order looks "
+            "damaged by PDF extraction, call that out in Source and Parsing Notes. Recommend edits to the "
+            "source document, then re-export to PDF. Do not ask anyone to edit the PDF binary directly."
         ),
         "latex": (
-            "# LaTeX Input Guidance\n"
-            "Your resume was uploaded as a **LaTeX / .tex** file. "
-            "Edit the LaTeX source directly, recompiling to PDF after changes."
+            "The resume was uploaded as LaTeX. Treat the extracted text as semantic resume content, but "
+            "write recommendations that can be applied safely to the .tex source. Preserve LaTeX structure "
+            "unless a section, bullet, or ordering change is explicitly justified."
         ),
         "text": (
-            "# Plain Text Input Guidance\n"
-            "Your resume was uploaded as **plain text**. Consider converting to a PDF with a clean "
-            "layout (e.g. LaTeX template) before submitting to employers."
+            "The resume was uploaded as plain text or Markdown. Review the text directly and include layout "
+            "and ATS guidance for producing a clean final PDF if the candidate will submit one."
         ),
     }
-    format_guide = format_map.get(
-        analysis.kind,
-        "# Input Guidance\nUploaded resume analyzed as plain text.",
-    )
-
-    # ── Role/category assessment ─────────────────────────────────────────
-    title_norm = _normalize_text(job.title or "")
+    format_guide = format_map.get(analysis.kind, format_map["text"])
     role_norm = " ".join(_normalize_text(r) for r in target_roles)
-    role_match_tokens = _tokenize(role_norm) & _tokenize(title_norm)
+    title_norm = _normalize_text(job.title or "")
+    role_match_tokens = sorted(_tokenize(role_norm) & _tokenize(title_norm))
     role_fit_pct = _score_role_fit(job.title, target_roles) / 40.0 * 100 if target_roles else 0.0
+    industry_pct = _score_industry(job, target_industries) / 30.0 * 100 if target_industries else 0.0
+    target_role_text = ", ".join(target_roles) or "Not specified"
+    target_industry_text = ", ".join(target_industries) or "Not specified"
+    role_token_text = ", ".join(role_match_tokens) or "None"
+    matched_terms = ", ".join(scored_job.matched_terms) or "None detected"
+    missing_terms = ", ".join(scored_job.missing_terms) or "None detected"
+    strengths = ", ".join(scored_job.key_strengths) or "None detected"
+    missing_requirements = ", ".join(scored_job.missing_requirements) or "None detected"
+    evidence = "\n".join(f"- {line}" for line in scored_job.relevant_resume_evidence)
+    concerns = "\n".join(f"- {concern}" for concern in scored_job.concerns)
+    url = job.final_url or job.url or "Not available"
 
-    if target_roles and role_fit_pct >= 80:
-        role_assessment = f"Strong target-role fit ({role_fit_pct:.0f}%) for \"{job.title or 'N/A'}\"."
-    elif target_roles and role_fit_pct >= 40:
-        role_assessment = f"Moderate target-role fit ({role_fit_pct:.0f}%). Emphasize: {', '.join(sorted(role_match_tokens)) if role_match_tokens else 'transferable role evidence'}."
-    elif target_roles:
-        role_assessment = f"Weak target-role fit ({role_fit_pct:.0f}%). Reframe transferable experience toward \"{job.title or 'N/A'}\"."
-    else:
-        role_assessment = "No target roles supplied; ranking is driven by job requirements supported by the uploaded resume."
+    resume_text = analysis.text.strip()
+    if len(resume_text) > MAX_PROMPT_RESUME_CHARS:
+        resume_text = f"{resume_text[:MAX_PROMPT_RESUME_CHARS]}\n... [resume text truncated for prompt size]"
 
-    # ── Structured match reasoning ───────────────────────────────────────
-    strengths_section = "## Key Strengths\n" + "\n".join(f"- {term}" for term in scored_job.key_strengths)
-    missing = scored_job.missing_requirements
-    if missing:
-        missing_block = "\n".join(f"- **{term}** — add only if your resume has truthful supporting evidence." for term in missing[:12])
-        missing_section = f"## Missing Requirements / Missing Skills & Keywords\n{missing_block}"
-    else:
-        missing_section = "## Missing Requirements / Missing Skills & Keywords\nNo missing requirements detected from extracted job signals."
+    job_context = _job_context(job)
+    if len(job_context) > 16_000:
+        job_context = f"{job_context[:16_000]}\n... [job context truncated for prompt size]"
 
-    evidence_section = "## Relevant Resume Evidence\n" + "\n".join(
-        f"- {line}" for line in scored_job.relevant_resume_evidence
-    )
-    concerns_section = "## Concerns\n" + "\n".join(f"- {concern}" for concern in scored_job.concerns)
-    industry_section = f"## Category Fit\n{scored_job.category_fit}"
+    return f"""# Resume Review Report Generator — {job.title or 'Untitled Role'}
 
-    # ── Step-by-step revision prompts ────────────────────────────────────
-    revision_steps: list[str] = []
-    if role_match_tokens:
-        revision_steps.append(f"1. **Highlight role keywords.** Ensure \"{', '.join(sorted(role_match_tokens))}\" appear prominently in your summary and experience sections.")
-    else:
-        revision_steps.append("1. **Lead with strongest evidence.** Move the most relevant supported skills and accomplishments into the first half of the resume.")
-    if missing:
-        revision_steps.append(f"2. **Close real gaps.** If truthful, add evidence for: {', '.join(missing[:8])}.")
-    else:
-        revision_steps.append("2. **Preserve requirement coverage.** Keep the matched skills visible and concrete.")
-    if scored_job.category == "Uncategorized" or scored_job.category_fit.startswith("Transferable"):
-        revision_steps.append("3. **Strengthen category signal.** Add domain-specific outcomes, users, metrics, or regulated-context details where truthful.")
-    revision_steps.append("4. **Quantify achievements.** Replace vague claims with numbers: '% improvement', 'team size', 'latency', 'revenue', or 'cost' impact.")
-    revision_steps.append(f"5. **Proofread for context.** Re-read the job description at {job.final_url or job.url or '(URL not available)'} and align bullet order with its listed requirements.")
+You are an expert resume reviewer and technical hiring strategist. Generate a finished Markdown report, not instructions. The report must deeply analyze the uploaded resume against the selected job or category while preserving strong existing content by default.
 
-    revision_block = "\n".join(revision_steps)
+## Non-Negotiable Rules
+- Use only facts present in the uploaded resume and job context. Do not invent employers, dates, titles, degrees, certifications, tools, metrics, awards, publications, clearances, or contact details.
+- Default to preservation. Keep existing content unless the report explicitly says to CHANGE, ADD, REMOVE, or reorder it.
+- Prefer targeted edits over rewrites. Explain what each edit fixes and what risk it avoids.
+- Rewritten bullets must preserve the original meaning and seniority. If a metric is missing, write `[add measured impact if true]` rather than fabricating a number.
+- Separate proven resume evidence from keywords that are missing, weakly supported, or unsupported.
+- Warn against changes that would make the resume worse: keyword stuffing, inflated claims, generic phrasing, deleting differentiating projects, or damaging ATS readability.
+- Return Markdown only, suitable to save directly as a `.md` file.
 
-    # ── Assemble prompt ──────────────────────────────────────────────────
-    region_info = f"**Region:** {scored_job.region}  \n**Work model:** {scored_job.remote_label}" if scored_job.region != "Unknown" else ""
+## Required Markdown Report Structure
+Use these top-level sections exactly:
+1. `# Resume Review Report — {job.title or scored_job.category or 'Target Role'}`
+2. `## Executive Summary`
+3. `## Overall Evaluation`
+4. `## Source and Parsing Notes`
+5. `## Major Strengths`
+6. `## Major Weaknesses`
+7. `## Missing Keywords`
+8. `## Missing Experiences`
+9. `## Formatting Feedback`
+10. `## Structure Feedback`
+11. `## Job-Specific Tailoring Advice`
+12. `## Rewritten Bullet Suggestions`
+13. `## Project Recommendations`
+14. `## Content Prioritization Recommendations`
+15. `## Risks and Warnings`
+16. `## KEEP`
+17. `## CHANGE`
+18. `## ADD`
+19. `## REMOVE`
+20. `## DO NOT TOUCH`
+21. `## Agent-Friendly Implementation Checklist`
 
-    return f"""# Resume Improvement Prompt — {job.title or 'Untitled Role'}
+The checklist must use checkbox bullets and be specific enough for another AI agent or human reviewer to execute step by step.
+
+## Input Guidance
+{format_guide}
 
 ## Job Snapshot
 - **Title:** {job.title or 'N/A'}
 - **Company:** {job.company or 'N/A'}
 - **Score:** {scored_job.score:.1f}/100 — {scored_job.explanation}
 - **Category:** {scored_job.category}
-{region_info}
+- **Category fit:** {scored_job.category_fit}
+- **Target roles:** {target_role_text}
+- **Target industries/categories:** {target_industry_text}
+- **Matched terms:** {matched_terms}
+- **Missing terms:** {missing_terms}
+- **Key strengths:** {strengths}
+- **Missing requirements:** {missing_requirements}
+- **Role overlap tokens:** {role_token_text}
+- **Role-fit assessment:** {role_fit_pct:.0f}%
+- **Industry assessment:** {industry_pct:.0f}%
+- **Region:** {scored_job.region}
+- **Work model:** {scored_job.remote_label}
+- **URL:** {url}
 
-{format_guide}
+## Structured Resume Evidence
+{evidence}
 
----
+## Concerns
+{concerns}
 
-{role_assessment}
+## Job Context
+```text
+{job_context}
+```
 
----
+## Uploaded Resume Metadata
+{analysis.facts_markdown}
 
-{strengths_section}
+## Uploaded Resume Text to Review
+```text
+{resume_text}
+```
+"""
 
----
 
-{missing_section}
+def build_improvement_report(
+    scored_job: ScoredJob,
+    analysis: UploadedResumeAnalysis,
+    *,
+    target_roles: Sequence[str],
+    target_industries: Sequence[str],
+    generation_note: str | None = None,
+) -> str:
+    """Build a finished Markdown resume review report without external calls."""
+    job = scored_job.job
+    resume_lines = _resume_lines(analysis.text)
+    headline = resume_lines[0] if resume_lines else "No headline detected"
+    target_role = job.title or (target_roles[0] if target_roles else "target role")
+    target_category = scored_job.category if scored_job.category != "Uncategorized" else (target_industries[0] if target_industries else "selected category")
+    note = generation_note or "Deterministic local report generated from extracted resume text and job metadata."
+    job_keywords = _job_keywords(job, scored_job, target_roles, target_industries)
+    keyword_rows = _keyword_evidence_rows(job_keywords, analysis.text)
+    missing_rows = _keyword_evidence_rows(scored_job.missing_requirements or scored_job.missing_terms, analysis.text)
+    evidence_lines = _evidence_lines(resume_lines, (*scored_job.matched_terms, *job_keywords))
+    rewrite_candidates = _rewrite_candidates(resume_lines)
+    matched_text = ", ".join(scored_job.matched_terms) or "None detected"
+    missing_text = ", ".join(scored_job.missing_requirements or scored_job.missing_terms) or "None detected"
+    strengths = "\n".join(f"- {value}" for value in scored_job.key_strengths) or "- Extractable resume content exists; preserve factual claims while improving targeting."
+    weaknesses = "\n".join(f"- {value}" for value in scored_job.concerns) or "- No major weaknesses were detected from available text."
+    keyword_text = "\n".join(keyword_rows) or "- No job/category keywords were available to classify."
+    missing_experience_text = "\n".join(missing_rows) or "- No missing requirements were extracted."
+    preserve = "\n".join(f"- Keep `{line}` because it provides relevant evidence." for line in evidence_lines[:5]) or f"- Keep the candidate identity/headline as extracted: `{headline}`."
+    rewrites = _rewrite_items(rewrite_candidates, target_role)
+    project_ordering = _prioritization_items(resume_lines, job_keywords)
 
----
+    return f"""# Resume Review Report — {target_role}
 
-{industry_section}
+## Executive Summary
+- **Generation mode:** {note}
+- **Target:** {target_role} at {job.company or 'the selected company'}.
+- **Fit signal:** {scored_job.score:.1f}/100 in `{target_category}`.
+- **Matched terms:** {matched_text}.
+- **Main gaps:** {missing_text}.
+- **Preservation rule:** preserve strong existing resume content. Apply only justified edits listed below.
 
----
+## Overall Evaluation
+- {scored_job.explanation}
+- {scored_job.category_fit}
+- The resume should be tailored by moving supported evidence forward, not by rewriting the whole document.
 
-{evidence_section}
+## Source and Parsing Notes
+- **Source file:** {analysis.filename}
+- **Detected source type:** {analysis.kind}
+- {_source_note(analysis.kind)}
+- **Likely headline/name:** {headline}
 
----
+## Major Strengths
+{strengths}
+{preserve}
 
-{concerns_section}
+## Major Weaknesses
+{weaknesses}
+- Weak or unsupported terms should be treated as candidate questions before becoming resume edits.
 
----
+## Missing Keywords
+{keyword_text}
 
-## Recommended Revision Steps
-{revision_block}
+## Missing Experiences
+{missing_experience_text}
+- Do not add any missing experience unless the candidate confirms real supporting work.
+
+## Formatting Feedback
+- Keep headings conventional: Summary, Skills, Experience, Projects, Education, Certifications.
+- Ensure the final PDF preserves selectable text, links, punctuation, and reading order.
+- Keep bullets concise and action-led; prefer one or two lines per bullet.
+
+## Structure Feedback
+- Put the strongest evidence for `{target_role}` in the first half of the resume.
+- Keep skills grouped by recognizable tools/domains, not a long undifferentiated keyword list.
+- Preserve chronological facts and section boundaries unless a move improves relevance without changing meaning.
+
+## Job-Specific Tailoring Advice
+- Lead with evidence connected to `{target_role}` and `{target_category}`.
+- Surface supported job keywords naturally: {', '.join(job_keywords[:8]) or 'no reliable keyword list available'}.
+- Keep unsupported keywords out of the resume until verified.
+
+## Rewritten Bullet Suggestions
+{rewrites}
+
+## Project Recommendations
+{project_ordering}
+- Add a project only if it reflects real work and closes a gap above.
+
+## Content Prioritization Recommendations
+- Highest priority: supported evidence for matched requirements and role-title overlap.
+- Medium priority: formatting and order changes that improve ATS extraction.
+- Lowest priority: optional wording polish that does not affect fit, clarity, or evidence.
+
+## Risks and Warnings
+- Do not keyword-stuff unsupported terms.
+- Do not inflate seniority, scope, ownership, domains, tools, degrees, certifications, dates, or metrics.
+- Do not delete differentiating technical evidence just because it is not a perfect keyword match.
+- Do not edit the PDF binary directly; edit the source document and export again.
+
+## KEEP
+{preserve}
+- Keep factual employers, titles, dates, education, certifications, and contact details unchanged unless verified.
+
+## CHANGE
+{_recommended_change_items(scored_job, target_role, target_category, keyword_rows, missing_rows)}
+
+## ADD
+- Add supported missing keywords only when they already have truthful resume evidence.
+- Add verified metrics for scale, performance, adoption, revenue, reliability, compliance, or team size where true.
+- Add a short targeted summary only if it improves clarity without repeating the skills list.
+
+## REMOVE
+- Remove duplicate bullets that repeat the same tool/action without new impact.
+- Remove unsupported keyword stuffing.
+- Remove obsolete or low-signal details only after stronger evidence is preserved elsewhere.
+
+## DO NOT TOUCH
+- Do not change facts not discussed in this report.
+- Do not rewrite strong bullets that already provide relevant evidence.
+- Do not invent metrics, employers, dates, tools, degrees, certifications, or responsibilities.
+
+## Agent-Friendly Implementation Checklist
+- [ ] Read `KEEP` and `DO NOT TOUCH` before editing anything.
+- [ ] Move the strongest supported evidence for `{target_role}` into the first half of the resume.
+- [ ] Apply each `CHANGE` item only where it preserves the original fact.
+- [ ] Add only supported items from `ADD`; ask the candidate before adding unsupported gaps.
+- [ ] Remove only duplicate, unsupported, or low-signal content listed in `REMOVE`.
+- [ ] Re-export and inspect the final PDF or rendered resume for text selection, link preservation, and reading order.
 """
 
 
 # ── Internal helpers ─────────────────────────────────────────────────────────
+
+def _job_context(job: JobRecord) -> str:
+    raw = job.raw
+    parts: list[str] = []
+    for key in (
+        "job_description",
+        "description",
+        "summary",
+        "company_description",
+        "job_seniority",
+        "employment_statuses",
+        "requirements",
+        "qualifications",
+        "skills",
+        "location",
+    ):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(f"{key}: {value.strip()}")
+        elif isinstance(value, (list, tuple)) and value:
+            parts.append(f"{key}: {', '.join(str(item) for item in value)}")
+        elif isinstance(value, dict) and value:
+            parts.append(f"{key}: {value}")
+    return "\n\n".join(parts).strip() or "No detailed job description was available; use only the job snapshot and scoring terms."
+
+
+def _resume_lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _source_note(kind: str) -> str:
+    if kind == "pdf":
+        return "PDF text was extracted before analysis. Verify reading order, columns, links, and special characters against the original PDF."
+    if kind == "latex":
+        return "LaTeX source was parsed to text before analysis. Apply edits in the `.tex` source and recompile."
+    return "Plain text or Markdown was reviewed directly. Export the final resume to a clean PDF for submission if needed."
+
+
+def _job_keywords(job: JobRecord, scored_job: ScoredJob, target_roles: Sequence[str], target_industries: Sequence[str]) -> list[str]:
+    ordered: list[str] = []
+    for value in (*target_roles, *target_industries, *scored_job.matched_terms, *scored_job.missing_terms, *scored_job.missing_requirements):
+        normalized = _normalize_text(str(value))
+        if normalized and normalized not in ordered:
+            ordered.append(normalized)
+    counts: dict[str, int] = {}
+    for token in _TOKEN_RE.findall(_job_text(job)):
+        if len(token) < 3 or token in _STOP_WORDS:
+            continue
+        counts[token] = counts.get(token, 0) + 1
+    for token, _count in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
+        if token not in ordered:
+            ordered.append(token)
+        if len(ordered) >= 18:
+            break
+    return ordered[:18]
+
+
+def _keyword_evidence_rows(keywords: Sequence[str], resume_text: str) -> list[str]:
+    resume_norm = _normalize_text(resume_text)
+    resume_tokens = _tokenize(resume_norm)
+    rows: list[str] = []
+    for keyword in keywords:
+        normalized = _normalize_text(str(keyword))
+        if not normalized:
+            continue
+        keyword_tokens = _tokenize(normalized)
+        if _contains_phrase(resume_norm, normalized):
+            status = "supported"
+            action = "keep visible and use naturally"
+        elif keyword_tokens and resume_tokens & keyword_tokens:
+            status = "weakly supported"
+            action = "clarify only if the candidate can point to real work"
+        else:
+            status = "not supported by resume text"
+            action = "do not add unless verified by the candidate"
+        rows.append(f"- **{keyword}** — `{status}`; {action}.")
+    return rows
+
+
+def _evidence_lines(lines: Sequence[str], terms: Sequence[str]) -> list[str]:
+    normalized_terms = [_normalize_text(str(term)) for term in terms if str(term).strip()]
+    selected: list[str] = []
+    for line in lines:
+        normalized_line = _normalize_text(line)
+        if any(term and _contains_phrase(normalized_line, term) for term in normalized_terms):
+            selected.append(line)
+        elif len(selected) < 3 and len(line) >= 35:
+            selected.append(line)
+        if len(selected) >= 8:
+            break
+    return selected
+
+
+def _rewrite_candidates(lines: Sequence[str]) -> list[str]:
+    candidates: list[str] = []
+    action_tokens = {"built", "created", "developed", "designed", "led", "launched", "managed", "improved", "reduced", "increased", "implemented"}
+    for line in lines:
+        tokens = _tokenize(_normalize_text(line))
+        if len(line) >= 35 and (tokens & action_tokens):
+            candidates.append(line)
+        if len(candidates) >= 4:
+            break
+    if not candidates:
+        candidates = [line for line in lines if len(line) >= 35][:3]
+    return candidates
+
+
+def _recommended_change_items(
+    scored_job: ScoredJob,
+    target_role: str,
+    target_category: str,
+    supported_rows: Sequence[str],
+    unsupported_rows: Sequence[str],
+) -> str:
+    items = [
+        f"- Tune the summary and first experience bullets toward `{target_role}` while preserving original facts.",
+        f"- Place `{target_category}` evidence before less relevant experience when the resume already supports that category.",
+        "- Convert responsibility-only bullets into action + scope + outcome bullets where a truthful outcome is available.",
+    ]
+    if supported_rows:
+        items.append("- Surface supported keywords from the evidence table; these are safer because they already overlap the resume.")
+    if unsupported_rows or scored_job.missing_requirements:
+        items.append("- Treat unsupported terms as candidate questions, not resume edits. Add them only after verification.")
+    return "\n".join(items)
+
+
+def _rewrite_items(candidates: Sequence[str], target_role: str) -> str:
+    if not candidates:
+        return "- No safe bullet-level rewrite candidates were obvious from extracted text. Preserve content and ask the candidate for impact details."
+    rows: list[str] = []
+    for candidate in candidates:
+        rows.append(
+            "\n".join(
+                [
+                    f"- **Original:** {candidate}",
+                    f"  - **Rewrite pattern:** {candidate} — emphasize relevance to `{target_role}` and append `[add measured impact if true]`.",
+                    "  - **Reason:** preserves the original fact while prompting a verified outcome instead of inventing one.",
+                ]
+            )
+        )
+    return "\n".join(rows)
+
+
+def _prioritization_items(lines: Sequence[str], keywords: Sequence[str]) -> str:
+    evidence = _evidence_lines(lines, keywords)
+    if not evidence:
+        return "- Keep current ordering until the candidate identifies which project or role best matches the selected job."
+    items = [f"- Prioritize this evidence near the top: {line}" for line in evidence[:5]]
+    items.append("- De-prioritize older or less relevant entries only after targeted evidence is visible.")
+    return "\n".join(items)
+
 
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9+.#-]{1,}")
 

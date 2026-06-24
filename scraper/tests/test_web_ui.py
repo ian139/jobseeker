@@ -87,10 +87,15 @@ def test_build_tailored_resume_prompt_requires_industry_and_includes_job_resume(
     assert "Healthcare Data Engineer" in prompt
     assert "Acme Health" in prompt
     assert "Python services" in prompt
+    assert "Resume Review Report Generator" in prompt
+    assert "Agent TODO Checklist" in prompt
+    assert "Do Not Touch" in prompt
 
 
 def test_webui_scores_resume_against_market_and_downloads_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    monkeypatch.delenv("LLM_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     settings = AppSettings(_env_file=None)
     storage = JobStorage(settings.job_scraper_db_path)
     storage.upsert_job(_job("job-1", job_title="Clinical Data Engineer", company_name="Acme Health"))
@@ -143,7 +148,9 @@ Python, SQL, FastAPI
     assert 'data-job-id="job-1"' in response.text
     assert "Best-supported US regions" in response.text
     assert "Resume strengths" in response.text
-    assert "Download resume improvement prompt" in response.text
+    assert "Download Markdown review report" in response.text
+    assert "Copy Markdown report" in response.text
+    assert "/jobs/job-1/improvement-report" in response.text
     assert "Category fit" in response.text
     assert "Key strengths" in response.text
     assert "Missing requirements" in response.text
@@ -160,7 +167,7 @@ Python, SQL, FastAPI
     assert 'document.getElementById("detail-panel")' in response.text
     assert response.text.count('name="resume_text"') == 1
     download = client.post(
-        "/jobs/job-1/improvement-prompt",
+        "/jobs/job-1/improvement-report",
         data={
             "resume_filename": "resume.tex",
             "resume_kind": "latex",
@@ -173,9 +180,32 @@ Python, SQL, FastAPI
 
     assert download.status_code == 200
     assert download.headers["content-disposition"].startswith("attachment;")
+    assert download.headers["content-type"].startswith("text/markdown")
+    assert download.headers["content-disposition"].endswith('resume-review-report.md"')
+    assert download.text.startswith("# Resume Review Report — Clinical Data Engineer")
+    assert "Resume Review Report Generator" not in download.text
     assert "Clinical Data Engineer" in download.text
     assert "LaTeX" in download.text
-    assert "Missing Requirements" in download.text
+    assert "## Executive Summary" in download.text
+    assert "## Overall Evaluation" in download.text
+    assert "## Major Strengths" in download.text
+    assert "## Major Weaknesses" in download.text
+    assert "## Missing Keywords" in download.text
+    assert "## Missing Experiences" in download.text
+    assert "## Formatting Feedback" in download.text
+    assert "## Structure Feedback" in download.text
+    assert "## Job-Specific Tailoring Advice" in download.text
+    assert "## Rewritten Bullet Suggestions" in download.text
+    assert "## Project Recommendations" in download.text
+    assert "## Content Prioritization Recommendations" in download.text
+    assert "## Risks and Warnings" in download.text
+    assert "## KEEP" in download.text
+    assert "## CHANGE" in download.text
+    assert "## ADD" in download.text
+    assert "## REMOVE" in download.text
+    assert "## DO NOT TOUCH" in download.text
+    assert "## Agent-Friendly Implementation Checklist" in download.text
+    assert "Built Python services for healthcare analytics teams." in download.text
 
 
 
@@ -214,10 +244,13 @@ def test_webui_handles_matches_refresh_and_favicon(tmp_path: Path, monkeypatch: 
 
     matches = client.get("/matches")
     favicon = client.get("/favicon.ico")
+    legacy_prompt = client.post("/jobs/job-1/improvement-prompt")
 
     assert matches.status_code == 303
     assert matches.headers["location"] == "/"
     assert favicon.status_code == 204
+    assert legacy_prompt.status_code == 307
+    assert legacy_prompt.headers["location"] == "/jobs/job-1/improvement-report"
 
 def _job(
     job_id: str,

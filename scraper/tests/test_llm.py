@@ -38,6 +38,29 @@ def test_llm_uses_configured_chat_completions_base_url(monkeypatch) -> None:
     assert calls[0]["json"]["model"] == "deepseek/deepseek-v4-pro"  # type: ignore[index]
 
 
+def test_llm_review_uses_report_specific_instruction(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        calls.append({"url": url, **kwargs})
+        request = httpx.Request("POST", url)
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "# Resume Review Report — Data Engineer\n\n## Executive Summary\nGood fit."}}]},
+            request=request,
+        )
+
+    monkeypatch.setattr("job_scraper.llm.httpx.post", fake_post)
+    llm = ChatCompletionsResumeLLM("key", "review-model", base_url="https://llm.example/v1")
+
+    result = llm.review(prompt_markdown="# Resume Review Report Generator\n\nCreate report.")
+
+    messages = calls[0]["json"]["messages"]  # type: ignore[index]
+    assert result.startswith("# Resume Review Report")
+    assert "finished resume review report" in messages[0]["content"]
+    assert "rewritten resume" in messages[0]["content"]
+    assert messages[1]["content"].startswith("# Resume Review Report Generator")
+
 def test_llm_error_message_is_provider_neutral(monkeypatch) -> None:
     def fake_post(url: str, **kwargs: object) -> httpx.Response:
         request = httpx.Request("POST", url)

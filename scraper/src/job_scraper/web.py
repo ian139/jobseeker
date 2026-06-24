@@ -8,7 +8,8 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
 from job_scraper.config import AppSettings
-from job_scraper.matching import build_improvement_prompt, score_jobs, summarize_categories
+from job_scraper.llm import ChatCompletionsResumeLLM, ResumeLLMError
+from job_scraper.matching import build_improvement_prompt, build_improvement_report, score_jobs, summarize_categories
 from job_scraper.resume_uploads import (
     ResumeUploadError,
     UploadedResumeAnalysis,
@@ -76,8 +77,12 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         )
         return HTMLResponse(_page("Scored Job Matches", body))
 
-    @app.post("/jobs/{job_id}/improvement-prompt", response_class=PlainTextResponse)
-    def download_improvement_prompt(
+    @app.post("/jobs/{job_id}/improvement-prompt")
+    def legacy_improvement_prompt(job_id: str) -> RedirectResponse:
+        return RedirectResponse(f"/jobs/{quote(job_id, safe='')}/improvement-report", status_code=307)
+
+    @app.post("/jobs/{job_id}/improvement-report", response_class=PlainTextResponse)
+    def download_improvement_report(
         job_id: str,
         resume_filename: str = Form(...),
         resume_kind: str = Form("text"),
@@ -107,10 +112,33 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
             keywords=_split_terms(keywords),
         )[0]
         prompt = build_improvement_prompt(scored, analysis, target_roles=roles, target_industries=industries)
-        filename = f"{_download_slug(job.title or job.theirstack_id)}-resume-improvement-prompt.txt"
+        if settings.llm_api_key.strip():
+            try:
+                report = ChatCompletionsResumeLLM(
+                    settings.llm_api_key,
+                    settings.llm_model,
+                    base_url=settings.llm_base_url,
+                ).review(prompt_markdown=prompt)
+            except ResumeLLMError as exc:
+                report = build_improvement_report(
+                    scored,
+                    analysis,
+                    target_roles=roles,
+                    target_industries=industries,
+                    generation_note=f"LLM report generation failed ({exc}); deterministic local fallback used.",
+                )
+        else:
+            report = build_improvement_report(
+                scored,
+                analysis,
+                target_roles=roles,
+                target_industries=industries,
+                generation_note="LLM_API_KEY is not configured; deterministic local report generated from extracted resume text and job metadata.",
+            )
+        filename = f"{_download_slug(job.title or job.theirstack_id)}-resume-review-report.md"
         return PlainTextResponse(
-            prompt,
-            media_type="text/plain; charset=utf-8",
+            report,
+            media_type="text/markdown; charset=utf-8",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
@@ -214,6 +242,8 @@ def _page(title: str, body: str) -> str:
     .detail-stack .detail-card:target {{ display: block; }}
     .detail-meta {{ display: grid; gap: 0.35rem; margin: 0.75rem 0; }}
     .detail-actions {{ display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }}
+    .action-row {{ align-items: center; }}
+    .copy-status {{ color: #A9B665; font-size: 0.8rem; margin-top: 1rem; }}
     .description {{ background: #0B0F14; border: 1px solid #202832; border-radius: 0.55rem; color: #BDAE93; max-height: 24rem; overflow: auto; padding: 0.75rem; white-space: pre-wrap; }}
     .requirements {{ max-height: 16rem; }}
     .external-url {{ overflow-wrap: anywhere; }}
@@ -231,10 +261,11 @@ def _page(title: str, body: str) -> str:
     <section id="console-header" class="console-note console-bar">
       <span class="eyebrow">Market Signal Console</span>
       <h1>{escaped_title}</h1>
-      <p class="lede">Dark, data-dense job intelligence for selecting target sectors, scoring resume fit, and generating precise resume-improvement prompts from local SQLite data.</p>
+      <p class="lede">Dark, data-dense job intelligence for selecting target sectors, scoring resume fit, and generating Markdown resume-review reports from local SQLite data.</p>
     </section>
     {body}
     {_detail_selection_script()}
+    {_copy_report_script()}
   </main>
 </body>
 </html>"""
@@ -279,6 +310,35 @@ def _detail_selection_script() -> str:
   window.addEventListener("hashchange", selectFromHash);
   selectFromHash();
 })();
+</script>"""
+
+def _copy_report_script() -> str:
+    return """<script>
+document.addEventListener('click', async (event) => {
+  const target = event.target;
+  const button = target instanceof Element ? target.closest('[data-copy-report]') : null;
+  if (!button) return;
+  const form = document.getElementById('resume-prompt-payload');
+  const status = document.getElementById(button.getAttribute('aria-describedby'));
+  if (!form) return;
+  button.disabled = true;
+  if (status) status.textContent = 'Generating Markdown...';
+  try {
+    const response = await fetch(button.dataset.copyReport, {
+      method: 'POST',
+      body: new FormData(form),
+      headers: { 'Accept': 'text/markdown' },
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const markdown = await response.text();
+    await navigator.clipboard.writeText(markdown);
+    if (status) status.textContent = 'Markdown copied to clipboard.';
+  } catch (error) {
+    if (status) status.textContent = `Copy failed: ${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+});
 </script>"""
 
 
@@ -439,8 +499,12 @@ def _job_detail_page(job: JobRecord) -> str:
 
 def _detail_card(scored: object) -> str:
     job = getattr(scored, "job")
-    actions = f"""<div class="detail-actions">
-  <button class="download-prompt" type="submit" form="resume-prompt-payload" formaction="/jobs/{quote(job.theirstack_id, safe='')}/improvement-prompt" formmethod="post">Download resume improvement prompt</button>
+    action = f"/jobs/{quote(job.theirstack_id, safe='')}/improvement-report"
+    status_id = f"copy-status-{_dom_id(job.theirstack_id)}"
+    actions = f"""<div class="detail-actions action-row">
+  <button class="download-prompt" type="submit" form="resume-prompt-payload" formaction="{action}" formmethod="post">Download Markdown review report</button>
+  <button class="ghost-button copy-report" type="button" data-copy-report="{action}" aria-describedby="{status_id}">Copy Markdown report</button>
+  <span id="{status_id}" class="copy-status" role="status" aria-live="polite"></span>
   <a class="button ghost-button" href="/jobs/{quote(job.theirstack_id, safe='')}">Open full details</a>
 </div>"""
     return f"""<article class="detail-card detail-pane" id="{_job_detail_id(job)}">

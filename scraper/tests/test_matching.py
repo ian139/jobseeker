@@ -10,6 +10,7 @@ from job_scraper.matching import (
     CategorySummary,
     ScoredJob,
     build_improvement_prompt,
+    build_improvement_report,
     score_jobs,
     summarize_categories,
 )
@@ -405,9 +406,60 @@ def test_improvement_prompt_includes_job_and_resume_gaps() -> None:
     assert "PDF" in prompt
     assert "Input Guidance" in prompt
 
-    # Revision steps present
-    assert "Revision Steps" in prompt
-    assert "Quantify" in prompt
+    assert "Resume Review Report Generator" in prompt
+    assert "Required Markdown Report Structure" in prompt
+    assert "Agent-Friendly Implementation Checklist" in prompt
+    assert "Overall Evaluation" in prompt
+    assert "DO NOT TOUCH" in prompt
+    assert "Uploaded Resume Text to Review" in prompt
+    assert "Python developer with some experience." in prompt
+    assert "Quantify" not in prompt
+
+def test_improvement_report_is_finished_markdown_not_a_prompt() -> None:
+    analysis = _analysis(
+        filename="resume.tex",
+        kind="latex",
+        text="Ada Candidate\nExperience\nBuilt Python services for healthcare analytics teams.\nSkills\nPython SQL FastAPI",
+    )
+    job = _job_record(
+        theirstack_id="report",
+        title="Clinical Data Engineer",
+        company="Acme Health",
+        raw={"job_description": "Build Python services for healthcare analytics with SQL and FastAPI."},
+    )
+    scored = score_jobs([job], analysis, target_roles=["Data Engineer"], target_industries=["Healthcare"], keywords=["Python", "SQL"])
+
+    report = build_improvement_report(
+        scored[0],
+        analysis,
+        target_roles=["Data Engineer"],
+        target_industries=["Healthcare"],
+        generation_note="test report",
+    )
+
+    assert report.startswith("# Resume Review Report — Clinical Data Engineer")
+    assert "Resume Review Report Generator" not in report
+    assert "## Executive Summary" in report
+    assert "## Overall Evaluation" in report
+    assert "## Major Strengths" in report
+    assert "## Major Weaknesses" in report
+    assert "## Missing Keywords" in report
+    assert "## Missing Experiences" in report
+    assert "## Formatting Feedback" in report
+    assert "## Structure Feedback" in report
+    assert "## Job-Specific Tailoring Advice" in report
+    assert "## Rewritten Bullet Suggestions" in report
+    assert "## Project Recommendations" in report
+    assert "## Content Prioritization Recommendations" in report
+    assert "## Risks and Warnings" in report
+    assert "## KEEP" in report
+    assert "## CHANGE" in report
+    assert "## ADD" in report
+    assert "## REMOVE" in report
+    assert "## DO NOT TOUCH" in report
+    assert "## Agent-Friendly Implementation Checklist" in report
+    assert "Built Python services for healthcare analytics teams." in report
+    assert "LaTeX" in report
 
 
 def test_improvement_prompt_latex_guidance() -> None:
@@ -448,8 +500,8 @@ def test_improvement_prompt_missing_skills_section() -> None:
     scored = score_jobs([job], analysis, target_roles=targets, target_industries=industries, keywords=keywords)
     prompt = build_improvement_prompt(scored[0], analysis, target_roles=targets, target_industries=industries)
 
-    assert "Missing Skills" in prompt
-    # Should mention requirements present in the job but absent from the resume.
+    assert "Missing terms" in prompt
+    assert "Missing Keywords" in prompt
     assert "tensorflow" in prompt
 
 

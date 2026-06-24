@@ -69,17 +69,19 @@ def _page(title: str, body: str) -> str:
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{escaped_title}</title>
   <style>
-    :root {{ color-scheme: light dark; }}
-    body {{ font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem auto; max-width: 72rem; padding: 0 1rem; line-height: 1.5; }}
-    .console-note, article, form, .panel {{ border: 1px solid #8a8a8a55; border-radius: 0.75rem; padding: 1rem; margin: 1rem 0; }}
-    .console-note {{ background: #5b8cff18; }}
-    .muted {{ color: #747474; }}
-    label {{ display: block; font-weight: 650; margin-top: 0.75rem; }}
-    input[type="text"], input[type="file"], textarea {{ width: 100%; box-sizing: border-box; margin-top: 0.25rem; }}
+    :root {{ color-scheme: dark; background: #0f172a; color: #e5e7eb; }}
+    body {{ background: #0f172a; color: #e5e7eb; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem auto; max-width: 72rem; padding: 0 1rem; line-height: 1.5; }}
+    .console-note, article, form, .panel {{ background: #111827; border: 1px solid #334155; border-radius: 0.75rem; padding: 1rem; margin: 1rem 0; box-shadow: 0 1px 2px #0006; }}
+    .console-note {{ background: #1e3a5f; }}
+    .muted {{ color: #cbd5e1; }}
+    label {{ display: block; color: #f8fafc; font-weight: 650; margin-top: 0.75rem; }}
+    input[type="text"], input[type="file"], textarea {{ background: #020617; color: #f8fafc; border: 1px solid #475569; border-radius: 0.4rem; width: 100%; box-sizing: border-box; margin-top: 0.25rem; padding: 0.5rem; }}
+    input[type="file"]::file-selector-button {{ background: #2563eb; color: #ffffff; border: 0; border-radius: 0.35rem; padding: 0.45rem 0.7rem; margin-right: 0.75rem; cursor: pointer; }}
     textarea {{ min-height: 34rem; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
-    button {{ margin-top: 1rem; padding: 0.55rem 0.85rem; font-weight: 650; cursor: pointer; }}
-    pre {{ white-space: pre-wrap; overflow-wrap: anywhere; }}
-    a {{ color: #3366cc; }}
+    button {{ background: #2563eb; color: #ffffff; border: 0; border-radius: 0.45rem; margin-top: 1rem; padding: 0.55rem 0.85rem; font-weight: 650; cursor: pointer; }}
+    button:hover, input[type="file"]::file-selector-button:hover {{ background: #1d4ed8; }}
+    pre {{ background: #020617; color: #e5e7eb; border: 1px solid #334155; border-radius: 0.5rem; padding: 1rem; white-space: pre-wrap; overflow-wrap: anywhere; }}
+    a {{ color: #93c5fd; }}
   </style>
 </head>
 <body>

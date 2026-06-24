@@ -1,7 +1,7 @@
 search:
   posted_at_max_age_days: 1
   discovered_overlap_minutes: 10
-  limit: 100
+  limit: 25
   max_pages: 5
   include_total_results: false
   order_by:

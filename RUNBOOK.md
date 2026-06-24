@@ -29,14 +29,26 @@ cp .env.example .env
 cp config/filters.example.yaml config/filters.yaml
 ```
 
-Minimum `.env` for live scraping:
+Minimum `.env` for public JSON imports:
 
 ```dotenv
-THEIRSTACK_API_KEY=<your key>
+JOB_SOURCE=public-json
+PUBLIC_JSON_BASE_URL=https://doomersareretardedcommunists.com/
 JOB_SCRAPER_DB_PATH=data/jobs.sqlite3
-OPENAI_API_KEY=
-OPENAI_MODEL=gpt-4o-mini
+LLM_API_KEY=
+LLM_MODEL=gpt-4o-mini
+LLM_BASE_URL=https://api.openai.com/v1
 APPLICATION_PACK_DIR=data/application_packs
+```
+
+Set `JOB_SOURCE=theirstack` and `THEIRSTACK_API_KEY=<your key>` when you want live TheirStack API pulls.
+
+For DeepSeek V4 Pro through OpenRouter, use:
+
+```dotenv
+LLM_API_KEY=<your OpenRouter key>
+LLM_BASE_URL=https://openrouter.ai/api/v1
+LLM_MODEL=deepseek/deepseek-v4-pro
 ```
 
 ## Scraper commands
@@ -44,20 +56,20 @@ APPLICATION_PACK_DIR=data/application_packs
 | Goal | Command |
 | --- | --- |
 | Create tables | `job-scraper init` |
-| Estimate TheirStack matches | `job-scraper preview-count --filters config/filters.yaml` |
-| Run one sync | `job-scraper run-once --filters config/filters.yaml` |
-| Run immediately, then every 24 hours | `job-scraper daemon --filters config/filters.yaml` |
-| Import supplemental public JSON jobs | `job-scraper import-public-json` |
+| Estimate TheirStack matches | `JOB_SOURCE=theirstack job-scraper preview-count --filters config/filters.yaml` |
+| Import public JSON once (default) | `job-scraper run-once` |
+| Run TheirStack sync once | `JOB_SOURCE=theirstack job-scraper run-once --filters config/filters.yaml` |
+| Run configured source immediately, then every 24 hours | `job-scraper daemon` |
+| Import public JSON jobs directly | `job-scraper import-public-json` |
 | Start local web UI | `job-scraper webui --host 127.0.0.1 --port 8000` |
 
-## Safe first live run
+## Safe first run
 
-1. Make `config/filters.yaml` intentionally narrow.
-2. Run `job-scraper preview-count --filters config/filters.yaml`.
-3. If the result count is acceptable, run `job-scraper run-once --filters config/filters.yaml`.
-4. Open the UI with `job-scraper webui --host 127.0.0.1 --port 8000`.
-5. Review <http://127.0.0.1:8000>.
-6. Only then start `job-scraper daemon --filters config/filters.yaml` for recurring pulls.
+1. Run `job-scraper init`.
+2. Run `job-scraper run-once` to import the default public JSON feed.
+3. Open the UI with `job-scraper webui --host 127.0.0.1 --port 8000`.
+4. Review <http://127.0.0.1:8000>.
+5. If you want live TheirStack API pulls instead, set `JOB_SOURCE=theirstack`, make `config/filters.yaml` intentionally narrow, run `job-scraper preview-count --filters config/filters.yaml`, then run `job-scraper run-once --filters config/filters.yaml`.
 
 TheirStack charges by returned job. `preview-count` is the low-risk estimate step.
 Current TheirStack plan limit observed here: keep `search.limit` at `25` or lower. A higher per-page limit can return `403` with `Premium functionality limitation`.
@@ -70,7 +82,7 @@ Create a profile:
 cp config/resume-profile.example.yaml config/resume-profile.yaml
 ```
 
-Generate a deterministic resume without OpenAI:
+Generate a deterministic resume without an LLM:
 
 ```bash
 job-scraper generate-resume \
@@ -120,4 +132,4 @@ Allowed contact statuses: `connected`, `replied`, `skipped`, `do_not_contact`.
 - Empty web UI: SQLite has no saved jobs yet. Run `job-scraper run-once` or `job-scraper import-public-json`.
 - Live sync fails immediately: confirm `THEIRSTACK_API_KEY` is set in `scraper/.env`.
 - `TheirStack returned 403` with `Premium functionality limitation`: set `search.limit: 25` or lower in `config/filters.yaml`.
-- Resume generation contacts OpenAI only when `OPENAI_API_KEY` is set and `--no-llm` is not passed.
+- Resume generation contacts a chat-completions LLM provider only when `LLM_API_KEY` is set and `--no-llm` is not passed.

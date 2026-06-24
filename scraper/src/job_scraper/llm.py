@@ -13,12 +13,20 @@ class ResumeLLMError(RuntimeError):
     pass
 
 
-class OpenAIResumeLLM:
+class ChatCompletionsResumeLLM:
     model_name: str
 
-    def __init__(self, api_key: str, model: str, timeout_seconds: float = 30.0) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        *,
+        base_url: str = "https://api.openai.com/v1",
+        timeout_seconds: float = 30.0,
+    ) -> None:
         self._api_key = api_key
         self.model_name = model
+        self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
 
     def rewrite(
@@ -56,21 +64,21 @@ class OpenAIResumeLLM:
         headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
         try:
             response = httpx.post(
-                "https://api.openai.com/v1/chat/completions",
+                f"{self._base_url}/chat/completions",
                 headers=headers,
                 json=payload,
                 timeout=self._timeout_seconds,
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            raise ResumeLLMError(f"OpenAI request failed with status {exc.response.status_code}") from exc
+            raise ResumeLLMError(f"LLM request failed with status {exc.response.status_code}") from exc
         except httpx.HTTPError as exc:
             raise ResumeLLMError(str(exc)) from exc
 
         data = response.json()
         content = _message_content(data)
         if content is None:
-            raise ResumeLLMError("OpenAI response did not contain Markdown resume content")
+            raise ResumeLLMError("LLM response did not contain Markdown resume content")
         return content
 
 
@@ -93,4 +101,4 @@ def _message_content(data: Mapping[str, Any]) -> str | None:
     return content
 
 
-__all__ = ["OpenAIResumeLLM", "ResumeLLM", "ResumeLLMError"]
+__all__ = ["ChatCompletionsResumeLLM", "ResumeLLM", "ResumeLLMError"]

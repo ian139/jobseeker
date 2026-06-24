@@ -29,6 +29,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "outreach":
         return _handle_outreach(args, settings, parser)
 
+    if args.command == "webui":
+        from job_scraper.web import run_web_ui
+
+        run_web_ui(host=args.host, port=args.port, settings=settings)
+        return 0
+
     if args.command == "init":
         storage = JobStorage(settings.job_scraper_db_path)
         storage.initialize()
@@ -280,6 +286,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     preview = subparsers.add_parser("preview-count", help="Fetch a blurred TheirStack total count without saving jobs")
     preview.add_argument("--filters", default="config/filters.yaml", help="Path to the YAML filter file")
+
+    webui = subparsers.add_parser("webui", help="Run the local scraped-jobs resume prompt web UI")
+    webui.add_argument("--host", default="127.0.0.1", help="Host interface for the web UI")
+    webui.add_argument("--port", type=int, default=8000, help="Port for the web UI")
 
     generate_resume = subparsers.add_parser("generate-resume", help="Generate a tailored Markdown resume for a saved job")
     generate_resume.add_argument("--job-id", required=True, help="Saved TheirStack job id")

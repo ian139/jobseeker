@@ -110,6 +110,7 @@ def test_webui_scores_resume_against_market_and_downloads_prompt(tmp_path: Path,
     assert 'id="resume-file"' in response.text
     assert "Clinical Data Engineer" in response.text
     assert 'href="/jobs/job-1/prompt"' in response.text
+    assert 'href="/jobs/job-1"' in response.text
 
     latex = b"""
 Ada Candidate
@@ -137,8 +138,15 @@ Python, SQL, FastAPI
     assert "Best-supported US regions" in response.text
     assert "Resume strengths" in response.text
     assert "Download resume improvement prompt" in response.text
+    assert 'data-detail-target="job-job-1"' in response.text
+    assert "Original listing:" in response.text
+    assert "Application link:" in response.text
     assert "https://acme.example/jobs/123" in response.text
     assert "Build Python services for healthcare analytics." in response.text
+    assert "Requirements" in response.text
+    assert "Healthcare analytics" in response.text
+    assert "const panel = document.getElementById(&quot;detail-panel&quot;);" not in response.text
+    assert 'document.getElementById("detail-panel")' in response.text
     assert response.text.count('name="resume_text"') == 1
     download = client.post(
         "/jobs/job-1/improvement-prompt",
@@ -158,6 +166,33 @@ Python, SQL, FastAPI
     assert "LaTeX" in download.text
     assert "Missing Skills" in download.text
 
+
+
+def test_job_detail_route_shows_complete_listing_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    settings = AppSettings(_env_file=None)
+    storage = JobStorage(settings.job_scraper_db_path)
+    storage.upsert_job(_job("job-1", job_title="Clinical Data Engineer", company_name="Acme Health"))
+    app = create_app(settings)
+    client = TestClient(app)
+
+    response = client.get("/jobs/job-1")
+
+    assert response.status_code == 200
+    assert "Clinical Data Engineer" in response.text
+    assert "Acme Health" in response.text
+    assert "US, Remote" in response.text
+    assert "Score / match:" in response.text
+    assert "Not scored in this view" in response.text
+    assert "Original listing:" in response.text
+    assert "https://www.linkedin.com/jobs/view/123" in response.text
+    assert "Application link:" in response.text
+    assert "https://acme.example/jobs/123" in response.text
+    assert "Build Python services for healthcare analytics." in response.text
+    assert "Requirements" in response.text
+    assert "Healthcare analytics" in response.text
+    assert 'target="_blank" rel="noopener noreferrer"' in response.text
+    assert 'href="/jobs/job-1/prompt"' in response.text
 
 
 def test_webui_handles_matches_refresh_and_favicon(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -194,4 +229,5 @@ def _job(
         "source_url": "https://www.linkedin.com/jobs/view/123",
         "final_url": "https://acme.example/jobs/123",
         "job_description": "Build Python services for healthcare analytics.",
+        "requirements": ["Python", "Healthcare analytics", "Stakeholder collaboration"],
     }

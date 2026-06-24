@@ -37,6 +37,13 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     def favicon() -> Response:
         return Response(status_code=204)
 
+    @app.get("/jobs/{job_id}", response_class=HTMLResponse)
+    def job_detail(job_id: str) -> HTMLResponse:
+        job = storage.get_job(job_id)
+        if job is None:
+            return _unknown_job_response(job_id)
+        return HTMLResponse(_page(job.title or "Job Detail", _job_detail_page(job)))
+
     @app.post("/matches", response_class=HTMLResponse)
     def create_matches(
         target_roles: str = Form(""),
@@ -200,10 +207,16 @@ def _page(title: str, body: str) -> str:
     .category-block:first-child {{ border-top: 0; }}
     .detail-stack {{ position: sticky; top: 1rem; }}
     .detail-card {{ display: none; }}
-    .detail-card:first-child {{ display: block; }}
+    .detail-card:first-child, .detail-card.is-selected, .detail-card:target {{ display: block; }}
+    .detail-stack.has-selection .detail-card:first-child {{ display: none; }}
+    .detail-stack.has-selection .detail-card.is-selected {{ display: block; }}
     .detail-stack:has(.detail-card:target) .detail-card {{ display: none; }}
     .detail-stack .detail-card:target {{ display: block; }}
+    .detail-meta {{ display: grid; gap: 0.35rem; margin: 0.75rem 0; }}
+    .detail-actions {{ display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }}
     .description {{ background: #0B0F14; border: 1px solid #202832; border-radius: 0.55rem; color: #BDAE93; max-height: 24rem; overflow: auto; padding: 0.75rem; white-space: pre-wrap; }}
+    .requirements {{ max-height: 16rem; }}
+    .external-url {{ overflow-wrap: anywhere; }}
     pre {{ background: #0B0F14; color: #EBDBB2; border: 1px solid #2B3440; border-radius: 0.5rem; padding: 1rem; white-space: pre-wrap; overflow-wrap: anywhere; }}
     .legacy-list {{ display: grid; gap: 0.75rem; margin-top: 1rem; }}
     @media (max-width: 980px) {{
@@ -221,9 +234,52 @@ def _page(title: str, body: str) -> str:
       <p class="lede">Dark, data-dense job intelligence for selecting target sectors, scoring resume fit, and generating precise resume-improvement prompts from local SQLite data.</p>
     </section>
     {body}
+    {_detail_selection_script()}
   </main>
 </body>
 </html>"""
+
+
+def _detail_selection_script() -> str:
+    return """<script>
+(() => {
+  const panel = document.getElementById("detail-panel");
+  if (!panel) return;
+  const cards = Array.from(panel.querySelectorAll(".detail-card[id]"));
+  if (!cards.length) return;
+  const links = Array.from(document.querySelectorAll("[data-detail-target]"));
+  const cardsById = new Map(cards.map((card) => [card.id, card]));
+
+  function selectCard(id) {
+    const card = cardsById.get(id) || cards[0];
+    panel.classList.toggle("has-selection", card !== cards[0]);
+    for (const item of cards) {
+      item.classList.toggle("is-selected", item === card);
+      item.setAttribute("aria-hidden", item === card ? "false" : "true");
+    }
+    for (const link of links) {
+      const isActive = link.getAttribute("data-detail-target") === card.id;
+      link.setAttribute("aria-current", isActive ? "true" : "false");
+      const row = link.closest("[data-job-id]");
+      if (row) row.classList.toggle("is-selected", isActive);
+    }
+  }
+
+  function selectFromHash() {
+    const id = window.location.hash.slice(1);
+    selectCard(cardsById.has(id) ? id : cards[0].id);
+  }
+
+  for (const link of links) {
+    link.addEventListener("click", () => {
+      const id = link.getAttribute("data-detail-target");
+      if (id) window.setTimeout(() => selectCard(id), 0);
+    });
+  }
+  window.addEventListener("hashchange", selectFromHash);
+  selectFromHash();
+})();
+</script>"""
 
 
 def _intake_page(jobs: list[JobRecord]) -> str:
@@ -258,7 +314,7 @@ def _intake_page(jobs: list[JobRecord]) -> str:
     </div>
     <h3>Recent scraped roles</h3>
     <table>
-      <thead><tr><th>Role</th><th>Company</th><th>Country</th><th>Date</th><th>Prompt</th></tr></thead>
+      <thead><tr><th>Role</th><th>Company</th><th>Country</th><th>Date</th><th>Actions</th></tr></thead>
       <tbody>{recent_rows}</tbody>
     </table>
   </section>
@@ -317,11 +373,11 @@ def _matches_page(
 def _compact_job_row(job: JobRecord) -> str:
     job_path_id = quote(job.theirstack_id, safe="")
     return f"""<tr>
-  <td>{html.escape(job.title or "Untitled role")}</td>
+  <td><a href="/jobs/{job_path_id}">{html.escape(job.title or "Untitled role")}</a></td>
   <td>{html.escape(job.company or "Unknown")}</td>
   <td>{html.escape(job.country_code or "")}</td>
   <td>{html.escape(job.date_posted or "")}</td>
-  <td><a class="button ghost-button" href="/jobs/{job_path_id}/prompt">Tailor prompt</a></td>
+  <td class="detail-actions"><a class="button ghost-button" href="/jobs/{job_path_id}">Details</a><a class="button ghost-button" href="/jobs/{job_path_id}/prompt">Tailor prompt</a></td>
 </tr>"""
 
 
@@ -359,30 +415,34 @@ def _result_row(scored: object) -> str:
     missing = "".join(f'<span class="badge gap">{html.escape(term)}</span>' for term in getattr(scored, "missing_terms", [])[:4])
     return f"""<tr class="job-row {_score_tier(float(getattr(scored, "score", 0.0)))}" data-job-id="{html.escape(job.theirstack_id)}">
   <td class="score">{int(round(float(getattr(scored, "score", 0.0))))}</td>
-  <td><a href="#{detail_id}">{html.escape(job.title or "Untitled role")}</a></td>
+  <td><a href="#{detail_id}" data-detail-target="{detail_id}" aria-controls="{detail_id}">{html.escape(job.title or "Untitled role")}</a></td>
   <td>{html.escape(job.company or "Unknown")}</td>
   <td>{html.escape(str(getattr(scored, "region", "") or getattr(scored, "remote_label", "")))}</td>
   <td>{matched or '<span class="muted">None</span>'}</td>
   <td>{missing or '<span class="muted">None</span>'}</td>
-  <td><a class="button ghost-button" href="#{detail_id}">Open</a></td>
+  <td><a class="button ghost-button" href="#{detail_id}" data-detail-target="{detail_id}" aria-controls="{detail_id}">Open</a></td>
 </tr>"""
+
+
+def _job_detail_page(job: JobRecord) -> str:
+    job_path_id = quote(job.theirstack_id, safe="")
+    actions = f"""<div class="detail-actions">
+  <a class="button ghost-button" href="/">Back to dashboard</a>
+  <a class="button" href="/jobs/{job_path_id}/prompt">Tailor prompt</a>
+</div>"""
+    return f"""<article class="detail-card detail-pane is-selected" id="{_job_detail_id(job)}">
+  {_job_detail_body(job, scored=None, actions=actions)}
+</article>"""
 
 
 def _detail_card(scored: object) -> str:
     job = getattr(scored, "job")
-    url = job.final_url or job.url or ""
-    description = _job_description(job)
-    return f"""<article class="detail-card detail-pane" id="{_job_detail_id(job)}">
-  <span class="eyebrow">Selected role</span>
-  <h2 class="detail-title">{html.escape(job.title or "Untitled role")}</h2>
-  <p><strong>Company:</strong> {html.escape(job.company or "Unknown company")}</p>
-  <p><strong>Category:</strong> {html.escape(str(getattr(scored, "category", "Uncategorized")))}</p>
-  <p><strong>Score:</strong> <span class="score">{int(round(float(getattr(scored, "score", 0.0))))}</span></p>
-  <p><strong>Region:</strong> {html.escape(str(getattr(scored, "region", "") or getattr(scored, "remote_label", "")))}</p>
-  <p><strong>Link:</strong> {_job_link(url)}</p>
-  <h3>Description</h3>
-  <div class="description">{html.escape(description or "No description available.")}</div>
+    actions = f"""<div class="detail-actions">
   <button class="download-prompt" type="submit" form="resume-prompt-payload" formaction="/jobs/{quote(job.theirstack_id, safe='')}/improvement-prompt" formmethod="post">Download resume improvement prompt</button>
+  <a class="button ghost-button" href="/jobs/{quote(job.theirstack_id, safe='')}">Open full details</a>
+</div>"""
+    return f"""<article class="detail-card detail-pane" id="{_job_detail_id(job)}">
+  {_job_detail_body(job, scored=scored, actions=actions)}
 </article>"""
 
 
@@ -401,27 +461,6 @@ def _hidden_resume_fields(
 <input type="hidden" name="keywords" value="{html.escape(', '.join(keywords))}">"""
 
 
-def _job_card(job: JobRecord) -> str:
-    job_id = html.escape(job.theirstack_id)
-    job_path_id = quote(job.theirstack_id, safe="")
-    title = html.escape(job.title or "Untitled role")
-    company = html.escape(job.company or "Unknown company")
-    country = html.escape(job.country_code or "")
-    date_posted = html.escape(job.date_posted or "")
-    url = job.final_url or job.url or ""
-    escaped_url = html.escape(url)
-    link = f'<p><a href="{escaped_url}">{escaped_url}</a></p>' if url else ""
-    return f"""<article>
-  <h2>{title}</h2>
-  <p><strong>Company:</strong> {company}</p>
-  <p><strong>Country:</strong> {country}</p>
-  <p><strong>Date posted:</strong> {date_posted}</p>
-  {link}
-  <form method="get" action="/jobs/{job_path_id}/prompt">
-    <input type="hidden" name="job_id" value="{job_id}">
-    <button type="submit">Create tailored prompt</button>
-  </form>
-</article>"""
 
 
 def _prompt_form(job: JobRecord) -> str:
@@ -492,19 +531,145 @@ def _download_slug(value: str) -> str:
     return _dom_id(value)[:80] or "job"
 
 
+def _job_detail_body(job: JobRecord, *, scored: object | None, actions: str) -> str:
+    description = _job_description(job)
+    requirements = _job_requirements(job)
+    listing_url = _job_listing_url(job)
+    application_url = _job_application_url(job)
+    application_link = ""
+    if application_url and application_url != listing_url:
+        application_link = f'<p><strong>Application link:</strong> {_job_link(application_url)}</p>'
+    return f"""<span class="eyebrow">Selected role</span>
+  <h2 class="detail-title">{html.escape(job.title or "Untitled role")}</h2>
+  <div class="detail-meta">
+    <p><strong>Company:</strong> {html.escape(job.company or "Unknown company")}</p>
+    <p><strong>Location:</strong> {html.escape(_job_location(job))}</p>
+    {_score_metadata(scored)}
+    <p><strong>Source:</strong> {html.escape(_job_source(job))}</p>
+    <p><strong>Original listing:</strong> {_job_link(listing_url)}</p>
+    {application_link}
+  </div>
+  <h3>Description</h3>
+  <div class="description">{html.escape(description or "No description available.")}</div>
+  <h3>Requirements</h3>
+  <div class="description requirements">{html.escape(requirements or "No requirements extracted from this listing.")}</div>
+  {actions}"""
+
+
+def _score_metadata(scored: object | None) -> str:
+    if scored is None:
+        return '<p><strong>Score / match:</strong> <span class="muted">Not scored in this view. Upload a resume to see match metadata.</span></p>'
+    matched = "".join(f'<span class="badge">{html.escape(term)}</span>' for term in getattr(scored, "matched_terms", [])[:8])
+    missing = "".join(f'<span class="badge gap">{html.escape(term)}</span>' for term in getattr(scored, "missing_terms", [])[:8])
+    return f"""<p><strong>Category:</strong> {html.escape(str(getattr(scored, "category", "Uncategorized")))}</p>
+    <p><strong>Score:</strong> <span class="score">{int(round(float(getattr(scored, "score", 0.0))))}</span></p>
+    <p><strong>Region:</strong> {html.escape(str(getattr(scored, "region", "") or getattr(scored, "remote_label", "")))}</p>
+    <p><strong>Matched:</strong> {matched or '<span class="muted">None</span>'}</p>
+    <p><strong>Missing:</strong> {missing or '<span class="muted">None</span>'}</p>"""
+
+
 def _job_description(job: JobRecord) -> str:
-    for key in ("job_description", "description", "job_text", "summary"):
-        value = job.raw.get(key)
-        if value:
-            return str(value)
-    return ""
+    return _format_detail_text(_job_raw_value(job, ("job_description", "description", "job_text", "summary", "overview")))
 
 
-def _job_link(url: str) -> str:
+def _job_requirements(job: JobRecord) -> str:
+    return _format_detail_text(
+        _job_raw_value(
+            job,
+            (
+                "requirements",
+                "job_requirements",
+                "required_qualifications",
+                "minimum_qualifications",
+                "qualifications",
+                "candidate_requirements",
+                "skills",
+            ),
+        )
+    )
+
+
+def _job_location(job: JobRecord) -> str:
+    raw_location = _job_raw_value(job, ("location", "job_location", "workplace"))
+    if isinstance(raw_location, dict):
+        parts = [
+            str(raw_location[key]).strip()
+            for key in ("city", "state", "region", "country")
+            if raw_location.get(key) not in (None, "")
+        ]
+    else:
+        parts = [str(raw_location).strip()] if raw_location not in (None, "") else []
+    if job.country_code and job.country_code not in parts:
+        parts.append(job.country_code)
+    if job.remote is not None:
+        parts.append("Remote" if job.remote else "On-site / hybrid not specified")
+    return ", ".join(part for part in parts if part) or "Location not listed"
+
+
+def _job_source(job: JobRecord) -> str:
+    source = _job_raw_value(job, ("source", "ats", "job_source"))
+    if source:
+        return str(source)
+    if isinstance(job.raw.get("public_json"), dict):
+        return "public_json"
+    return "Stored job"
+
+
+def _job_listing_url(job: JobRecord) -> str:
+    return _clean_url(job.source_url or job.url or _job_raw_value(job, ("source_url", "url", "link")))
+
+
+def _job_application_url(job: JobRecord) -> str:
+    return _clean_url(job.final_url or _job_raw_value(job, ("final_url", "link_final_url", "application_url")))
+
+
+def _job_link(url: str | None) -> str:
     if not url:
         return '<span class="muted">No URL found</span>'
     escaped_url = html.escape(url)
-    return f'<a href="{escaped_url}">{escaped_url}</a>'
+    return f'<a class="external-url" href="{escaped_url}" target="_blank" rel="noopener noreferrer">{escaped_url}</a>'
+
+
+def _job_raw_value(job: JobRecord, keys: tuple[str, ...]) -> object:
+    for raw in _job_raw_sources(job):
+        for key in keys:
+            value = raw.get(key)
+            if value not in (None, "", [], {}):
+                return value
+    return None
+
+
+def _job_raw_sources(job: JobRecord) -> list[dict[str, object]]:
+    sources: list[dict[str, object]] = [job.raw]
+    public_json = job.raw.get("public_json")
+    if isinstance(public_json, dict):
+        nested_raw = public_json.get("raw")
+        if isinstance(nested_raw, dict):
+            sources.append(nested_raw)
+    return sources
+
+
+def _format_detail_text(value: object) -> str:
+    if value in (None, "", [], {}):
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (list, tuple)):
+        return "\n".join(f"- {_format_detail_text(item)}" for item in value if _format_detail_text(item))
+    if isinstance(value, dict):
+        lines = []
+        for key, item in value.items():
+            text = _format_detail_text(item)
+            if text:
+                lines.append(f"{str(key).replace('_', ' ').title()}: {text}")
+        return "\n".join(lines)
+    return str(value).strip()
+
+
+def _clean_url(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
 
 
 def _list_items(values: object, fallback: str) -> str:

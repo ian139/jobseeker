@@ -1,5 +1,10 @@
 # Agent Operating Notes
 
+## Project design reference
+
+- Use `SCRAPER_DESIGN.md` for general product and visual design ideas.
+- Apply that design direction specifically to the job scraper frontend, including the local resume-prompt web UI in `scraper/src/job_scraper/web.py`.
+
 ## Default coordinator model
 
 Every new feature worktree should have one advisor-enabled parent agent. The parent is the coordinator: it plans, splits work, assigns file ownership, reviews worker output, resolves conflicts, and runs final verification.

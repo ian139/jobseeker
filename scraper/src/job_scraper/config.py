@@ -1,21 +1,30 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class AppSettings(BaseSettings):
     theirstack_api_key: str = Field(default="", alias="THEIRSTACK_API_KEY")
     job_scraper_db_path: Path = Field(default=Path("data/jobs.sqlite3"), alias="JOB_SCRAPER_DB_PATH")
-    openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
-    openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
+    llm_api_key: str = Field(default="", validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY"))
+    llm_model: str = Field(default="gpt-4o-mini", validation_alias=AliasChoices("LLM_MODEL", "OPENAI_MODEL"))
+    llm_base_url: str = Field(
+        default="https://api.openai.com/v1",
+        validation_alias=AliasChoices("LLM_BASE_URL", "OPENAI_BASE_URL"),
+    )
     application_pack_dir: Path = Field(default=Path("data/application_packs"), alias="APPLICATION_PACK_DIR")
     application_browser_headless: bool = Field(default=False, alias="APPLICATION_BROWSER_HEADLESS")
     application_timeout_ms: int = Field(default=30000, alias="APPLICATION_TIMEOUT_MS")
+    job_source: Literal["public-json", "theirstack"] = Field(default="public-json", alias="JOB_SOURCE")
+    public_json_base_url: str = Field(
+        default="https://doomersareretardedcommunists.com/",
+        alias="PUBLIC_JSON_BASE_URL",
+    )
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

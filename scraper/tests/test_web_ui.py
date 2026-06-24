@@ -89,40 +89,88 @@ def test_build_tailored_resume_prompt_requires_industry_and_includes_job_resume(
     assert "Python services" in prompt
 
 
-def test_webui_lists_jobs_and_generates_prompt_from_latex_upload(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_webui_scores_resume_against_market_and_downloads_prompt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
     settings = AppSettings(_env_file=None)
     storage = JobStorage(settings.job_scraper_db_path)
     storage.upsert_job(_job("job-1", job_title="Clinical Data Engineer", company_name="Acme Health"))
+    storage.upsert_job(
+        _job("job-2", job_title="Retail Operations Analyst", company_name="ShopCo", discovered_at="2026-06-22T12:00:00+00:00")
+    )
     app = create_app(settings)
     client = TestClient(app)
 
     response = client.get("/")
 
     assert response.status_code == 200
+    assert "Market Signal Console" in response.text
+    assert 'id="input-strip"' in response.text
+    assert 'name="target_roles"' in response.text
+    assert 'name="target_industries"' in response.text
+    assert 'id="resume-file"' in response.text
     assert "Clinical Data Engineer" in response.text
-    assert "Create tailored prompt" in response.text
 
     latex = b"""
 Ada Candidate
 \\section{Experience}
-Built Python services.
+Built Python services for healthcare analytics teams.
 \\section{Skills}
-Python
+Python, SQL, FastAPI
 """
     response = client.post(
-        "/jobs/job-1/prompt",
-        data={"industry": "Healthcare"},
+        "/matches",
+        data={
+            "target_roles": "Data Engineer",
+            "target_industries": "Healthcare",
+            "keywords": "Python, analytics",
+        },
         files={"resume_file": ("resume.tex", latex, "application/x-tex")},
     )
 
     assert response.status_code == 200
-    assert "Tailored Resume Prompt" in response.text
-    assert "Healthcare" in response.text
-    assert "Clinical Data Engineer" in response.text
-    assert "<textarea" in response.text
-    assert "readonly" in response.text
+    assert "Top scored matches" in response.text
+    assert 'id="category-tabs"' in response.text
+    assert 'id="job-table-container"' in response.text
+    assert 'id="detail-panel"' in response.text
+    assert 'data-job-id="job-1"' in response.text
+    assert "Best-supported US regions" in response.text
+    assert "Resume strengths" in response.text
+    assert "Download resume improvement prompt" in response.text
+    assert "https://acme.example/jobs/123" in response.text
+    assert "Build Python services for healthcare analytics." in response.text
 
+    download = client.post(
+        "/jobs/job-1/improvement-prompt",
+        data={
+            "resume_filename": "resume.tex",
+            "resume_kind": "latex",
+            "resume_text": "Ada Candidate\nExperience\nBuilt Python services for healthcare analytics teams.\nSkills\nPython SQL FastAPI",
+            "target_roles": "Data Engineer",
+            "target_industries": "Healthcare",
+            "keywords": "Python, analytics",
+        },
+    )
+
+    assert download.status_code == 200
+    assert download.headers["content-disposition"].startswith("attachment;")
+    assert "Clinical Data Engineer" in download.text
+    assert "LaTeX" in download.text
+    assert "Missing Skills" in download.text
+
+
+
+def test_webui_handles_matches_refresh_and_favicon(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    settings = AppSettings(_env_file=None)
+    app = create_app(settings)
+    client = TestClient(app, follow_redirects=False)
+
+    matches = client.get("/matches")
+    favicon = client.get("/favicon.ico")
+
+    assert matches.status_code == 303
+    assert matches.headers["location"] == "/"
+    assert favicon.status_code == 204
 
 def _job(
     job_id: str,

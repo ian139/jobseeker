@@ -31,11 +31,14 @@ cp config/filters.example.yaml config/filters.yaml
 
 Edit `.env`:
 
-- `THEIRSTACK_API_KEY` is required for `preview-count`, `run-once`, and `daemon`.
+- `JOB_SOURCE` defaults to `public-json`, which imports the public JSON feed without a TheirStack API key.
+- `PUBLIC_JSON_BASE_URL` defaults to `https://doomersareretardedcommunists.com/`.
+- `THEIRSTACK_API_KEY` is required only for `preview-count` or when `JOB_SOURCE=theirstack`.
 - `JOB_SCRAPER_DB_PATH` defaults to `data/jobs.sqlite3`.
-- `OPENAI_API_KEY` is optional. Without it, resume generation uses deterministic local output or can be forced with `--no-llm`.
+- `LLM_API_KEY` is optional. Without it, resume generation uses deterministic local output or can be forced with `--no-llm`.
+- To use DeepSeek V4 Pro through OpenRouter, set `LLM_API_KEY=<openrouter key>`, `LLM_BASE_URL=https://openrouter.ai/api/v1`, and `LLM_MODEL=deepseek/deepseek-v4-pro`.
 
-Edit `config/filters.yaml` to tune search criteria before spending TheirStack credits.
+Edit `config/filters.yaml` only for TheirStack API pulls.
 
 ## Run the scraper
 
@@ -45,22 +48,28 @@ Initialize local SQLite:
 job-scraper init
 ```
 
-Estimate matching jobs without saving full results:
+Estimate TheirStack matches without saving full results:
 
 ```bash
-job-scraper preview-count --filters config/filters.yaml
+JOB_SOURCE=theirstack job-scraper preview-count --filters config/filters.yaml
 ```
 
-Run one sync:
+Run one import from the configured source. By default this imports public JSON:
 
 ```bash
-job-scraper run-once --filters config/filters.yaml
+job-scraper run-once
 ```
 
-Run the 24-hour puller:
+Use TheirStack instead when desired:
 
 ```bash
-job-scraper daemon --filters config/filters.yaml
+JOB_SOURCE=theirstack job-scraper run-once --filters config/filters.yaml
+```
+
+Run the 24-hour puller for the configured source:
+
+```bash
+job-scraper daemon
 ```
 
 ## Use the local web UI

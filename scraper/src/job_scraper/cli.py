@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 from job_scraper.applications import _merged_job_mapping, prepare_application_pack
 from job_scraper.applier import apply_to_job
 from job_scraper.config import AppSettings, build_search_payload, has_company_identifier_filters, load_config
-from job_scraper.llm import OpenAIResumeLLM, ResumeLLMError
+from job_scraper.llm import ChatCompletionsResumeLLM, ResumeLLMError
 from job_scraper.outreach import OutreachStorage, load_outreach_config, normalize_linkedin_profile_url
 from job_scraper.public_json import PublicJsonClient, import_public_json
 from job_scraper.resume import load_resume_profile, tailor_resume
@@ -153,6 +153,17 @@ def main(argv: list[str] | None = None) -> int:
         print(_format_public_json_summary(summary))
         return 0
 
+    source = getattr(args, "source", None) or settings.job_source
+    storage = JobStorage(settings.job_scraper_db_path)
+
+    if args.command == "run-once" and source == "public-json":
+        summary = _import_public_json_once(settings, storage)
+        print(_format_public_json_summary(summary))
+        return 0
+
+    if args.command == "daemon" and source == "public-json":
+        _run_public_json_daemon(settings, storage)
+        return 0
 
     filters_path = Path(args.filters)
     if not filters_path.exists():
@@ -173,7 +184,6 @@ def main(argv: list[str] | None = None) -> int:
         print(_preview_count_line(response))
         return 0
 
-    storage = JobStorage(settings.job_scraper_db_path)
     client = TheirStackClient(settings.theirstack_api_key)
 
     if args.command == "run-once":
@@ -191,10 +201,28 @@ def main(argv: list[str] | None = None) -> int:
 
 
 
-def _resume_llm(settings: AppSettings, *, no_llm: bool) -> OpenAIResumeLLM | None:
-    if no_llm or not settings.openai_api_key.strip():
+def _import_public_json_once(settings: AppSettings, storage: JobStorage) -> Any:
+    client = PublicJsonClient(base_url=settings.public_json_base_url)
+    return import_public_json(client, storage)
+
+
+def _run_public_json_daemon(settings: AppSettings, storage: JobStorage) -> None:
+    from apscheduler.schedulers.blocking import BlockingScheduler
+
+    def scheduled_import() -> None:
+        summary = _import_public_json_once(settings, storage)
+        print(_format_public_json_summary(summary), flush=True)
+
+    scheduled_import()
+    scheduler = BlockingScheduler()
+    scheduler.add_job(scheduled_import, "interval", hours=24, id="public-json-import", replace_existing=True)
+    scheduler.start()
+
+
+def _resume_llm(settings: AppSettings, *, no_llm: bool) -> ChatCompletionsResumeLLM | None:
+    if no_llm or not settings.llm_api_key.strip():
         return None
-    return OpenAIResumeLLM(settings.openai_api_key, settings.openai_model)
+    return ChatCompletionsResumeLLM(settings.llm_api_key, settings.llm_model, base_url=settings.llm_base_url)
 
 
 def _handle_outreach(args: argparse.Namespace, settings: AppSettings, parser: argparse.ArgumentParser) -> int:
@@ -308,6 +336,11 @@ def _find_total_results(value: object) -> object | None:
             found = _find_total_results(nested)
             if found is not None:
                 return found
+    if isinstance(value, list):
+        for item in value:
+            found = _find_total_results(item)
+            if found is not None:
+                return found
     return None
 
 
@@ -317,18 +350,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("init", help="Create the SQLite data directory and tables")
 
-    run_once = subparsers.add_parser("run-once", help="Run one TheirStack sync immediately")
-    run_once.add_argument("--filters", default="config/filters.yaml", help="Path to the YAML filter file")
+    run_once = subparsers.add_parser("run-once", help="Import jobs from the configured job source once")
+    run_once.add_argument("--filters", default="config/filters.yaml", help="Path to the YAML filter file for TheirStack runs")
+    run_once.add_argument("--source", choices=("public-json", "theirstack"), help="Override JOB_SOURCE for this run")
 
-    daemon = subparsers.add_parser("daemon", help="Run immediately, then sync every 24 hours")
-    daemon.add_argument("--filters", default="config/filters.yaml", help="Path to the YAML filter file")
+    daemon = subparsers.add_parser("daemon", help="Run immediately, then import/sync every 24 hours")
+    daemon.add_argument("--filters", default="config/filters.yaml", help="Path to the YAML filter file for TheirStack runs")
+    daemon.add_argument("--source", choices=("public-json", "theirstack"), help="Override JOB_SOURCE for this daemon")
 
     preview = subparsers.add_parser("preview-count", help="Fetch a blurred TheirStack total count without saving jobs")
     preview.add_argument("--filters", default="config/filters.yaml", help="Path to the YAML filter file")
 
     import_public = subparsers.add_parser(
         "import-public-json",
-        help="Import supplemental public JSON jobs without changing TheirStack sync behavior",
+        help="Import public JSON jobs directly",
     )
     import_public.add_argument(
         "--base-url",
@@ -341,17 +376,17 @@ def _build_parser() -> argparse.ArgumentParser:
     webui.add_argument("--port", type=int, default=8000, help="Port for the web UI")
 
     generate_resume = subparsers.add_parser("generate-resume", help="Generate a tailored Markdown resume for a saved job")
-    generate_resume.add_argument("--job-id", required=True, help="Saved TheirStack job id")
+    generate_resume.add_argument("--job-id", required=True, help="Saved job id")
     generate_resume.add_argument("--profile", required=True, help="Path to resume profile YAML")
     generate_resume.add_argument("--output", help="Path to write Markdown; stdout when omitted")
-    generate_resume.add_argument("--no-llm", action="store_true", help="Disable optional OpenAI rewrite")
+    generate_resume.add_argument("--no-llm", action="store_true", help="Disable optional LLM rewrite")
 
     prepare_application = subparsers.add_parser("prepare-application", help="Create a local application pack and CRM row")
-    prepare_application.add_argument("--job-id", required=True, help="Saved TheirStack job id")
+    prepare_application.add_argument("--job-id", required=True, help="Saved job id")
     prepare_application.add_argument("--profile", required=True, help="Path to resume profile YAML")
     prepare_application.add_argument("--notes", default="", help="Application notes")
     prepare_application.add_argument("--output-dir", help="Directory for application packs")
-    prepare_application.add_argument("--no-llm", action="store_true", help="Disable optional OpenAI rewrite")
+    prepare_application.add_argument("--no-llm", action="store_true", help="Disable optional LLM rewrite")
 
     apply = subparsers.add_parser("apply", help="Fill a saved job application in Chromium")
     apply.add_argument("--job-id", required=True, help="Saved TheirStack job id")
@@ -365,7 +400,7 @@ def _build_parser() -> argparse.ArgumentParser:
     list_applications.add_argument("--status", choices=APPLICATION_STATUSES, help="Filter by application status")
 
     update_application = subparsers.add_parser("update-application", help="Update a local application CRM row")
-    update_application.add_argument("--job-id", required=True, help="Saved TheirStack job id")
+    update_application.add_argument("--job-id", required=True, help="Saved job id")
     update_application.add_argument("--status", choices=APPLICATION_STATUSES, help="New application status")
     update_application.add_argument("--notes", help="Application notes")
     update_application.add_argument("--contact-name", help="Contact name")

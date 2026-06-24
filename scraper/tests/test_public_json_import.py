@@ -6,15 +6,18 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from job_scraper import cli as cli_module
 
 from job_scraper.public_json import (
     PublicJsonError,
+    PublicJsonImportSummary,
     decode_bootstrap,
     import_public_json,
     map_public_json_job,
     validate_manifest,
 )
 from job_scraper.storage import JobStorage
+from job_scraper.config import AppSettings
 
 
 class FakePublicJsonSource:
@@ -136,6 +139,54 @@ def test_import_public_json_reuses_storage_upsert_for_repeated_import(tmp_path: 
     assert second.inserted == 0
     assert second.updated == 1
     assert storage.count_jobs() == 1
+
+
+def test_settings_default_to_public_json_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("JOB_SOURCE", raising=False)
+    monkeypatch.delenv("PUBLIC_JSON_BASE_URL", raising=False)
+
+    settings = AppSettings(_env_file=None)
+
+    assert settings.job_source == "public-json"
+    assert settings.public_json_base_url == "https://doomersareretardedcommunists.com/"
+
+
+def test_run_once_defaults_to_public_json_without_filters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    monkeypatch.delenv("JOB_SOURCE", raising=False)
+    monkeypatch.delenv("PUBLIC_JSON_BASE_URL", raising=False)
+    captured: dict[str, object] = {}
+
+    class FakePublicJsonClient:
+        def __init__(self, *, base_url: str) -> None:
+            captured["base_url"] = base_url
+
+    def fake_import_public_json(source: object, storage: JobStorage) -> PublicJsonImportSummary:
+        captured["source"] = source
+        storage.initialize()
+        return PublicJsonImportSummary(
+            snapshot_date="2026-06-23",
+            generated_at="2026-06-23T08:01:03Z",
+            pages_fetched=1,
+            jobs_returned=2,
+            inserted=2,
+            updated=0,
+            skipped=0,
+            duplicates=0,
+        )
+
+    monkeypatch.setattr(cli_module, "PublicJsonClient", FakePublicJsonClient)
+    monkeypatch.setattr(cli_module, "import_public_json", fake_import_public_json)
+
+    exit_code = cli_module.main(["run-once"])
+
+    assert exit_code == 0
+    assert captured["base_url"] == "https://doomersareretardedcommunists.com/"
+    assert "Public JSON import snapshot=2026-06-23" in capsys.readouterr().out
 
 
 def _bootstrap(all_pages: list[dict[str, Any]]) -> dict[str, Any]:

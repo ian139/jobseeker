@@ -234,6 +234,25 @@ class JobStorage:
             row = connection.execute("SELECT COUNT(*) AS count FROM jobs").fetchone()
         return int(row["count"])
 
+    def list_jobs(self, *, limit: int = 100) -> list[JobRecord]:
+        self.initialize()
+        if limit < 1:
+            raise ValueError("Job list limit must be at least 1")
+
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT theirstack_id, title, company, company_domain, country_code, remote,
+                       date_posted, discovered_at, url, source_url, final_url, raw_json
+                FROM jobs
+                ORDER BY COALESCE(discovered_at, date_posted, final_url, url, theirstack_id) DESC,
+                         theirstack_id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [_job_record_from_row(row) for row in rows]
+
     def get_job(self, theirstack_id: str) -> JobRecord | None:
         self.initialize()
         with self._connect() as connection:

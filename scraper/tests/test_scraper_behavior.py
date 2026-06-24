@@ -49,7 +49,7 @@ def test_first_run_sends_freshness_source_limit_page_and_saves_jobs(tmp_path: Pa
         "ashbyhq.com",
         "smartrecruiters.com",
     ]
-    assert payload["limit"] == 100
+    assert payload["limit"] == config.search.limit
     assert payload["page"] == 0
     assert "remote" not in payload
     assert summary.inserted == 1

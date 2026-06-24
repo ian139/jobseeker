@@ -226,6 +226,19 @@ def test_partial_role_match_gets_intermediate_points() -> None:
     assert exact_s.score > partial_s.score, "Exact role match should outscore partial"
 
 
+def test_mismatched_title_does_not_report_target_role_as_matched() -> None:
+    """Role badges only report requested roles when the job title actually matches."""
+    analysis = _analysis(text="Data engineer with Python analytics experience.")
+    job = _job_record(
+        theirstack_id="barista",
+        title="Barista",
+        raw={"job_description": "Prepare coffee and support cafe guests."},
+    )
+
+    scored = score_jobs([job], analysis, target_roles=["Data Engineer"], target_industries=[], keywords=[])
+
+    assert "data engineer" not in scored[0].matched_terms
+
 # ── Tests: categorization ─────────────────────────────────────────────────────
 
 

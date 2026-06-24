@@ -229,7 +229,7 @@ def _page(title: str, body: str) -> str:
 def _intake_page(jobs: list[JobRecord]) -> str:
     job_count = len(jobs)
     latest = html.escape(jobs[0].discovered_at or jobs[0].date_posted or "n/a") if jobs else "n/a"
-    recent_rows = "\n".join(_compact_job_row(job) for job in jobs[:8]) or '<tr><td colspan="4">No scraped jobs found. Run job-scraper run-once first.</td></tr>'
+    recent_rows = "\n".join(_compact_job_row(job) for job in jobs[:8]) or '<tr><td colspan="5">No scraped jobs found. Run job-scraper run-once first.</td></tr>'
     return f"""<section id="input-strip" class="grid intake-grid">
   <form id="resume-upload" method="post" enctype="multipart/form-data" action="/matches" aria-labelledby="strategy-title">
     <span class="eyebrow">Start with roles, filters, or resume</span>
@@ -258,7 +258,7 @@ def _intake_page(jobs: list[JobRecord]) -> str:
     </div>
     <h3>Recent scraped roles</h3>
     <table>
-      <thead><tr><th>Role</th><th>Company</th><th>Country</th><th>Date</th></tr></thead>
+      <thead><tr><th>Role</th><th>Company</th><th>Country</th><th>Date</th><th>Prompt</th></tr></thead>
       <tbody>{recent_rows}</tbody>
     </table>
   </section>
@@ -288,10 +288,7 @@ def _matches_page(
         _category_table(_category_name(category), [job for job in scored_jobs if getattr(job, "category", "Uncategorized") == _category_name(category)])
         for category in categories
     )
-    detail_cards = "\n".join(
-        _detail_card(job, analysis=analysis, target_roles=target_roles, target_industries=target_industries, keywords=keywords)
-        for job in scored_jobs
-    )
+    detail_cards = "\n".join(_detail_card(job) for job in scored_jobs)
     hidden_resume = _hidden_resume_fields(analysis, target_roles=target_roles, target_industries=target_industries, keywords=keywords)
     return f"""<section class="panel">
   <span class="eyebrow">Resume-to-market analysis</span>
@@ -314,15 +311,17 @@ def _matches_page(
     {detail_cards}
   </aside>
 </section>
-<form hidden aria-hidden="true">{hidden_resume}</form>"""
+<form id="resume-prompt-payload" hidden aria-hidden="true" method="post">{hidden_resume}</form>"""
 
 
 def _compact_job_row(job: JobRecord) -> str:
+    job_path_id = quote(job.theirstack_id, safe="")
     return f"""<tr>
   <td>{html.escape(job.title or "Untitled role")}</td>
   <td>{html.escape(job.company or "Unknown")}</td>
   <td>{html.escape(job.country_code or "")}</td>
   <td>{html.escape(job.date_posted or "")}</td>
+  <td><a class="button ghost-button" href="/jobs/{job_path_id}/prompt">Tailor prompt</a></td>
 </tr>"""
 
 
@@ -369,18 +368,10 @@ def _result_row(scored: object) -> str:
 </tr>"""
 
 
-def _detail_card(
-    scored: object,
-    *,
-    analysis: UploadedResumeAnalysis,
-    target_roles: list[str],
-    target_industries: list[str],
-    keywords: list[str],
-) -> str:
+def _detail_card(scored: object) -> str:
     job = getattr(scored, "job")
     url = job.final_url or job.url or ""
     description = _job_description(job)
-    hidden_fields = _hidden_resume_fields(analysis, target_roles=target_roles, target_industries=target_industries, keywords=keywords)
     return f"""<article class="detail-card detail-pane" id="{_job_detail_id(job)}">
   <span class="eyebrow">Selected role</span>
   <h2 class="detail-title">{html.escape(job.title or "Untitled role")}</h2>
@@ -391,10 +382,7 @@ def _detail_card(
   <p><strong>Link:</strong> {_job_link(url)}</p>
   <h3>Description</h3>
   <div class="description">{html.escape(description or "No description available.")}</div>
-  <form method="post" action="/jobs/{quote(job.theirstack_id, safe='')}/improvement-prompt">
-    {hidden_fields}
-    <button class="download-prompt" type="submit">Download resume improvement prompt</button>
-  </form>
+  <button class="download-prompt" type="submit" form="resume-prompt-payload" formaction="/jobs/{quote(job.theirstack_id, safe='')}/improvement-prompt" formmethod="post">Download resume improvement prompt</button>
 </article>"""
 
 

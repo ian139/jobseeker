@@ -109,6 +109,7 @@ def test_webui_scores_resume_against_market_and_downloads_prompt(tmp_path: Path,
     assert 'name="target_industries"' in response.text
     assert 'id="resume-file"' in response.text
     assert "Clinical Data Engineer" in response.text
+    assert 'href="/jobs/job-1/prompt"' in response.text
 
     latex = b"""
 Ada Candidate
@@ -138,7 +139,7 @@ Python, SQL, FastAPI
     assert "Download resume improvement prompt" in response.text
     assert "https://acme.example/jobs/123" in response.text
     assert "Build Python services for healthcare analytics." in response.text
-
+    assert response.text.count('name="resume_text"') == 1
     download = client.post(
         "/jobs/job-1/improvement-prompt",
         data={

@@ -744,8 +744,9 @@ def _matched_terms(
             role_norm = _normalize_text(role)
             role_tokens = _tokenize(role_norm)
             common = title_tokens & role_tokens
-            matched.extend(role_tokens & common)  # deduplicated per role
-            matched.extend([role_norm])  # also note the full role string if it appears
+            matched.extend(sorted(common))  # deduplicated per role
+            if _contains_phrase(title_norm, role_norm):
+                matched.append(role_norm)
 
     # Industries
     norm_ind = _normalize_text_set(target_industries)

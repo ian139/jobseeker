@@ -5,6 +5,8 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from job_scraper.cli import main
 from job_scraper.outreach import OutreachConfig, OutreachContact, OutreachLimits, OutreachStep
 from job_scraper.outreach_storage import OutreachStorage
@@ -96,6 +98,26 @@ def test_queue_sequence_returns_connect_before_message_until_connected(tmp_path:
     assert due_after_connected[0].message == "Thanks Ada from Acme about Fall Software Co-op"
 
 
+def test_mark_contact_connected_advances_when_connect_was_sent_outside_queue(tmp_path: Path) -> None:
+    db_path = tmp_path / "jobs.sqlite3"
+    storage = OutreachStorage(db_path)
+    storage.upsert_contact(
+        OutreachContact(
+            linkedin_profile_url="linkedin.com/in/off-queue-connect",
+            full_name="Outside Connect",
+            company="Acme",
+        )
+    )
+    storage.queue_sequence(_two_step_config(), now=NOW)
+    assert _action_status(db_path, "https://www.linkedin.com/in/off-queue-connect", 0) == "pending"
+
+    storage.mark_contact("linkedin.com/in/off-queue-connect", "connected", now=NOW)
+
+    assert _action_status(db_path, "https://www.linkedin.com/in/off-queue-connect", 0) == "sent"
+    due = storage.due_actions(limit=10, now=NOW)
+    assert [action.kind for action in due] == ["message"]
+
+
 def test_mark_replied_or_blocked_stops_remaining_actions(tmp_path: Path) -> None:
     db_path = tmp_path / "jobs.sqlite3"
     storage = OutreachStorage(db_path)
@@ -114,6 +136,21 @@ def test_mark_replied_or_blocked_stops_remaining_actions(tmp_path: Path) -> None
     assert _contact_row(db_path, "https://www.linkedin.com/in/blocked-person")["status"] == "do_not_contact"
     assert _action_status(db_path, "https://www.linkedin.com/in/blocked-person", 0) == "blocked"
     assert _action_status(db_path, "https://www.linkedin.com/in/blocked-person", 1) == "blocked"
+
+
+def test_cannot_mark_closed_action_sent_and_reopen_blocked_contact(tmp_path: Path) -> None:
+    db_path = tmp_path / "jobs.sqlite3"
+    storage = OutreachStorage(db_path)
+    storage.upsert_contact(OutreachContact("linkedin.com/in/blocked-stale", "Blocked Stale"))
+    storage.queue_sequence(_two_step_config(), now=NOW)
+    first_action = _action_id(db_path, "https://www.linkedin.com/in/blocked-stale", 0)
+    storage.mark_action(first_action, "blocked", now=NOW)
+
+    with pytest.raises(ValueError, match="already blocked"):
+        storage.mark_action(first_action, "sent", now=NOW)
+
+    assert _contact_row(db_path, "https://www.linkedin.com/in/blocked-stale")["status"] == "do_not_contact"
+    assert _action_status(db_path, "https://www.linkedin.com/in/blocked-stale", 0) == "blocked"
 
 
 def test_cli_outreach_next_prints_tsv_and_open_uses_first_due_url(

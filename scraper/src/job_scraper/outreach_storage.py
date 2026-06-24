@@ -34,6 +34,7 @@ CLOSING_CONTACT_ACTION_STATUS = {
     "skipped": "skipped",
     "do_not_contact": "blocked",
 }
+TERMINAL_CONTACT_STATUSES = {"replied", "skipped", "do_not_contact"}
 
 
 class OutreachStorage:
@@ -320,6 +321,22 @@ class OutreachStorage:
             if action is None:
                 raise ValueError(f"Unknown outreach action ID: {action_id}")
 
+            contact = connection.execute(
+                "SELECT status FROM outreach_contacts WHERE linkedin_profile_url = ?",
+                (action["linkedin_profile_url"],),
+            ).fetchone()
+            if contact is None:
+                raise ValueError(f"Unknown outreach contact: {action['linkedin_profile_url']}")
+            if status == "sent":
+                if action["status"] != "pending":
+                    raise ValueError(
+                        f"Cannot mark outreach action {action_id} sent because it is already {action['status']}"
+                    )
+                if contact["status"] in TERMINAL_CONTACT_STATUSES:
+                    raise ValueError(
+                        f"Cannot mark outreach action {action_id} sent because contact is {contact['status']}"
+                    )
+
             sent_at = marked_at if status == "sent" else action["sent_at"]
             connection.execute(
                 """
@@ -330,7 +347,11 @@ class OutreachStorage:
                 (status, sent_at, marked_at, action_id),
             )
             if status == "sent":
-                contact_status = "connection_requested" if action["kind"] == "connect" else None
+                contact_status = (
+                    "connection_requested"
+                    if action["kind"] == "connect" and contact["status"] in {"new", "queued"}
+                    else None
+                )
                 if contact_status is None:
                     connection.execute(
                         """
@@ -389,6 +410,18 @@ class OutreachStorage:
                 """,
                 (status, marked_at, normalized_url),
             )
+            if status == "connected":
+                connection.execute(
+                    """
+                    UPDATE outreach_actions
+                    SET status = 'sent', sent_at = COALESCE(sent_at, ?), updated_at = ?
+                    WHERE linkedin_profile_url = ?
+                      AND kind = 'connect'
+                      AND status = 'pending'
+                    """,
+                    (marked_at, marked_at, normalized_url),
+                )
+                self._reschedule_next_pending(connection, normalized_url, _dt(marked_at))
             closing_status = CLOSING_CONTACT_ACTION_STATUS.get(status)
             if closing_status is not None:
                 connection.execute(

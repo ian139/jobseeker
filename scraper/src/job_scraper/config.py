@@ -14,6 +14,8 @@ class AppSettings(BaseSettings):
     openai_api_key: str = Field(default="", alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
     application_pack_dir: Path = Field(default=Path("data/application_packs"), alias="APPLICATION_PACK_DIR")
+    application_browser_headless: bool = Field(default=False, alias="APPLICATION_BROWSER_HEADLESS")
+    application_timeout_ms: int = Field(default=30000, alias="APPLICATION_TIMEOUT_MS")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

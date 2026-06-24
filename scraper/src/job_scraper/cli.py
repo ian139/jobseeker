@@ -9,6 +9,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from job_scraper.applications import _merged_job_mapping, prepare_application_pack
+from job_scraper.applier import apply_to_job
 from job_scraper.config import AppSettings, build_search_payload, has_company_identifier_filters, load_config
 from job_scraper.llm import OpenAIResumeLLM, ResumeLLMError
 from job_scraper.outreach import load_outreach_config, normalize_linkedin_profile_url
@@ -87,6 +88,29 @@ def main(argv: list[str] | None = None) -> int:
                 notes=args.notes or "",
             )
         print(f"Prepared application {pack.application.id} for {args.job_id}: {pack.resume_path}")
+        return 0
+
+    if args.command == "apply":
+        storage = JobStorage(settings.job_scraper_db_path)
+        result = apply_to_job(
+            storage,
+            job_id=args.job_id,
+            profile_path=Path(args.profile),
+            resume_path=Path(args.resume_path) if args.resume_path else None,
+            submit=args.submit,
+            headless=args.headless or settings.application_browser_headless,
+            timeout_ms=args.timeout_ms or settings.application_timeout_ms,
+        )
+        print(
+            "\t".join(
+                [
+                    result.attempt.status,
+                    result.application.status,
+                    result.attempt.target_url,
+                    result.attempt.message,
+                ]
+            )
+        )
         return 0
 
     if args.command == "list-applications":
@@ -329,6 +353,14 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare_application.add_argument("--notes", default="", help="Application notes")
     prepare_application.add_argument("--output-dir", help="Directory for application packs")
     prepare_application.add_argument("--no-llm", action="store_true", help="Disable optional OpenAI rewrite")
+
+    apply = subparsers.add_parser("apply", help="Fill a saved job application in Chromium")
+    apply.add_argument("--job-id", required=True, help="Saved TheirStack job id")
+    apply.add_argument("--profile", required=True, help="Path to resume profile YAML for contact fields")
+    apply.add_argument("--resume-path", help="Resume file to upload; defaults to the application resume_path")
+    apply.add_argument("--submit", action="store_true", help="Click final submit when all required fields are filled")
+    apply.add_argument("--headless", action="store_true", help="Run Chromium headlessly")
+    apply.add_argument("--timeout-ms", type=int, help="Browser action timeout in milliseconds")
 
     list_applications = subparsers.add_parser("list-applications", help="List local application CRM rows")
     list_applications.add_argument("--status", choices=APPLICATION_STATUSES, help="Filter by application status")

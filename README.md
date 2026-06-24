@@ -93,6 +93,16 @@ Create an application pack and local CRM row:
 job-scraper prepare-application --job-id <THEIRSTACK_JOB_ID> --profile config/resume-profile.yaml --notes "Applied via company site" --no-llm
 ```
 
+Fill the saved job application in Chromium:
+
+```bash
+python -m playwright install chromium
+job-scraper apply --job-id <THEIRSTACK_JOB_ID> --profile config/resume-profile.yaml --resume-path data/resumes/<resume>.pdf
+job-scraper apply --job-id <THEIRSTACK_JOB_ID> --profile config/resume-profile.yaml --resume-path data/resumes/<resume>.pdf --submit
+```
+
+Without `--submit`, Chromium fills the form and leaves final review to you; with `--submit`, the row is marked `applied` only after a submission confirmation is detected. Generated Markdown resumes can be uploaded only if the target form accepts them; for real ATS submissions, pass a PDF/DOCX via `--resume-path` until resume rendering exists.
+
 List and update application rows:
 
 ```bash

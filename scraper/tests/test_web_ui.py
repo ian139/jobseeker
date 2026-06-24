@@ -95,7 +95,13 @@ def test_webui_scores_resume_against_market_and_downloads_prompt(tmp_path: Path,
     storage = JobStorage(settings.job_scraper_db_path)
     storage.upsert_job(_job("job-1", job_title="Clinical Data Engineer", company_name="Acme Health"))
     storage.upsert_job(
-        _job("job-2", job_title="Retail Operations Analyst", company_name="ShopCo", discovered_at="2026-06-22T12:00:00+00:00")
+        _job(
+            "job-2",
+            job_title="Retail Operations Analyst",
+            company_name="ShopCo",
+            discovered_at="2026-06-22T12:00:00+00:00",
+            job_description="Manage store staffing, retail shifts, and vendor escalations.",
+        )
     )
     app = create_app(settings)
     client = TestClient(app)
@@ -138,6 +144,11 @@ Python, SQL, FastAPI
     assert "Best-supported US regions" in response.text
     assert "Resume strengths" in response.text
     assert "Download resume improvement prompt" in response.text
+    assert "Category fit" in response.text
+    assert "Key strengths" in response.text
+    assert "Missing requirements" in response.text
+    assert "Relevant resume evidence" in response.text
+    assert "Why this rank" in response.text
     assert 'data-detail-target="job-job-1"' in response.text
     assert "Original listing:" in response.text
     assert "Application link:" in response.text
@@ -164,7 +175,7 @@ Python, SQL, FastAPI
     assert download.headers["content-disposition"].startswith("attachment;")
     assert "Clinical Data Engineer" in download.text
     assert "LaTeX" in download.text
-    assert "Missing Skills" in download.text
+    assert "Missing Requirements" in download.text
 
 
 
@@ -215,6 +226,7 @@ def _job(
     date_posted: str | None = "2026-06-23",
     job_title: str = "Software Engineer",
     company_name: str = "Acme",
+    job_description: str = "Build Python services for healthcare analytics.",
 ) -> dict[str, object]:
     return {
         "id": job_id,
@@ -228,6 +240,6 @@ def _job(
         "url": "https://www.linkedin.com/jobs/view/123",
         "source_url": "https://www.linkedin.com/jobs/view/123",
         "final_url": "https://acme.example/jobs/123",
-        "job_description": "Build Python services for healthcare analytics.",
+        "job_description": job_description,
         "requirements": ["Python", "Healthcare analytics", "Stakeholder collaboration"],
     }

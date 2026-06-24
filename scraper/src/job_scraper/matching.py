@@ -28,6 +28,12 @@ class ScoredJob:
     missing_terms: tuple[str, ...]
     region: str
     remote_label: str
+    category_fit: str
+    key_strengths: tuple[str, ...]
+    missing_requirements: tuple[str, ...]
+    relevant_resume_evidence: tuple[str, ...]
+    concerns: tuple[str, ...]
+    explanation: str
 
 
 @dataclass(frozen=True)
@@ -53,45 +59,69 @@ def score_jobs(
 ) -> list[ScoredJob]:
     """Score every job in *jobs* and return them sorted descending by score.
 
-    Each job receives a 0-100 score derived from:
-      - role fit (40 pts max)
-      - industry alignment (30 pts max)
-      - optional keyword relevance (20 pts max)
-      - resume-text overlap with the job description (10 pts max)
+    The scorer is intentionally local and cheap: it builds one resume index,
+    one normalized job index per job, and combines role fit, requested filters,
+    job requirement coverage, and direct resume evidence into a 0-100 score.
     """
     if not jobs:
         return []
 
-    resume_tokens = _tokenize(analysis.text)  # compute once for all jobs
+    resume_index = _build_resume_index(analysis)
+    norm_industries = tuple(_normalize_text(term) for term in target_industries if term.strip())
+    norm_keywords = tuple(_normalize_text(term) for term in keywords if term.strip())
 
     scored: list[ScoredJob] = []
+    job_index_cache: dict[str, _JobIndex] = {}
     for job in jobs:
-        role_pts = _score_role_fit(job.title, target_roles)
+        job_index = job_index_cache.setdefault(job.theirstack_id, _build_job_index(job))
+        role_pts = max(_score_role_fit(job.title, target_roles), _score_resume_title_fit(job_index, resume_index))
         industry_pts = _score_industry(job, target_industries)
         kw_pts = _score_keywords(job, keywords)
-        resume_pts = _score_resume_overlap(job, resume_tokens)
-        score = role_pts + industry_pts + kw_pts + resume_pts
+        requirement_terms = _job_requirement_terms(job, job_index, norm_industries, norm_keywords)
+        matched_requirements, missing_requirements = _split_supported_terms(requirement_terms, resume_index)
+        requirement_pts = _score_requirement_coverage(matched_requirements, requirement_terms)
+        resume_pts = _score_resume_overlap(job, resume_index.tokens)
+        score = min(100.0, role_pts + industry_pts + kw_pts + requirement_pts + resume_pts)
 
         category = _categorize_job(job, target_industries)
         matched = _matched_terms(job, target_roles, target_industries, keywords)
         region, remote_label = _analyze_region(job)
-
-        # Missing terms: things the user asked for that the job doesn't mention
         missing = _missing_terms(job, target_roles, target_industries, keywords)
+        evidence = _evidence_for_terms(resume_index, matched_requirements)
+        concerns = _concerns_for_job(job, resume_index, missing_requirements)
+        category_fit = _category_fit(category, target_industries, resume_index)
+        strengths = _key_strengths(matched_requirements, evidence)
+        explanation = _match_explanation(
+            score=score,
+            role_pts=role_pts,
+            industry_pts=industry_pts,
+            kw_pts=kw_pts,
+            requirement_pts=requirement_pts,
+            resume_pts=resume_pts,
+            matched_count=len(matched_requirements),
+            requirement_count=len(requirement_terms),
+            category_fit=category_fit,
+        )
 
         scored.append(
             ScoredJob(
                 job=job,
-                score=score,
+                score=round(score, 1),
                 category=category,
                 matched_terms=matched,
                 missing_terms=missing,
                 region=region,
                 remote_label=remote_label,
+                category_fit=category_fit,
+                key_strengths=strengths,
+                missing_requirements=missing_requirements,
+                relevant_resume_evidence=evidence,
+                concerns=concerns,
+                explanation=explanation,
             )
         )
 
-    scored.sort(key=lambda s: s.score, reverse=True)
+    scored.sort(key=lambda s: (-s.score, s.job.date_posted or "", s.job.discovered_at or "", s.job.theirstack_id))
     return scored
 
 
@@ -158,78 +188,50 @@ def build_improvement_prompt(
         "# Input Guidance\nUploaded resume analyzed as plain text.",
     )
 
-    # ── Role fit assessment ──────────────────────────────────────────────
+    # ── Role/category assessment ─────────────────────────────────────────
     title_norm = _normalize_text(job.title or "")
     role_norm = " ".join(_normalize_text(r) for r in target_roles)
     role_match_tokens = _tokenize(role_norm) & _tokenize(title_norm)
-    role_fit_pct = _score_role_fit(job.title, target_roles) / 40.0 * 100
+    role_fit_pct = _score_role_fit(job.title, target_roles) / 40.0 * 100 if target_roles else 0.0
 
-    if role_fit_pct >= 80:
-        role_assessment = f"Strong fit ({role_fit_pct:.0f}%). Your resume aligns well with the target role \"{job.title or 'N/A'}\"."
-    elif role_fit_pct >= 40:
-        role_assessment = f"Moderate fit ({role_fit_pct:.0f}%). The role \"{job.title or 'N/A'}\" partially overlaps your target. Consider emphasizing the role tokens: {', '.join(sorted(role_match_tokens)) if role_match_tokens else 'none found'}."
+    if target_roles and role_fit_pct >= 80:
+        role_assessment = f"Strong target-role fit ({role_fit_pct:.0f}%) for \"{job.title or 'N/A'}\"."
+    elif target_roles and role_fit_pct >= 40:
+        role_assessment = f"Moderate target-role fit ({role_fit_pct:.0f}%). Emphasize: {', '.join(sorted(role_match_tokens)) if role_match_tokens else 'transferable role evidence'}."
+    elif target_roles:
+        role_assessment = f"Weak target-role fit ({role_fit_pct:.0f}%). Reframe transferable experience toward \"{job.title or 'N/A'}\"."
     else:
-        role_assessment = f"Weak fit ({role_fit_pct:.0f}%). The role \"{job.title or 'N/A'}\" does not closely match your target roles. Highlight transferable skills and reframe experience to bridge the gap."
+        role_assessment = "No target roles supplied; ranking is driven by job requirements supported by the uploaded resume."
 
-    # ── Missing skills ───────────────────────────────────────────────────
-    missing = scored_job.missing_terms
+    # ── Structured match reasoning ───────────────────────────────────────
+    strengths_section = "## Key Strengths\n" + "\n".join(f"- {term}" for term in scored_job.key_strengths)
+    missing = scored_job.missing_requirements
     if missing:
-        missing_block = "\n".join(f"- **{term}** — review your resume for relevant experience to add or highlight." for term in missing)
-        missing_section = f"## Missing Skills & Keywords\n{missing_block}"
+        missing_block = "\n".join(f"- **{term}** — add only if your resume has truthful supporting evidence." for term in missing[:12])
+        missing_section = f"## Missing Requirements / Missing Skills & Keywords\n{missing_block}"
     else:
-        missing_section = "## Missing Skills & Keywords\nNo critical gaps detected. Your resume covers the key terms sought."
+        missing_section = "## Missing Requirements / Missing Skills & Keywords\nNo missing requirements detected from extracted job signals."
 
-    # ── Industry alignment ───────────────────────────────────────────────
-    industry_pts = _score_industry(job, target_industries)
-    industry_pct = industry_pts / 30.0 * 100
-    if industry_pct >= 66:
-        industry_section = (
-            f"## Industry Alignment ({industry_pct:.0f}%)\n"
-            f"Strong industry alignment ({scored_job.category}). "
-            "Continue emphasizing domain-specific accomplishments and metrics."
-        )
-    elif industry_pct >= 33:
-        industry_section = (
-            f"## Industry Alignment ({industry_pct:.0f}%)\n"
-            f"Moderate alignment with \"{scored_job.category}\". "
-            "Add industry-specific terminology, projects, or certifications."
-        )
-    else:
-        industry_section = (
-            f"## Industry Alignment ({industry_pct:.0f}%)\n"
-            f"Limited alignment with \"{scored_job.category}\". "
-            "Reframe experience to highlight domain relevance; consider targeted keywords from the job description."
-        )
-
-    # ── Evidence gaps ────────────────────────────────────────────────────
-    evidence_gaps: list[str] = []
-    if len(_tokenize(analysis.text)) < 50:
-        evidence_gaps.append("Resume text appears short — consider expanding bullet points with concrete metrics and outcomes.")
-    if _contains_phrase(job_text, "years") and not _years_in_text(analysis.text):
-        evidence_gaps.append("The job requires specific years of experience. Ensure your resume quantifies tenure.")
-    if _contains_phrase(job_text, "degree") or _contains_phrase(job_text, "bachelor") or _contains_phrase(job_text, "master"):
-        evidence_gaps.append("The job mentions education requirements. Verify that your degree(s) are prominently listed.")
-
-    if evidence_gaps:
-        ev_block = "\n".join(f"- {g}" for g in evidence_gaps)
-        evidence_section = f"## Evidence Gaps\n{ev_block}"
-    else:
-        evidence_section = "## Evidence Gaps\nNo specific evidence gaps detected."
+    evidence_section = "## Relevant Resume Evidence\n" + "\n".join(
+        f"- {line}" for line in scored_job.relevant_resume_evidence
+    )
+    concerns_section = "## Concerns\n" + "\n".join(f"- {concern}" for concern in scored_job.concerns)
+    industry_section = f"## Category Fit\n{scored_job.category_fit}"
 
     # ── Step-by-step revision prompts ────────────────────────────────────
     revision_steps: list[str] = []
     if role_match_tokens:
-        revision_steps.append(f"1. **Highlight role keywords.** Ensure \"{' ,'.join(sorted(role_match_tokens))}\" appear prominently in your summary and experience sections.")
+        revision_steps.append(f"1. **Highlight role keywords.** Ensure \"{', '.join(sorted(role_match_tokens))}\" appear prominently in your summary and experience sections.")
     else:
-        revision_steps.append("1. **Reframe for the role.** Adjust your professional summary to speak directly to this job title and its responsibilities.")
+        revision_steps.append("1. **Lead with strongest evidence.** Move the most relevant supported skills and accomplishments into the first half of the resume.")
     if missing:
-        revision_steps.append(f"2. **Fill keyword gaps.** Incorporate or address: {', '.join(missing[:8])}.")
+        revision_steps.append(f"2. **Close real gaps.** If truthful, add evidence for: {', '.join(missing[:8])}.")
     else:
-        revision_steps.append("2. **Maintain keyword coverage.** Your resume already matches key terms.")
-    if industry_pct < 66:
-        revision_steps.append("3. **Strengthen industry signal.** Add domain-specific language, tools, and outcomes.")
-    revision_steps.append("4. **Quantify achievements.** Replace vague claims with numbers: '% improvement', 'team size', 'revenue impact'.")
-    revision_steps.append(f"5. **Proofread for context.** Re-read the job description at {job.final_url or job.url or '(URL not available)'} and align your bullet order with their listed requirements.")
+        revision_steps.append("2. **Preserve requirement coverage.** Keep the matched skills visible and concrete.")
+    if scored_job.category == "Uncategorized" or scored_job.category_fit.startswith("Transferable"):
+        revision_steps.append("3. **Strengthen category signal.** Add domain-specific outcomes, users, metrics, or regulated-context details where truthful.")
+    revision_steps.append("4. **Quantify achievements.** Replace vague claims with numbers: '% improvement', 'team size', 'latency', 'revenue', or 'cost' impact.")
+    revision_steps.append(f"5. **Proofread for context.** Re-read the job description at {job.final_url or job.url or '(URL not available)'} and align bullet order with its listed requirements.")
 
     revision_block = "\n".join(revision_steps)
 
@@ -241,7 +243,7 @@ def build_improvement_prompt(
 ## Job Snapshot
 - **Title:** {job.title or 'N/A'}
 - **Company:** {job.company or 'N/A'}
-- **Score:** {scored_job.score:.1f}/100 — category: {scored_job.category}
+- **Score:** {scored_job.score:.1f}/100 — {scored_job.explanation}
 - **Category:** {scored_job.category}
 {region_info}
 
@@ -250,6 +252,10 @@ def build_improvement_prompt(
 ---
 
 {role_assessment}
+
+---
+
+{strengths_section}
 
 ---
 
@@ -265,6 +271,10 @@ def build_improvement_prompt(
 
 ---
 
+{concerns_section}
+
+---
+
 ## Recommended Revision Steps
 {revision_block}
 """
@@ -273,6 +283,51 @@ def build_improvement_prompt(
 # ── Internal helpers ─────────────────────────────────────────────────────────
 
 _TOKEN_RE = re.compile(r"[a-z0-9][a-z0-9+.#-]{1,}")
+
+
+@dataclass(frozen=True)
+class _ResumeIndex:
+    text: str
+    normalized: str
+    tokens: frozenset[str]
+    evidence_lines: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _JobIndex:
+    text: str
+    tokens: frozenset[str]
+    title_tokens: frozenset[str]
+
+
+_STOP_WORDS: frozenset[str] = frozenset(
+    {
+        "about", "across", "after", "also", "and", "are", "based", "build", "can",
+        "company", "customer", "customers", "data", "deliver", "design", "develop",
+        "development", "experience", "for", "from", "have", "help", "into", "job",
+        "lead", "new", "our", "own", "product", "products", "requirements", "role",
+        "services", "team", "teams", "that", "the", "their", "this", "through",
+        "to", "using", "with", "work", "working", "you", "your",
+    }
+)
+
+
+_HIGH_VALUE_TERMS: tuple[str, ...] = (
+    "python", "sql", "typescript", "javascript", "react", "vue", "angular", "node",
+    "fastapi", "django", "flask", "java", "kotlin", "scala", "go", "golang", "rust",
+    "c++", "c#", "ruby", "rails", "php", "swift", "objective-c", "aws", "gcp",
+    "azure", "docker", "kubernetes", "terraform", "pulumi", "ci/cd", "github",
+    "gitlab", "jenkins", "airflow", "spark", "dbt", "snowflake", "bigquery",
+    "redshift", "postgres", "postgresql", "mysql", "mongodb", "redis", "kafka",
+    "graphql", "grpc", "rest", "api", "apis", "microservices", "distributed systems",
+    "machine learning", "ml", "ai", "llm", "rag", "nlp", "pytorch", "tensorflow",
+    "scikit-learn", "pandas", "numpy", "analytics", "experimentation", "a/b",
+    "observability", "monitoring", "security", "privacy", "hipaa", "soc2", "fintech",
+    "healthcare", "clinical", "payments", "climate", "developer tools", "platform",
+    "frontend", "backend", "full stack", "mobile", "ios", "android", "product",
+    "design systems", "etl", "elt", "pipeline", "pipelines", "warehouse", "crm",
+    "salesforce", "hubspot", "growth", "marketing", "sales", "operations",
+)
 
 # US state/territory -> region mapping
 _US_REGIONS: dict[str, str] = {
@@ -425,6 +480,231 @@ def _job_text(job: JobRecord) -> str:
             parts.append(loc_val)
 
     return _normalize_text(" ".join(p for p in parts if p))
+
+
+def _build_resume_index(analysis: UploadedResumeAnalysis) -> _ResumeIndex:
+    text = analysis.text or ""
+    normalized = _normalize_text(text)
+    lines = tuple(
+        line.strip()
+        for line in re.split(r"[\r\n•]+", text)
+        if len(line.strip()) >= 8
+    )
+    return _ResumeIndex(
+        text=text,
+        normalized=normalized,
+        tokens=frozenset(_tokenize(normalized)),
+        evidence_lines=lines[:80],
+    )
+
+
+def _build_job_index(job: JobRecord) -> _JobIndex:
+    text = _job_text(job)
+    return _JobIndex(
+        text=text,
+        tokens=frozenset(_tokenize(text)),
+        title_tokens=frozenset(_tokenize(_normalize_text(job.title or ""))),
+    )
+
+
+def _score_resume_title_fit(job_index: _JobIndex, resume_index: _ResumeIndex) -> float:
+    title_terms = {term for term in job_index.title_tokens if term not in _STOP_WORDS}
+    if not title_terms:
+        return 0.0
+    overlap = len(title_terms & resume_index.tokens)
+    ratio = overlap / len(title_terms)
+    if ratio >= 0.75:
+        return 12.0
+    if ratio >= 0.5:
+        return 8.0
+    if ratio > 0:
+        return 4.0
+    return 0.0
+
+
+def _job_requirement_terms(
+    job: JobRecord,
+    job_index: _JobIndex,
+    target_industries: Sequence[str],
+    keywords: Sequence[str],
+) -> tuple[str, ...]:
+    raw = job.raw
+    terms: list[str] = []
+
+    for source in (target_industries, keywords):
+        for term in source:
+            normalized = _normalize_requirement(term)
+            if normalized and _text_has_term(job_index.text, normalized):
+                terms.append(normalized)
+
+    skills = raw.get("skills")
+    if isinstance(skills, str):
+        terms.extend(_split_skill_text(skills))
+    elif isinstance(skills, (list, tuple)):
+        terms.extend(str(skill) for skill in skills if str(skill).strip())
+
+    for term in _HIGH_VALUE_TERMS:
+        if _text_has_term(job_index.text, term):
+            terms.append(term)
+
+    terms.extend(_important_requirement_tokens(job))
+    normalized = [_normalize_requirement(term) for term in terms]
+    filtered = [term for term in normalized if _is_requirement_term(term)]
+    return tuple(dict.fromkeys(filtered))
+
+
+def _split_skill_text(value: str) -> list[str]:
+    return [part.strip() for part in re.split(r"[,;/|]+", value) if part.strip()]
+
+
+def _important_requirement_tokens(job: JobRecord) -> tuple[str, ...]:
+    raw = job.raw
+    parts: list[str] = []
+    for key in ("requirements", "qualifications", "responsibilities", "job_description", "description", "job_text", "summary"):
+        value = raw.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, (list, tuple)):
+            parts.extend(str(item) for item in value)
+    text = " ".join(parts)
+    sentences = re.split(r"(?<=[.!?])\s+|[\r\n]+", text)
+    cue_re = re.compile(r"\b(required|requires|requirement|must|need|needs|experience with|proficient|knowledge of|familiar|skills?)\b", re.IGNORECASE)
+    cue_words = {"required", "requires", "requirement", "must", "need", "needs", "experience", "proficient", "knowledge", "familiar", "skill", "skills"}
+    terms: list[str] = []
+    for sentence in sentences:
+        if not cue_re.search(sentence):
+            continue
+        normalized_sentence = _normalize_text(sentence)
+        for token in _TOKEN_RE.findall(normalized_sentence):
+            normalized = token.strip(".,;:!?()[]{}\"'")
+            if len(normalized) >= 5 and normalized not in _STOP_WORDS and normalized not in cue_words:
+                terms.append(normalized)
+    return tuple(dict.fromkeys(terms[:12]))
+
+
+def _normalize_requirement(value: str) -> str:
+    return _normalize_text(str(value).strip(" -•\t\n\r"))
+
+
+def _is_requirement_term(term: str) -> bool:
+    if not term or term in _STOP_WORDS:
+        return False
+    if len(term) <= 1:
+        return False
+    tokens = _tokenize(term)
+    return bool(tokens and any(token not in _STOP_WORDS for token in tokens))
+
+
+def _split_supported_terms(
+    requirement_terms: Sequence[str],
+    resume_index: _ResumeIndex,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    matched: list[str] = []
+    missing: list[str] = []
+    for term in requirement_terms:
+        if _resume_supports_term(resume_index, term):
+            matched.append(term)
+        else:
+            missing.append(term)
+    return tuple(matched), tuple(missing)
+
+
+def _resume_supports_term(resume_index: _ResumeIndex, term: str) -> bool:
+    if _text_has_term(resume_index.normalized, term):
+        return True
+    tokens = _tokenize(term)
+    meaningful = {token for token in tokens if token not in _STOP_WORDS}
+    return bool(meaningful and meaningful <= resume_index.tokens)
+
+
+def _score_requirement_coverage(matched: Sequence[str], requirements: Sequence[str]) -> float:
+    if not requirements:
+        return 0.0
+    coverage = len(matched) / len(requirements)
+    return min(35.0, 35.0 * coverage)
+
+
+def _evidence_for_terms(resume_index: _ResumeIndex, matched_terms: Sequence[str]) -> tuple[str, ...]:
+    evidence: list[str] = []
+    for term in matched_terms[:12]:
+        term_tokens = _tokenize(term)
+        for line in resume_index.evidence_lines:
+            normalized = _normalize_text(line)
+            if _text_has_term(normalized, term) or (term_tokens and term_tokens <= _tokenize(normalized)):
+                evidence.append(line)
+                break
+        if len(evidence) >= 4:
+            break
+    if evidence:
+        return tuple(dict.fromkeys(evidence))
+    return ("No direct resume evidence found for the extracted job requirements.",)
+
+
+def _key_strengths(matched_terms: Sequence[str], evidence: Sequence[str]) -> tuple[str, ...]:
+    if not matched_terms:
+        return ("No strong requirement matches found in the uploaded resume.",)
+    strengths = [f"Resume supports {term}" for term in matched_terms[:5]]
+    if evidence and not evidence[0].startswith("No direct"):
+        strengths.append("Direct evidence found in uploaded resume text.")
+    return tuple(strengths[:6])
+
+
+def _concerns_for_job(
+    job: JobRecord,
+    resume_index: _ResumeIndex,
+    missing_requirements: Sequence[str],
+) -> tuple[str, ...]:
+    job_text = _job_text(job)
+    concerns: list[str] = []
+    if missing_requirements:
+        concerns.append("Missing direct resume evidence for " + ", ".join(missing_requirements[:5]) + ".")
+    if len(resume_index.tokens) < 50:
+        concerns.append("Uploaded resume text is short; extracted evidence may be incomplete.")
+    if _contains_phrase(job_text, "years") and not _years_in_text(resume_index.text):
+        concerns.append("Job mentions years of experience but the resume text does not clearly quantify tenure.")
+    if (_contains_phrase(job_text, "degree") or _contains_phrase(job_text, "bachelor") or _contains_phrase(job_text, "master")) and not (
+        _contains_phrase(resume_index.normalized, "degree")
+        or _contains_phrase(resume_index.normalized, "bachelor")
+        or _contains_phrase(resume_index.normalized, "master")
+    ):
+        concerns.append("Job mentions education requirements not clearly evidenced in the resume text.")
+    return tuple(concerns) if concerns else ("No major concerns detected from the available resume text.",)
+
+
+def _category_fit(category: str, target_industries: Sequence[str], resume_index: _ResumeIndex) -> str:
+    if category == "Uncategorized":
+        if not target_industries:
+            return "No target industry supplied; category fit is based on resume and job requirement evidence."
+        return "No clear target-industry signal found in this job."
+    category_norm = _normalize_text(category)
+    if _resume_supports_term(resume_index, category_norm):
+        return f"Strong category fit: resume and job both reference {category}."
+    return f"Transferable category fit: job matches {category}, but resume evidence is indirect."
+
+
+def _match_explanation(
+    *,
+    score: float,
+    role_pts: float,
+    industry_pts: float,
+    kw_pts: float,
+    requirement_pts: float,
+    resume_pts: float,
+    matched_count: int,
+    requirement_count: int,
+    category_fit: str,
+) -> str:
+    if score >= 75:
+        tier = "Strong"
+    elif score >= 45:
+        tier = "Moderate"
+    else:
+        tier = "Weak"
+    return (
+        f"{tier} match: {matched_count}/{requirement_count or 0} extracted requirements have resume evidence. "
+        f"Components — role {role_pts:.0f}, category {industry_pts:.0f}, keywords {kw_pts:.0f}, "
+        f"requirements {requirement_pts:.0f}, resume overlap {resume_pts:.0f}. {category_fit}"
+    )
 
 
 def _location_text(job: JobRecord) -> str:
@@ -671,8 +951,8 @@ def _score_industry(job: JobRecord, target_industries: Sequence[str]) -> float:
         if raw.get(k)
     ))
 
-    company_hits = sum(1 for ind in norm_industries if _contains_phrase(company_text, ind))
-    text_hits = sum(1 for ind in norm_industries if _contains_phrase(text, ind))
+    company_hits = sum(1 for ind in norm_industries if _text_has_term(company_text, ind))
+    text_hits = sum(1 for ind in norm_industries if _text_has_term(text, ind))
 
     if company_hits >= 2:
         return 30.0
@@ -694,7 +974,7 @@ def _score_keywords(job: JobRecord, keywords: Sequence[str]) -> float:
     text = _job_text(job)
     norm_kw = _normalize_text_set(keywords)
 
-    hits = sum(1 for kw in norm_kw if _contains_phrase(text, kw))
+    hits = sum(1 for kw in norm_kw if _text_has_term(text, kw))
     ratio = hits / len(norm_kw)
     return min(ratio * 20.0, 20.0)
 
@@ -736,28 +1016,24 @@ def _matched_terms(
     text = _job_text(job)
     matched: list[str] = []
 
-    # Role tokens found
-    if job.title:
-        title_norm = _normalize_text(job.title)
-        title_tokens = _tokenize(title_norm)
-        for role in target_roles:
-            role_norm = _normalize_text(role)
-            role_tokens = _tokenize(role_norm)
-            common = title_tokens & role_tokens
-            matched.extend(sorted(common))  # deduplicated per role
-            if _contains_phrase(title_norm, role_norm):
-                matched.append(role_norm)
-
+    for role in target_roles:
+        role_norm = _normalize_text(role)
+        role_tokens = _tokenize(role_norm)
+        if _text_has_term(text, role_norm):
+            matched.append(role_norm)
+            continue
+        common = sorted(token for token in (job.title and _tokenize(_normalize_text(job.title)) or set()) & role_tokens if token not in _STOP_WORDS)
+        matched.extend(common)
     # Industries
     norm_ind = _normalize_text_set(target_industries)
     for ind in norm_ind:
-        if _contains_phrase(text, ind):
+        if _text_has_term(text, ind):
             matched.append(ind)
 
     # Keywords
     norm_kw = _normalize_text_set(keywords)
     for kw in norm_kw:
-        if _contains_phrase(text, kw):
+        if _text_has_term(text, kw):
             matched.append(kw)
 
     return tuple(dict.fromkeys(matched))
@@ -775,17 +1051,17 @@ def _missing_terms(
 
     for role in target_roles:
         role_norm = _normalize_text(role)
-        if not _contains_phrase(text, role_norm):
+        if not _text_has_term(text, role_norm):
             missing.append(role)
 
     for ind in target_industries:
         ind_norm = _normalize_text(ind)
-        if not _contains_phrase(text, ind_norm):
+        if not _text_has_term(text, ind_norm):
             missing.append(ind)
 
     for kw in keywords:
         kw_norm = _normalize_text(kw)
-        if not _contains_phrase(text, kw_norm):
+        if not _text_has_term(text, kw_norm):
             missing.append(kw)
 
     return tuple(dict.fromkeys(missing))
@@ -807,8 +1083,8 @@ def _normalize_text_set(values: Sequence[str]) -> set[str]:
 
 
 def _tokenize(text: str) -> set[str]:
-    """Extract normalized search tokens from text."""
-    return set(_TOKEN_RE.findall(text))
+    """Extract normalized search tokens and trim surrounding punctuation."""
+    return {token for token in (match.strip(".,;:!?()[]{}\"'") for match in _TOKEN_RE.findall(text)) if token}
 
 
 def _contains_phrase(text: str, phrase: str) -> bool:
@@ -818,9 +1094,19 @@ def _contains_phrase(text: str, phrase: str) -> bool:
     return phrase in text
 
 
+def _text_has_term(text: str, term: str) -> bool:
+    """Match multi-word phrases by phrase and one-token terms by token."""
+    if not term:
+        return False
+    term_tokens = _tokenize(term)
+    if len(term_tokens) == 1 and term in term_tokens:
+        return next(iter(term_tokens)) in _tokenize(text)
+    return _contains_phrase(text, term)
+
+
 def _which_match(candidates: set[str], text: str) -> list[str]:
     """Return all candidates that appear in *text*."""
-    return [c for c in candidates if _contains_phrase(text, c)]
+    return [c for c in candidates if _text_has_term(text, c)]
 
 
 def _years_in_text(text: str) -> bool:

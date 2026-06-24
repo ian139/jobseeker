@@ -411,8 +411,10 @@ def _category_table(category_name: str, jobs: list[object]) -> str:
 def _result_row(scored: object) -> str:
     job = getattr(scored, "job")
     detail_id = _job_detail_id(job)
-    matched = "".join(f'<span class="badge">{html.escape(term)}</span>' for term in getattr(scored, "matched_terms", [])[:4])
-    missing = "".join(f'<span class="badge gap">{html.escape(term)}</span>' for term in getattr(scored, "missing_terms", [])[:4])
+    matched_values = getattr(scored, "matched_terms", ()) or getattr(scored, "key_strengths", ())
+    missing_values = getattr(scored, "missing_requirements", ()) or getattr(scored, "missing_terms", ())
+    matched = "".join(f'<span class="badge">{html.escape(str(term))}</span>' for term in matched_values[:4])
+    missing = "".join(f'<span class="badge gap">{html.escape(str(term))}</span>' for term in missing_values[:4])
     return f"""<tr class="job-row {_score_tier(float(getattr(scored, "score", 0.0)))}" data-job-id="{html.escape(job.theirstack_id)}">
   <td class="score">{int(round(float(getattr(scored, "score", 0.0))))}</td>
   <td><a href="#{detail_id}" data-detail-target="{detail_id}" aria-controls="{detail_id}">{html.escape(job.title or "Untitled role")}</a></td>
@@ -559,13 +561,25 @@ def _job_detail_body(job: JobRecord, *, scored: object | None, actions: str) -> 
 def _score_metadata(scored: object | None) -> str:
     if scored is None:
         return '<p><strong>Score / match:</strong> <span class="muted">Not scored in this view. Upload a resume to see match metadata.</span></p>'
-    matched = "".join(f'<span class="badge">{html.escape(term)}</span>' for term in getattr(scored, "matched_terms", [])[:8])
-    missing = "".join(f'<span class="badge gap">{html.escape(term)}</span>' for term in getattr(scored, "missing_terms", [])[:8])
+    matched_values = getattr(scored, "matched_terms", ()) or getattr(scored, "key_strengths", ())
+    missing_values = getattr(scored, "missing_requirements", ()) or getattr(scored, "missing_terms", ())
+    matched = "".join(f'<span class="badge">{html.escape(str(term))}</span>' for term in matched_values[:8])
+    missing = "".join(f'<span class="badge gap">{html.escape(str(term))}</span>' for term in missing_values[:8])
     return f"""<p><strong>Category:</strong> {html.escape(str(getattr(scored, "category", "Uncategorized")))}</p>
+    <p><strong>Category fit:</strong> {html.escape(str(getattr(scored, "category_fit", "")))}</p>
     <p><strong>Score:</strong> <span class="score">{int(round(float(getattr(scored, "score", 0.0))))}</span></p>
     <p><strong>Region:</strong> {html.escape(str(getattr(scored, "region", "") or getattr(scored, "remote_label", "")))}</p>
+    <p><strong>Why this rank:</strong> {html.escape(str(getattr(scored, "explanation", "")))}</p>
     <p><strong>Matched:</strong> {matched or '<span class="muted">None</span>'}</p>
-    <p><strong>Missing:</strong> {missing or '<span class="muted">None</span>'}</p>"""
+    <p><strong>Missing:</strong> {missing or '<span class="muted">None</span>'}</p>
+    <h3>Key strengths</h3>
+    <ul>{_list_items(getattr(scored, "key_strengths", ()), "No supported strengths found.")}</ul>
+    <h3>Missing requirements</h3>
+    <ul>{_list_items(getattr(scored, "missing_requirements", ()), "No missing requirements detected.")}</ul>
+    <h3>Relevant resume evidence</h3>
+    <ul>{_list_items(getattr(scored, "relevant_resume_evidence", ()), "No direct resume evidence found.")}</ul>
+    <h3>Concerns</h3>
+    <ul>{_list_items(getattr(scored, "concerns", ()), "No major concerns detected.")}</ul>"""
 
 
 def _job_description(job: JobRecord) -> str:
@@ -673,7 +687,7 @@ def _clean_url(value: object) -> str:
 
 
 def _list_items(values: object, fallback: str) -> str:
-    if not isinstance(values, list) or not values:
+    if not isinstance(values, (list, tuple)) or not values:
         return f"<li>{html.escape(fallback)}</li>"
     return "".join(f"<li>{html.escape(str(value))}</li>" for value in values[:4])
 
@@ -702,13 +716,21 @@ def _category_regions(category: object) -> list[str]:
 
 
 def _category_strengths(category: object) -> list[str]:
-    values = _ranked_values(term for job in getattr(category, "top_jobs", ()) for term in getattr(job, "matched_terms", ()))
-    return [f"Matches {value}" for value in values]
+    values = _ranked_values(
+        strength
+        for job in getattr(category, "top_jobs", ())
+        for strength in getattr(job, "key_strengths", ()) or getattr(job, "matched_terms", ())
+    )
+    return values
 
 
 def _category_gaps(category: object) -> list[str]:
-    values = _ranked_values(term for job in getattr(category, "top_jobs", ()) for term in getattr(job, "missing_terms", ()))
-    return [f"Add clearer evidence for {value}" for value in values]
+    values = _ranked_values(
+        gap
+        for job in getattr(category, "top_jobs", ())
+        for gap in getattr(job, "missing_requirements", ()) or getattr(job, "missing_terms", ())
+    )
+    return values
 
 
 def _ranked_values(values: object) -> list[str]:

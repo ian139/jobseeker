@@ -449,8 +449,8 @@ def test_improvement_prompt_missing_skills_section() -> None:
     prompt = build_improvement_prompt(scored[0], analysis, target_roles=targets, target_industries=industries)
 
     assert "Missing Skills" in prompt
-    # Should mention gap keywords
-    assert "pytorch" in prompt or "aws" in prompt
+    # Should mention requirements present in the job but absent from the resume.
+    assert "tensorflow" in prompt
 
 
 # ── Tests: edge cases ────────────────────────────────────────────────────────
@@ -483,8 +483,19 @@ def test_scored_job_dataclass_fields() -> None:
     assert hasattr(s, "missing_terms")
     assert hasattr(s, "region")
     assert hasattr(s, "remote_label")
+    assert hasattr(s, "category_fit")
+    assert hasattr(s, "key_strengths")
+    assert hasattr(s, "missing_requirements")
+    assert hasattr(s, "relevant_resume_evidence")
+    assert hasattr(s, "concerns")
+    assert hasattr(s, "explanation")
     assert isinstance(s.matched_terms, tuple)
     assert isinstance(s.missing_terms, tuple)
+    assert isinstance(s.key_strengths, tuple)
+    assert isinstance(s.missing_requirements, tuple)
+    assert isinstance(s.relevant_resume_evidence, tuple)
+    assert isinstance(s.concerns, tuple)
+    assert s.explanation
 
 
 def test_matched_terms_filled_when_keywords_found() -> None:
@@ -523,3 +534,62 @@ def test_missing_terms_filled() -> None:
     all_terms = {"senior developer", "fintech", "kubernetes", "aws"}
     found_any_missing = any(term in s.missing_terms for term in all_terms)
     assert found_any_missing, f"Expected at least one missing term from {all_terms}, got {s.missing_terms}"
+
+
+def test_resume_only_scoring_ranks_supported_requirements_first() -> None:
+    """Resume upload alone produces useful ranked matches without target filters."""
+    analysis = _analysis(
+        text=(
+            "Ada Candidate\n"
+            "Experience\n"
+            "Built Python and SQL services for healthcare analytics teams using FastAPI.\n"
+            "Skills\n"
+            "Python SQL FastAPI healthcare analytics"
+        )
+    )
+    supported = _job_record(
+        theirstack_id="supported",
+        title="Clinical Data Engineer",
+        raw={
+            "job_description": "Build Python SQL pipelines and FastAPI services for healthcare analytics.",
+            "skills": ["Python", "SQL", "FastAPI", "analytics"],
+            "company_description": "Clinical healthcare analytics company.",
+        },
+    )
+    unsupported = _job_record(
+        theirstack_id="unsupported",
+        title="Retail Operations Analyst",
+        raw={
+            "job_description": "Manage retail staffing, store schedules, and vendor escalations.",
+            "skills": ["workforce planning", "vendor management"],
+        },
+    )
+
+    scored = score_jobs([unsupported, supported], analysis, target_roles=[], target_industries=[], keywords=[])
+
+    assert scored[0].job.theirstack_id == "supported"
+    assert scored[0].score > scored[1].score
+    assert scored[0].key_strengths
+    assert scored[0].relevant_resume_evidence
+    assert "Python" in scored[0].relevant_resume_evidence[0] or "python" in scored[0].relevant_resume_evidence[0].lower()
+
+
+def test_structured_result_reports_missing_requirements_and_concerns() -> None:
+    analysis = _analysis(text="Backend engineer with Python APIs.")
+    job = _job_record(
+        theirstack_id="structured",
+        title="Platform Engineer",
+        raw={
+            "job_description": "Build Kubernetes Terraform services with Python APIs. Requires 5 years experience.",
+            "skills": ["Python", "Kubernetes", "Terraform"],
+        },
+    )
+
+    scored = score_jobs([job], analysis, target_roles=[], target_industries=[], keywords=[])
+    result = scored[0]
+
+    assert "kubernetes" in result.missing_requirements
+    assert "terraform" in result.missing_requirements
+    assert any("years of experience" in concern for concern in result.concerns)
+    assert result.category_fit
+    assert "requirements" in result.explanation

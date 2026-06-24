@@ -20,10 +20,11 @@ def test_storage_lists_jobs_newest_first(tmp_path: Path) -> None:
     storage = JobStorage(tmp_path / "jobs.sqlite3")
     storage.upsert_job(_job("old-job", discovered_at="2026-06-20T12:00:00+00:00"))
     storage.upsert_job(_job("new-job", discovered_at="2026-06-23T12:00:00+00:00"))
+    storage.upsert_job(_job("undated-job", discovered_at=None, date_posted=None))
 
     jobs = storage.list_jobs(limit=10)
 
-    assert [job.theirstack_id for job in jobs] == ["new-job", "old-job"]
+    assert [job.theirstack_id for job in jobs] == ["new-job", "old-job", "undated-job"]
     assert all(isinstance(job, JobRecord) for job in jobs)
     with pytest.raises(ValueError, match="Job list limit must be at least 1"):
         storage.list_jobs(limit=0)
@@ -126,7 +127,8 @@ Python
 def _job(
     job_id: str,
     *,
-    discovered_at: str = "2026-06-23T12:00:00+00:00",
+    discovered_at: str | None = "2026-06-23T12:00:00+00:00",
+    date_posted: str | None = "2026-06-23",
     job_title: str = "Software Engineer",
     company_name: str = "Acme",
 ) -> dict[str, object]:
@@ -137,7 +139,7 @@ def _job(
         "company_domain": "acme.example",
         "job_country_code": "US",
         "remote": True,
-        "date_posted": "2026-06-23",
+        "date_posted": date_posted,
         "discovered_at": discovered_at,
         "url": "https://www.linkedin.com/jobs/view/123",
         "source_url": "https://www.linkedin.com/jobs/view/123",

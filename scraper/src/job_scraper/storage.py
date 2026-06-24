@@ -245,7 +245,8 @@ class JobStorage:
                 SELECT theirstack_id, title, company, company_domain, country_code, remote,
                        date_posted, discovered_at, url, source_url, final_url, raw_json
                 FROM jobs
-                ORDER BY COALESCE(discovered_at, date_posted, final_url, url, theirstack_id) DESC,
+                ORDER BY CASE WHEN COALESCE(discovered_at, date_posted) IS NULL THEN 1 ELSE 0 END,
+                         COALESCE(discovered_at, date_posted, last_seen_at, first_seen_at) DESC,
                          theirstack_id ASC
                 LIMIT ?
                 """,

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Literal, cast
 
-from job_scraper.outreach import (
+from job_scraper.outreach.models import (
     ContactMarkStatus,
     OutreachAction,
     OutreachConfig,
@@ -14,9 +14,9 @@ from job_scraper.outreach import (
     OutreachImportSummary,
     OutreachQueueSummary,
     OutreachStepKind,
-    normalize_linkedin_profile_url,
-    render_message,
 )
+from job_scraper.outreach.templates import render_message
+from job_scraper.outreach.urls import normalize_linkedin_profile_url
 
 CONTACT_STATUSES = {
     "new",

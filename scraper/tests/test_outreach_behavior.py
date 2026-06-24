@@ -8,8 +8,7 @@ from pathlib import Path
 import pytest
 
 from job_scraper.cli import main
-from job_scraper.outreach import OutreachConfig, OutreachContact, OutreachLimits, OutreachStep
-from job_scraper.outreach_storage import OutreachStorage
+from job_scraper.outreach import OutreachConfig, OutreachContact, OutreachLimits, OutreachStep, OutreachStorage
 from job_scraper.storage import JobStorage
 
 

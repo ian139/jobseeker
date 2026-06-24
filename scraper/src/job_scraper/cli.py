@@ -12,8 +12,7 @@ from job_scraper.applications import _merged_job_mapping, prepare_application_pa
 from job_scraper.applier import apply_to_job
 from job_scraper.config import AppSettings, build_search_payload, has_company_identifier_filters, load_config
 from job_scraper.llm import OpenAIResumeLLM, ResumeLLMError
-from job_scraper.outreach import load_outreach_config, normalize_linkedin_profile_url
-from job_scraper.outreach_storage import OutreachStorage
+from job_scraper.outreach import OutreachStorage, load_outreach_config, normalize_linkedin_profile_url
 from job_scraper.public_json import PublicJsonClient, import_public_json
 from job_scraper.resume import load_resume_profile, tailor_resume
 from job_scraper.scheduler import run_daemon

@@ -37,6 +37,8 @@ JOB_SCRAPER_DB_PATH=data/jobs.sqlite3
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4o-mini
 APPLICATION_PACK_DIR=data/application_packs
+APPLICATION_BROWSER_HEADLESS=false
+APPLICATION_TIMEOUT_MS=30000
 ```
 
 ## Scraper commands
@@ -89,6 +91,23 @@ job-scraper prepare-application \
   --notes "Applied via company site" \
   --no-llm
 ```
+
+Install Chromium and fill the saved job application:
+
+```bash
+python -m playwright install chromium
+job-scraper apply \
+  --job-id <THEIRSTACK_JOB_ID> \
+  --profile config/resume-profile.yaml \
+  --resume-path data/resumes/<resume>.pdf
+job-scraper apply \
+  --job-id <THEIRSTACK_JOB_ID> \
+  --profile config/resume-profile.yaml \
+  --resume-path data/resumes/<resume>.pdf \
+  --submit
+```
+
+Without `--submit`, Chromium fills the form and leaves final review to you; with `--submit`, the row is marked `applied` only after a submission confirmation is detected. Generated Markdown resumes can be uploaded only if the target form accepts them; for real ATS submissions, pass a PDF/DOCX via `--resume-path` until resume rendering exists.
 
 Track application state:
 

@@ -6,7 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Sequence
 
 LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +29,9 @@ APPLICATION_STATUSES: tuple[str, ...] = (
     "rejected",
     "withdrawn",
 )
+
+ApplicationAttemptStatus = Literal["prepared", "submitted", "blocked", "failed"]
+APPLICATION_ATTEMPT_STATUSES: tuple[str, ...] = ("prepared", "submitted", "blocked", "failed")
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,20 @@ class ApplicationRecord:
     resume_path: str | None
     created_at: str
     updated_at: str
+
+
+@dataclass(frozen=True)
+class ApplicationAttemptRecord:
+    id: int
+    application_id: int
+    theirstack_id: str
+    target_url: str
+    status: str
+    submitted: int
+    message: str
+    fields_filled_json: str
+    resume_uploaded: int
+    created_at: str
 
 class JobStorage:
     def __init__(self, db_path: Path) -> None:
@@ -112,6 +129,24 @@ class JobStorage:
                     resume_path TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
+                    FOREIGN KEY(theirstack_id) REFERENCES jobs(theirstack_id)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS application_attempts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    application_id INTEGER NOT NULL,
+                    theirstack_id TEXT NOT NULL,
+                    target_url TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    submitted INTEGER NOT NULL DEFAULT 0,
+                    message TEXT NOT NULL DEFAULT '',
+                    fields_filled_json TEXT NOT NULL DEFAULT '[]',
+                    resume_uploaded INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(application_id) REFERENCES applications(id),
                     FOREIGN KEY(theirstack_id) REFERENCES jobs(theirstack_id)
                 )
                 """
@@ -364,6 +399,80 @@ class JobStorage:
             rows = connection.execute(query, params).fetchall()
         return [_application_record_from_row(row) for row in rows]
 
+    def record_application_attempt(
+        self,
+        theirstack_id: str,
+        *,
+        target_url: str,
+        status: ApplicationAttemptStatus,
+        submitted: bool,
+        message: str = "",
+        fields_filled: Sequence[str] = (),
+        resume_uploaded: bool = False,
+    ) -> ApplicationAttemptRecord:
+        if status not in APPLICATION_ATTEMPT_STATUSES:
+            raise ValueError(f"Invalid application attempt status: {status}")
+
+        application = self.ensure_application(theirstack_id)
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        fields_filled_json = json.dumps(list(fields_filled), separators=(",", ":"))
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO application_attempts (
+                    application_id,
+                    theirstack_id,
+                    target_url,
+                    status,
+                    submitted,
+                    message,
+                    fields_filled_json,
+                    resume_uploaded,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    application.id,
+                    theirstack_id,
+                    target_url,
+                    status,
+                    int(submitted),
+                    message,
+                    fields_filled_json,
+                    int(resume_uploaded),
+                    now,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT id, application_id, theirstack_id, target_url, status, submitted,
+                       message, fields_filled_json, resume_uploaded, created_at
+                FROM application_attempts
+                WHERE id = ?
+                """,
+                (int(cursor.lastrowid),),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"Application attempt insert failed for job id: {theirstack_id}")
+        return _application_attempt_record_from_row(row)
+
+    def list_application_attempts(self, theirstack_id: str | None = None) -> list[ApplicationAttemptRecord]:
+        self.initialize()
+        query = """
+            SELECT id, application_id, theirstack_id, target_url, status, submitted,
+                   message, fields_filled_json, resume_uploaded, created_at
+            FROM application_attempts
+        """
+        params: tuple[str, ...] = ()
+        if theirstack_id is not None:
+            query += " WHERE theirstack_id = ?"
+            params = (theirstack_id,)
+        query += " ORDER BY created_at DESC, id DESC"
+        with self._connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [_application_attempt_record_from_row(row) for row in rows]
+
     def save_resume_version(
         self,
         *,
@@ -442,6 +551,21 @@ def _application_record_from_row(row: sqlite3.Row) -> ApplicationRecord:
         resume_path=_string_or_none(row["resume_path"]),
         created_at=str(row["created_at"]),
         updated_at=str(row["updated_at"]),
+    )
+
+
+def _application_attempt_record_from_row(row: sqlite3.Row) -> ApplicationAttemptRecord:
+    return ApplicationAttemptRecord(
+        id=int(row["id"]),
+        application_id=int(row["application_id"]),
+        theirstack_id=str(row["theirstack_id"]),
+        target_url=str(row["target_url"]),
+        status=str(row["status"]),
+        submitted=int(row["submitted"]),
+        message=str(row["message"]),
+        fields_filled_json=str(row["fields_filled_json"]),
+        resume_uploaded=int(row["resume_uploaded"]),
+        created_at=str(row["created_at"]),
     )
 
 

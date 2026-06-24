@@ -16,6 +16,7 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn>=0.30",
     "python-multipart>=0.0.9",
+    "playwright>=1.40",
     "pypdf>=4.3",
 ]
 

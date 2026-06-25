@@ -1,25 +1,45 @@
 # Agent Operating Notes
 
-## Project design reference
+## Project Design Reference
 
-- Use `SCRAPER_DESIGN.md` for general product and visual design ideas.
-- Apply that design direction specifically to the job scraper frontend, including the local resume-prompt web UI in `scraper/src/job_scraper/web.py`.
+Use `SCRAPER_DESIGN.md` as the general product and visual design reference.
 
-## Default coordinator model
+Apply that direction specifically to the job scraper frontend, including the local resume-prompt web UI in:
 
-Every new feature worktree should have one advisor-enabled parent agent. The parent is the coordinator: it plans, splits work, assigns file ownership, reviews worker output, resolves conflicts, and runs final verification.
+- `scraper/src/job_scraper/web.py`
+
+## Default Coordinator Model
+
+Every new feature worktree should have exactly one advisor-enabled parent agent.
+
+The parent agent is the coordinator. It owns:
+
+- planning
+- task splitting
+- file ownership
+- worker assignment
+- worker review
+- conflict resolution
+- final verification
 
 Launch the parent agent with:
 
 ```bash
 omp --advisor --model "openai-codex/gpt-5.5" --thinking xhigh
+
 ```
 
-The advisor is a guardrail for the parent agent. It should keep the plan, worker assignments, and final merge from drifting out of scope. Do not assume the advisor directly controls child terminals; the parent must inspect worker results and enforce boundaries.
+The advisor is a guardrail for the parent. It helps keep plans, assignments, and final merges in scope.
 
-## Worker allocation
+Do not assume the advisor controls child terminals. The parent must inspect worker output and enforce boundaries.
 
-Prefer smaller same-worktree worker terminals over nested worktrees. Use workers when a subtask has clear ownership and can finish without seeing another worker's result.
+## Worker Allocation
+
+Prefer smaller same-worktree worker terminals over nested worktrees.
+
+Do not create extra worktrees for subtasks unless the user explicitly asks for another checkout.
+
+Use workers only when the subtask has clear ownership and can finish without depending on another worker’s unfinished result.
 
 Good worker splits:
 
@@ -31,17 +51,28 @@ Good worker splits:
 
 Bad worker splits:
 
-- "clean up everything"
-- "make it better"
+- “clean up everything”
+- “make it better”
 - overlapping edits to the same file
-- tasks that require broad architectural decisions
-- tasks that need another worker's unfinished output
+- broad architectural decisions
+- tasks that require another worker’s unfinished output
 
-Implementation workers may use either DeepSeek V4 or GPT-5.5 at medium thinking:
+## Worker Launch Commands
+
+Implementation workers may use either DeepSeek V4 Pro or GPT-5.5 at medium thinking.
+
+DeepSeek worker:
 
 ```bash
 orca terminal create --worktree active --title "<specific-subtask>" --command 'omp --model "openrouter/deepseek/deepseek-v4-pro" --thinking medium' --json
+
+```
+
+GPT-5.5 worker:
+
+```bash
 orca terminal create --worktree active --title "<specific-subtask>" --command 'omp --model "openai-codex/gpt-5.5" --thinking medium' --json
+
 ```
 
 Then wait for the worker and send a narrow assignment:
@@ -49,41 +80,116 @@ Then wait for the worker and send a narrow assignment:
 ```bash
 orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
 orca terminal send --terminal <handle> --text '<narrow task prompt>' --enter --json
+
 ```
 
-## Coordinator rules
+## Coordinator Rules
 
-- Do not use `orca worktree create` for subtasks unless the user explicitly asks for another checkout.
-- Keep one parent/coordinator per feature worktree.
-- Write down file ownership before spawning workers.
-- Spawn one worker per disjoint file, subsystem, or verification slice.
-- Give each worker exact target files/symbols, explicit non-goals, and acceptance checks.
-- Prefer read-only review workers before risky merge or broad refactor work.
-- Parent owns final integration, conflict resolution, cleanup, and verification.
-- Parent must review worker diffs before accepting them as complete.
-- Workers should avoid broad cleanup and project-wide gates; the parent runs final verification once.
-- Workers must not touch files assigned to another worker.
-- If a worker needs a blocking decision, it should ask the parent/coordinator instead of guessing.
-- If a worker drifts out of scope, the parent should stop using that output and either correct the prompt or redo the slice.
+The parent/coordinator must:
 
-## Worker prompt template
+1. Keep one parent per feature worktree.
+2. Write down file ownership before spawning workers.
+3. Spawn one worker per disjoint file, subsystem, or verification slice.
+4. Give each worker exact target files, symbols, non-goals, and acceptance checks.
+5. Prefer read-only review workers before risky merges or broad refactors.
+6. Review worker diffs before accepting them.
+7. Stop using worker output if the worker drifts out of scope.
+8. Resolve conflicts and duplicate implementations itself.
+9. Run final verification after worker output is integrated.
+10. Confirm final behavior from the user’s perspective.
+
+Workers must:
+
+1. Stay in the active worktree.
+2. Not create new worktrees.
+3. Only edit assigned files.
+4. Avoid broad cleanup.
+5. Avoid project-wide gates unless explicitly assigned.
+6. Ask the parent for blocking decisions instead of guessing.
+7. Report changed files, verification run, and unresolved risks.
+
+## Worker Prompt Template
 
 ```text
 Target: <exact files/symbols>.
-Change: <specific behavior to add/fix>.
-Non-goals: do not edit <files/subsystems>.
-Ownership: you own only <files>; do not touch anything else.
-Acceptance: <focused checks or observable behavior>.
-Stay in this worktree. Do not create a new worktree. Do not run broad cleanup.
-Report files changed, verification run, and any unresolved risks.
+
+Change:
+<specific behavior to add/fix>.
+
+Non-goals:
+Do not edit <files/subsystems>.
+Do not do broad cleanup.
+Do not create a new worktree.
+
+Ownership:
+You own only <files>.
+Do not touch anything else.
+
+Acceptance:
+<focused checks or observable behavior>.
+
+Verification:
+Run <specific command or focused test>.
+
+Report:
+1. Files changed
+2. Verification run
+3. Result
+4. Unresolved risks
+
 ```
 
-## Parent handoff checklist
+
+
+## Default New Worktree Workflow
+
+For every new feature or risky fix, create one feature worktree first. Do not create nested worktrees for normal subtasks.
+
+Default flow:
+
+```bash
+orca worktree create --name "<short-feature-name>" --json
+
+orca terminal create --worktree "<short-feature-name>" --title "coordinator" --command 'omp --advisor --model "openai-codex/gpt-5.5" --thinking xhigh' --json
+
+orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
+```
+
+## Parent Handoff Checklist
 
 Before merging worker output, the parent must confirm:
 
-- the worker stayed inside assigned ownership
+- worker stayed inside assigned ownership
 - no unrelated files changed
-- tests or focused checks match the assignment
+- focused checks match the assignment
+- tests or verification were actually run
 - duplicate/conflicting implementations were reconciled
-- final behavior works from the user's perspective
+- final behavior works from the user’s perspective
+- final diff is reviewed by the parent
+- remaining risks are documented
+
+## Verification Contract
+
+Every completed task must include:
+
+- Commands actually run
+- Tests actually run
+- Files modified
+- Files intentionally not modified
+- Known risks
+- Remaining TODOs
+
+Never claim verification unless the command was executed.
+
+If verification cannot be run, explain why.
+
+## Final Response Requirements
+
+At the end of a feature task, the parent must report:
+
+1. Summary of behavior changed
+2. Files changed
+3. Tests/checks run
+4. Known risks or skipped checks
+5. Suggested next patch, if any
+

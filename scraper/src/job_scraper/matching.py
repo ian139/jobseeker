@@ -18,6 +18,28 @@ from job_scraper.resume_uploads import MAX_PROMPT_RESUME_CHARS, UploadedResumeAn
 
 
 @dataclass(frozen=True)
+class ScoreComponent:
+    """One aggregate scoring component that contributes to a scored job."""
+
+    name: str
+    score: float
+    max_score: float
+    explanation: str
+
+
+@dataclass(frozen=True)
+class EvidenceMatch:
+    """A resume evidence item matched to one extracted job requirement."""
+
+    requirement: str
+    resume_excerpt: str
+    contribution_score: float
+    confidence: float
+    matched_keywords: tuple[str, ...]
+    explanation: str
+
+
+@dataclass(frozen=True)
 class ScoredJob:
     """Result of scoring a single job against a resume and target criteria."""
 
@@ -34,6 +56,8 @@ class ScoredJob:
     relevant_resume_evidence: tuple[str, ...]
     concerns: tuple[str, ...]
     explanation: str
+    score_components: tuple[ScoreComponent, ...] = ()
+    evidence_matches: tuple[EvidenceMatch, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -81,6 +105,15 @@ def score_jobs(
         matched_requirements, missing_requirements = _split_supported_terms(requirement_terms, resume_index)
         requirement_pts = _score_requirement_coverage(matched_requirements, requirement_terms)
         resume_pts = _score_resume_overlap(job, resume_index.tokens)
+        score_components = _score_components(
+            role_pts=role_pts,
+            industry_pts=industry_pts,
+            kw_pts=kw_pts,
+            requirement_pts=requirement_pts,
+            resume_pts=resume_pts,
+            requirement_count=len(requirement_terms),
+            matched_requirement_count=len(matched_requirements),
+        )
         score = min(100.0, role_pts + industry_pts + kw_pts + requirement_pts + resume_pts)
 
         category = _categorize_job(job, target_industries)
@@ -88,6 +121,11 @@ def score_jobs(
         region, remote_label = _analyze_region(job)
         missing = _missing_terms(job, target_roles, target_industries, keywords)
         evidence = _evidence_for_terms(resume_index, matched_requirements)
+        evidence_matches = _evidence_matches_for_terms(
+            resume_index,
+            matched_requirements,
+            requirement_count=len(requirement_terms),
+        )
         concerns = _concerns_for_job(job, resume_index, missing_requirements)
         category_fit = _category_fit(category, target_industries, resume_index)
         strengths = _key_strengths(matched_requirements, evidence)
@@ -118,6 +156,8 @@ def score_jobs(
                 relevant_resume_evidence=evidence,
                 concerns=concerns,
                 explanation=explanation,
+                score_components=score_components,
+                evidence_matches=evidence_matches,
             )
         )
 
@@ -901,16 +941,91 @@ def _score_requirement_coverage(matched: Sequence[str], requirements: Sequence[s
     coverage = len(matched) / len(requirements)
     return min(35.0, 35.0 * coverage)
 
+def _score_components(
+    *,
+    role_pts: float,
+    industry_pts: float,
+    kw_pts: float,
+    requirement_pts: float,
+    resume_pts: float,
+    requirement_count: int,
+    matched_requirement_count: int,
+) -> tuple[ScoreComponent, ...]:
+    return (
+        ScoreComponent("Role fit", round(role_pts, 1), 40.0, "Job title overlap with target roles or resume title signals."),
+        ScoreComponent("Category fit", round(industry_pts, 1), 30.0, "Industry/category terms found in job or company context."),
+        ScoreComponent("Keyword relevance", round(kw_pts, 1), 20.0, "Optional filter keywords found in the job record."),
+        ScoreComponent(
+            "Requirement evidence",
+            round(requirement_pts, 1),
+            35.0,
+            f"{matched_requirement_count}/{requirement_count or 0} extracted requirements have direct resume support.",
+        ),
+        ScoreComponent("Resume overlap", round(resume_pts, 1), 10.0, "Token overlap between uploaded resume text and job text."),
+    )
+
+
+def _evidence_matches_for_terms(
+    resume_index: _ResumeIndex,
+    matched_terms: Sequence[str],
+    *,
+    requirement_count: int,
+) -> tuple[EvidenceMatch, ...]:
+    if not matched_terms or requirement_count <= 0:
+        return ()
+    per_requirement_points = round(35.0 / requirement_count, 1)
+    matches: list[EvidenceMatch] = []
+    for term in matched_terms[:12]:
+        line, confidence = _evidence_line_for_term(resume_index, term)
+        if not line:
+            continue
+        matches.append(
+            EvidenceMatch(
+                requirement=term,
+                resume_excerpt=line,
+                contribution_score=per_requirement_points,
+                confidence=confidence,
+                matched_keywords=_evidence_keywords_for_term(term, line),
+                explanation=(
+                    f"Matched `{term}` to a resume excerpt. This evidence contributes "
+                    f"{per_requirement_points:.1f} points to the requirement-evidence component."
+                ),
+            )
+        )
+        if len(matches) >= 8:
+            break
+    matches.sort(key=lambda match: (-match.contribution_score, -match.confidence, match.requirement))
+    return tuple(matches)
+
+
+def _evidence_line_for_term(resume_index: _ResumeIndex, term: str) -> tuple[str, float]:
+    term_tokens = _tokenize(term)
+    for line in resume_index.evidence_lines:
+        normalized = _normalize_text(line)
+        if _text_has_term(normalized, term):
+            return line, 1.0
+        if term_tokens and term_tokens <= _tokenize(normalized):
+            return line, 0.85
+    return "", 0.0
+
+
+def _evidence_keywords_for_term(term: str, line: str) -> tuple[str, ...]:
+    normalized_line = _normalize_text(line)
+    keywords: list[str] = []
+    if _text_has_term(normalized_line, term):
+        keywords.append(term)
+    for token in _tokenize(term):
+        if token not in _STOP_WORDS and _text_has_term(normalized_line, token):
+            keywords.append(token)
+    return tuple(dict.fromkeys(keywords[:6]))
+
 
 def _evidence_for_terms(resume_index: _ResumeIndex, matched_terms: Sequence[str]) -> tuple[str, ...]:
     evidence: list[str] = []
     for term in matched_terms[:12]:
-        term_tokens = _tokenize(term)
-        for line in resume_index.evidence_lines:
-            normalized = _normalize_text(line)
-            if _text_has_term(normalized, term) or (term_tokens and term_tokens <= _tokenize(normalized)):
-                evidence.append(line)
-                break
+        line, _confidence = _evidence_line_for_term(resume_index, term)
+        if line:
+            evidence.append(line)
         if len(evidence) >= 4:
             break
     if evidence:

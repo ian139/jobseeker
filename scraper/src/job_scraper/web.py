@@ -268,12 +268,42 @@ def _page(title: str, body: str) -> str:
     .action-row {{ align-items: center; }}
     .copy-status {{ color: #A9B665; font-size: 0.8rem; margin-top: 1rem; }}
     .description {{ background: #0B0F14; border: 1px solid #202832; border-radius: 0.55rem; color: #BDAE93; overflow-wrap: anywhere; padding: 0.75rem; white-space: pre-wrap; }}
+    .selected-job-header {{ display: grid; gap: 0.7rem; }}
+    .summary-grid {{ display: grid; gap: 0.75rem; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0.9rem 0; }}
+    .summary-card {{ background: #161C23; border: 1px solid #202832; border-radius: 0.75rem; padding: 0.8rem; }}
+    .summary-card span {{ color: #928374; display: block; font-size: 0.74rem; letter-spacing: 0.08em; text-transform: uppercase; }}
+    .summary-card strong {{ color: #FABD2F; display: block; font-size: 1.25rem; margin-top: 0.2rem; }}
+    .bottleneck-banner, .state-card {{ background: #1A1714; border: 1px solid #D8A657; border-radius: 0.75rem; margin: 0.85rem 0; padding: 0.85rem; }}
+    .state-card.warning {{ border-color: #EA6962; }}
+    .state-card.success {{ border-color: #A9B665; }}
+    .analysis-tabs {{ margin-top: 1rem; }}
+    .tab-controls {{ display: flex; flex-wrap: wrap; gap: 0.45rem; margin-bottom: 0.9rem; }}
+    .tab-input {{ opacity: 0; pointer-events: none; position: absolute; }}
+    .tab-label {{ border: 1px solid #2B3440; border-radius: 999px; color: #BDAE93; cursor: pointer; padding: 0.45rem 0.7rem; }}
+    .tab-input:focus-visible + .tab-label {{ outline: 2px solid #7DAEA3; outline-offset: 2px; }}
+    .tab-input:checked + .tab-label {{ background: #D8A657; border-color: #D8A657; color: #11161D; font-weight: 900; }}
+    .tab-panel {{ display: none; }}
+    .analysis-tabs:has(.tab-input[value="overview"]:checked) .tab-overview,
+    .analysis-tabs:has(.tab-input[value="evidence"]:checked) .tab-evidence,
+    .analysis-tabs:has(.tab-input[value="missing"]:checked) .tab-missing,
+    .analysis-tabs:has(.tab-input[value="factors"]:checked) .tab-factors,
+    .analysis-tabs:has(.tab-input[value="generator"]:checked) .tab-generator,
+    .analysis-tabs:has(.tab-input[value="raw"]:checked) .tab-raw {{ display: block; }}
+    .evidence-stack {{ display: grid; gap: 0.8rem; }}
+    .evidence-card {{ background: #161C23; border: 1px solid #2B3440; border-radius: 0.8rem; padding: 0.9rem; }}
+    .evidence-card header {{ align-items: start; display: flex; gap: 0.7rem; justify-content: space-between; }}
+    .evidence-card h4 {{ margin: 0; }}
+    .evidence-meta {{ display: grid; gap: 0.45rem; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0.75rem 0; }}
+    .evidence-meta div {{ background: #0B0F14; border: 1px solid #202832; border-radius: 0.55rem; padding: 0.6rem; }}
+    .evidence-meta span, .evidence-keywords span {{ color: #928374; display: block; font-size: 0.72rem; text-transform: uppercase; }}
+    .inline-tab-link {{ margin-top: 0.5rem; }}
+    .debug-grid {{ display: grid; gap: 0.75rem; }}
     .external-url {{ overflow-wrap: anywhere; }}
     pre {{ background: #0B0F14; color: #EBDBB2; border: 1px solid #2B3440; border-radius: 0.5rem; padding: 1rem; white-space: pre-wrap; overflow-wrap: anywhere; }}
     .legacy-list {{ display: grid; gap: 0.75rem; margin-top: 1rem; }}
     @media (max-width: 980px) {{
       main {{ padding: 0.85rem; }}
-      .intake-grid, .analysis-grid, .metrics, .results-shell, .table-tools {{ grid-template-columns: 1fr; }}
+      .intake-grid, .analysis-grid, .metrics, .results-shell, .table-tools, .summary-grid, .evidence-meta {{ grid-template-columns: 1fr; }}
       .detail-stack {{ position: static; }}
     }}
   </style>
@@ -330,6 +360,12 @@ def _detail_selection_script() -> str:
       event.preventDefault();
       selectCard(id);
       if (window.location.hash !== `#${id}`) history.pushState(null, "", `#${id}`);
+    });
+  }
+  for (const tabLink of document.querySelectorAll("[data-tab-target]")) {
+    tabLink.addEventListener("click", () => {
+      const input = document.getElementById(tabLink.getAttribute("data-tab-target"));
+      if (input) input.checked = true;
     });
   }
   window.addEventListener("hashchange", selectFromHash);
@@ -862,6 +898,9 @@ def _parse_quality_panel(job: JobRecord) -> str:
 
 
 def _job_detail_body(job: JobRecord, *, scored: object | None, actions: str) -> str:
+    if scored is not None:
+        return _scored_job_detail_body(job, scored=scored, actions=actions)
+
     description = _job_description(job)
     title = _format_detail_text(job.title) or f"Stored job {job.theirstack_id}"
     listing_url = _job_listing_url(job)
@@ -894,6 +933,370 @@ def _job_detail_body(job: JobRecord, *, scored: object | None, actions: str) -> 
   {_detail_block(job, "Preferred qualifications", ("preferred_qualifications", "nice_to_have", "preferred_skills", "bonus_points"), value=_job_preferred_qualifications(job))}
   {_detail_block(job, "Technologies, tools, domains, and keywords", ("technologies", "technology_stack", "tech_stack", "tools", "skills", "keywords", "tools_mentioned", "job_categories"), value=_job_technologies(job))}
   {_source_signal_block(job)}"""
+
+
+def _scored_job_detail_body(job: JobRecord, *, scored: object, actions: str) -> str:
+    title = _format_detail_text(job.title) or f"Stored job {job.theirstack_id}"
+    listing_url = _job_listing_url(job)
+    application_url = _job_application_url(job)
+    application_link = ""
+    if application_url and application_url != listing_url:
+        application_link = f'<p><strong>Application link:</strong> {_job_link(application_url)}</p>'
+    return f"""<section class="selected-job-header">
+  <span class="eyebrow">Selected role · Evidence-first analysis</span>
+  <h2 class="detail-title">{html.escape(title)}</h2>
+  <div class="detail-meta">
+    {_detail_fact(job, "Company", ("company_name", "company"), normalized=job.company)}
+    {_detail_fact(job, "Location", ("location", "job_location", "workplace", "job_country_code", "remote"), value=_job_location(job))}
+    {_detail_fact(job, "Work model", ("employment_statuses", "workplace", "work_model", "remote"), value=_job_work_model(job, scored))}
+    {_detail_fact(job, "Compensation", ("compensation", "salary", "min_annual_salary_usd", "max_annual_salary_usd"), value=_job_compensation_label(job))}
+    <p><strong>Source:</strong> {html.escape(_job_source_label(job))}</p>
+    <p><strong>Original listing:</strong> {_job_link(listing_url)}</p>
+    {application_link}
+  </div>
+  {_score_summary_grid(scored)}
+  {_bottleneck_banner(scored)}
+  {actions}
+  {_analysis_tabs(job, scored=scored, listing_url=listing_url)}
+</section>"""
+
+
+def _score_summary_grid(scored: object) -> str:
+    breakdown = _score_breakdown(scored)
+    score = int(round(float(getattr(scored, "score", 0.0))))
+    evidence_count = len(_evidence_cards(scored))
+    requirement_label = breakdown["coverage"] or "Unavailable"
+    resume_overlap = breakdown["resume_overlap"] or "Unavailable"
+    confidence = "Explainable" if breakdown["components"] else "Partial"
+    return f"""<div class="summary-grid" aria-label="Score summary">
+    <div class="summary-card"><span>Overall fit</span><strong>{score}/100</strong></div>
+    <div class="summary-card"><span>Evidence cards</span><strong>{evidence_count}</strong></div>
+    <div class="summary-card"><span>Requirement coverage</span><strong>{html.escape(requirement_label)}</strong></div>
+    <div class="summary-card"><span>Confidence</span><strong>{confidence}</strong></div>
+    <div class="summary-card"><span>Resume overlap</span><strong>{html.escape(resume_overlap)}</strong></div>
+  </div>"""
+
+
+def _bottleneck_banner(scored: object) -> str:
+    missing = [str(value) for value in getattr(scored, "missing_requirements", ()) if str(value).strip()]
+    concerns = [str(value) for value in getattr(scored, "concerns", ()) if str(value).strip() and "No major concerns" not in str(value)]
+    if missing:
+        message = f"Missing direct resume evidence for {', '.join(missing[:3])}."
+    elif concerns:
+        message = concerns[0]
+    else:
+        message = "Score is mostly limited by aggregate role/category/keyword overlap rather than a single extracted gap."
+    return f"""<aside class="bottleneck-banner" aria-label="Primary score explanation">
+    <span class="eyebrow">Why the score exists</span>
+    <p>{html.escape(str(getattr(scored, "explanation", "")))}</p>
+    <p><strong>Highest-impact follow-up:</strong> {html.escape(message)}</p>
+  </aside>"""
+
+
+def _analysis_tabs(job: JobRecord, *, scored: object, listing_url: str) -> str:
+    base = _dom_id(job.theirstack_id)
+    tabs = (
+        ("evidence", "Evidence"),
+        ("overview", "Overview"),
+        ("missing", "Missing Requirements"),
+        ("factors", "Ranking Factors"),
+        ("generator", "Resume Generator"),
+        ("raw", "Raw / Debug"),
+    )
+    controls = "\n".join(
+        f'<input class="tab-input" id="{base}-tab-{name}" name="{base}-analysis-tab" type="radio" value="{name}"{" checked" if name == "evidence" else ""}>'
+        f'<label class="tab-label" for="{base}-tab-{name}">{label}</label>'
+        for name, label in tabs
+    )
+    return f"""<section class="analysis-tabs" aria-label="Analysis tabs">
+    <div class="tab-controls">{controls}</div>
+    <div class="tab-panels">
+      <section class="tab-panel tab-evidence">{_evidence_tab(scored, raw_tab_id=f"{base}-tab-raw")}</section>
+      <section class="tab-panel tab-overview">{_overview_tab(scored)}</section>
+      <section class="tab-panel tab-missing">{_missing_requirements_tab(scored)}</section>
+      <section class="tab-panel tab-factors">{_ranking_factors_tab(scored)}</section>
+      <section class="tab-panel tab-generator">{_resume_generator_tab(job, listing_url)}</section>
+      <section class="tab-panel tab-raw">{_raw_debug_tab(job, scored)}</section>
+    </div>
+  </section>"""
+
+
+def _overview_tab(scored: object) -> str:
+    return f"""<section class="grid">
+    <article class="analysis-card">
+      <h3>Fit summary</h3>
+      <p>{html.escape(str(getattr(scored, "explanation", "")))}</p>
+    </article>
+    <article class="analysis-card">
+      <h3>Best-supported evidence</h3>
+      <ul>{_list_items(_usable_evidence_lines(scored), "No direct resume evidence was extracted for this job.")}</ul>
+    </article>
+    <article class="analysis-card">
+      <h3>Improve next</h3>
+      <ul>{_list_items(getattr(scored, "missing_requirements", ()), "No missing requirements detected from available scoring data.")}</ul>
+    </article>
+  </section>"""
+
+
+def _evidence_tab(scored: object, *, raw_tab_id: str) -> str:
+    cards = _evidence_cards(scored)
+    if not cards:
+        return _evidence_empty_state(scored, raw_tab_id=raw_tab_id)
+    card_html = "\n".join(_evidence_card(card, raw_tab_id=raw_tab_id, rank=index + 1) for index, card in enumerate(cards))
+    limits = _evidence_limits(scored)
+    return f"""<section class="evidence-stack">
+    <article class="state-card success">
+      <h3>Evidence ranked by available support</h3>
+      <p>Cards are ordered by exported requirement contribution and confidence from the deterministic scorer.</p>
+    </article>
+    {card_html}
+    {limits}
+  </section>"""
+
+
+def _evidence_card(card: dict[str, object], *, raw_tab_id: str, rank: int) -> str:
+    keywords = "".join(f'<span class="badge">{html.escape(keyword)}</span>' for keyword in card["keywords"])
+    return f"""<article class="evidence-card">
+    <header>
+      <div>
+        <span class="eyebrow">Evidence #{rank}</span>
+        <h4>{html.escape(str(card["requirement"]))}</h4>
+      </div>
+      <span class="badge">{html.escape(str(card["rank_signal"]))}</span>
+    </header>
+    <div class="evidence-meta">
+      <div><span>Resume excerpt / parsed claim</span>{html.escape(str(card["excerpt"]))}</div>
+      <div><span>Contribution score</span>{html.escape(str(card["contribution"]))}</div>
+      <div><span>Confidence</span>{html.escape(str(card["confidence"]))}</div>
+      <div><span>Matched keywords</span>{keywords or '<span class="muted">No keyword tokens isolated</span>'}</div>
+    </div>
+    <p>{html.escape(str(card["explanation"]))}</p>
+    <button class="ghost-button inline-tab-link" type="button" data-tab-target="{raw_tab_id}">Inspect raw/debug details</button>
+  </article>"""
+
+
+def _evidence_empty_state(scored: object, *, raw_tab_id: str) -> str:
+    missing = [str(value) for value in getattr(scored, "missing_requirements", ()) if str(value).strip()]
+    concerns = [str(value) for value in getattr(scored, "concerns", ()) if str(value).strip()]
+    if missing:
+        title = "No direct resume evidence for extracted requirements"
+        detail = "The score is limited because the uploaded resume did not directly support " + ", ".join(missing[:5]) + "."
+    elif any("short" in concern.casefold() for concern in concerns):
+        title = "Resume evidence may be incomplete"
+        detail = "The uploaded resume text is short, so the parser may not have enough claims to match against the job."
+    else:
+        title = "Evidence unavailable from current scoring data"
+        detail = "The scorer returned aggregate score metadata but no usable resume evidence lines for this job."
+    return f"""<article class="state-card warning">
+    <h3>{html.escape(title)}</h3>
+    <p>{html.escape(detail)}</p>
+    <p>Next action: inspect the parsed resume text, verify the job requirements, or upload a richer resume source before treating this as a poor fit.</p>
+    <button class="ghost-button inline-tab-link" type="button" data-tab-target="{raw_tab_id}">Open raw/debug data</button>
+  </article>"""
+
+
+def _evidence_limits(scored: object) -> str:
+    concerns = [
+        str(value)
+        for value in getattr(scored, "concerns", ())
+        if str(value).strip() and "No major concerns" not in str(value)
+    ]
+    if not concerns:
+        return ""
+    return f"""<article class="state-card warning">
+    <h3>Evidence limits and next actions</h3>
+    <ul>{_list_items(concerns, "No evidence limits detected.")}</ul>
+  </article>"""
+
+
+def _missing_requirements_tab(scored: object) -> str:
+    return f"""<section class="grid">
+    <article class="analysis-card">
+      <h3>Missing or weakly supported requirements</h3>
+      <ul>{_list_items(getattr(scored, "missing_requirements", ()), "No missing requirements detected.")}</ul>
+    </article>
+    <article class="analysis-card">
+      <h3>Why it matters</h3>
+      <ul>{_list_items(getattr(scored, "concerns", ()), "No major concerns detected from available resume text.")}</ul>
+    </article>
+  </section>"""
+
+
+def _ranking_factors_tab(scored: object) -> str:
+    breakdown = _score_breakdown(scored)
+    components = breakdown["components"] or {"role": "?", "category": "?", "keywords": "?", "requirements": "?", "resume_overlap": "?"}
+    rows = "".join(
+        f"<li><strong>{html.escape(name.replace('_', ' ').title())}:</strong> {html.escape(str(value))}</li>"
+        for name, value in components.items()
+    )
+    return f"""<section class="grid">
+    <article class="analysis-card">
+      <h3>Aggregate scoring factors</h3>
+      <ul>{rows}</ul>
+      <p class="muted">Ranking factors are exported by the deterministic scorer; evidence-card contribution comes from the requirement-evidence component.</p>
+    </article>
+    <article class="analysis-card">
+      <h3>Score metadata</h3>
+      {_score_metadata(scored)}
+    </article>
+  </section>"""
+
+
+def _resume_generator_tab(job: JobRecord, listing_url: str) -> str:
+    del listing_url
+    job_path_id = quote(job.theirstack_id, safe="")
+    return f"""<article class="analysis-card">
+    <h3>Generate tailored resume assets</h3>
+    <p>Use the selected job plus uploaded resume evidence to create a Markdown review report or continue into the existing tailoring flow.</p>
+    <a class="button" href="/jobs/{job_path_id}/prompt">Open tailoring prompt</a>
+  </article>"""
+
+
+def _raw_debug_tab(job: JobRecord, scored: object) -> str:
+    return f"""<section class="debug-grid">
+    {_parse_quality_panel(job)}
+    <article class="analysis-card">
+      <h3>Raw scoring/debug summary</h3>
+      {_score_metadata(scored)}
+    </article>
+    {_detail_block(job, "Description", ("job_description", "description", "job_text", "summary", "overview"), value=_job_description(job))}
+    {_detail_block(job, "Core responsibilities", ("responsibilities", "job_responsibilities", "core_responsibilities"), value=_job_responsibilities(job))}
+    {_detail_block(job, "Required qualifications / Requirements", ("requirements", "job_requirements", "required_qualifications", "minimum_qualifications", "qualifications", "candidate_requirements"), value=_job_requirements(job))}
+    {_detail_block(job, "Preferred qualifications", ("preferred_qualifications", "nice_to_have", "preferred_skills", "bonus_points"), value=_job_preferred_qualifications(job))}
+    {_detail_block(job, "Technologies, tools, domains, and keywords", ("technologies", "technology_stack", "tech_stack", "tools", "skills", "keywords", "tools_mentioned", "job_categories"), value=_job_technologies(job))}
+    {_source_signal_block(job)}
+  </section>"""
+
+
+def _evidence_cards(scored: object) -> list[dict[str, object]]:
+    exported_matches = tuple(getattr(scored, "evidence_matches", ()) or ())
+    if exported_matches:
+        return [
+            {
+                "requirement": str(getattr(match, "requirement", "")),
+                "excerpt": str(getattr(match, "resume_excerpt", "")),
+                "contribution": f"{float(getattr(match, 'contribution_score', 0.0)):.1f} pts",
+                "confidence": f"{float(getattr(match, 'confidence', 0.0)):.0%}",
+                "keywords": tuple(str(keyword) for keyword in getattr(match, "matched_keywords", ()) if str(keyword).strip()),
+                "rank_signal": "Direct support",
+                "explanation": str(getattr(match, "explanation", "")),
+            }
+            for match in exported_matches
+            if str(getattr(match, "requirement", "")).strip() and str(getattr(match, "resume_excerpt", "")).strip()
+        ]
+
+    terms = _supported_requirement_terms(scored)
+    evidence_lines = _usable_evidence_lines(scored)
+    cards: list[dict[str, object]] = []
+    for term in terms:
+        excerpt = _best_evidence_excerpt(term, evidence_lines)
+        if not excerpt:
+            continue
+        confidence = "Strong textual match" if _text_matches_term(excerpt, term) else "Needs reviewer confirmation"
+        cards.append(
+            {
+                "requirement": term,
+                "excerpt": excerpt,
+                "contribution": "Unavailable",
+                "confidence": confidence,
+                "keywords": _evidence_keywords(term, excerpt, scored),
+                "rank_signal": "Direct support",
+                "explanation": f"This resume claim supports the extracted requirement `{term}`.",
+            }
+        )
+    return cards[:8]
+
+
+def _supported_requirement_terms(scored: object) -> tuple[str, ...]:
+    terms: list[str] = []
+    for value in getattr(scored, "key_strengths", ()):
+        text = str(value).strip()
+        prefix = "Resume supports "
+        if text.startswith(prefix):
+            terms.append(text[len(prefix):].rstrip("."))
+    if not terms:
+        terms.extend(str(value) for value in getattr(scored, "matched_terms", ()) if str(value).strip())
+    return tuple(dict.fromkeys(term for term in terms if term and "No strong requirement matches" not in term))
+
+
+def _usable_evidence_lines(scored: object) -> tuple[str, ...]:
+    return tuple(
+        str(value).strip()
+        for value in getattr(scored, "relevant_resume_evidence", ())
+        if str(value).strip() and not str(value).startswith("No direct resume evidence")
+    )
+
+
+def _best_evidence_excerpt(term: str, evidence_lines: tuple[str, ...]) -> str:
+    for line in evidence_lines:
+        if _text_matches_term(line, term):
+            return line
+    return ""
+
+
+def _text_matches_term(text: str, term: str) -> bool:
+    normalized_text = _normalize_space(text.casefold())
+    normalized_term = _normalize_space(term.casefold())
+    if normalized_term and normalized_term in normalized_text:
+        return True
+    term_tokens = set(re.findall(r"[a-z0-9][a-z0-9+.#-]*", normalized_term))
+    text_tokens = set(re.findall(r"[a-z0-9][a-z0-9+.#-]*", normalized_text))
+    return bool(term_tokens and term_tokens <= text_tokens)
+
+
+def _evidence_keywords(term: str, excerpt: str, scored: object) -> tuple[str, ...]:
+    candidates = [term, *(str(value) for value in getattr(scored, "matched_terms", ()))]
+    keywords: list[str] = []
+    for candidate in candidates:
+        candidate = candidate.strip()
+        if candidate and _text_matches_term(excerpt, candidate):
+            keywords.append(candidate)
+    if not keywords:
+        keywords.extend(sorted(set(re.findall(r"[a-z0-9][a-z0-9+.#-]{2,}", term.casefold())))[:4])
+    return tuple(dict.fromkeys(keywords[:6]))
+
+
+def _score_breakdown(scored: object) -> dict[str, object]:
+    exported = tuple(getattr(scored, "score_components", ()) or ())
+    if exported:
+        components = {
+            str(getattr(component, "name", "Component")): (
+                f"{float(getattr(component, 'score', 0.0)):.1f}/"
+                f"{float(getattr(component, 'max_score', 0.0)):.0f} pts"
+            )
+            for component in exported
+        }
+        requirement_component = next(
+            (component for component in exported if str(getattr(component, "name", "")) == "Requirement evidence"),
+            None,
+        )
+        coverage = ""
+        if requirement_component is not None:
+            match = re.search(r"(?P<matched>\d+)/(?P<total>\d+) extracted requirements", str(getattr(requirement_component, "explanation", "")))
+            if match:
+                coverage = f"{match.group('matched')}/{match.group('total')}"
+        return {
+            "coverage": coverage,
+            "components": components,
+            "resume_overlap": components.get("Resume overlap", ""),
+        }
+    explanation = str(getattr(scored, "explanation", ""))
+    coverage_match = re.search(r"match: (?P<matched>\d+)/(?P<total>\d+) extracted requirements", explanation)
+    component_match = re.search(
+        r"Components — role (?P<role>\d+), category (?P<category>\d+), keywords (?P<keywords>\d+), requirements (?P<requirements>\d+), resume overlap (?P<resume_overlap>\d+)",
+        explanation,
+    )
+    components: dict[str, str] = {}
+    if component_match:
+        components = {key: f"{value} pts" for key, value in component_match.groupdict().items()}
+    coverage = ""
+    if coverage_match:
+        coverage = f"{coverage_match.group('matched')}/{coverage_match.group('total')}"
+    return {
+        "coverage": coverage,
+        "components": components,
+        "resume_overlap": components.get("resume_overlap", ""),
+    }
 
 
 def _score_metadata(scored: object | None) -> str:

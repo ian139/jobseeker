@@ -555,12 +555,16 @@ def test_scored_job_dataclass_fields() -> None:
     assert hasattr(s, "relevant_resume_evidence")
     assert hasattr(s, "concerns")
     assert hasattr(s, "explanation")
+    assert hasattr(s, "score_components")
+    assert hasattr(s, "evidence_matches")
     assert isinstance(s.matched_terms, tuple)
     assert isinstance(s.missing_terms, tuple)
     assert isinstance(s.key_strengths, tuple)
     assert isinstance(s.missing_requirements, tuple)
     assert isinstance(s.relevant_resume_evidence, tuple)
     assert isinstance(s.concerns, tuple)
+    assert isinstance(s.score_components, tuple)
+    assert isinstance(s.evidence_matches, tuple)
     assert s.explanation
 
 
@@ -638,6 +642,39 @@ def test_resume_only_scoring_ranks_supported_requirements_first() -> None:
     assert scored[0].key_strengths
     assert scored[0].relevant_resume_evidence
     assert "Python" in scored[0].relevant_resume_evidence[0] or "python" in scored[0].relevant_resume_evidence[0].lower()
+
+def test_scoring_exports_structured_evidence_contributions() -> None:
+    analysis = _analysis(
+        text=(
+            "Ada Candidate\n"
+            "Experience\n"
+            "Built Python and SQL services for healthcare analytics teams using FastAPI.\n"
+            "Skills\n"
+            "Python SQL FastAPI healthcare analytics"
+        )
+    )
+    job = _job_record(
+        theirstack_id="evidence",
+        title="Clinical Data Engineer",
+        raw={
+            "job_description": "Build Python SQL pipelines and FastAPI services for healthcare analytics.",
+            "skills": ["Python", "SQL", "FastAPI", "analytics"],
+        },
+    )
+
+    result = score_jobs([job], analysis, target_roles=[], target_industries=[], keywords=[])[0]
+
+    assert result.score_components
+    assert result.evidence_matches
+    requirement_component = next(component for component in result.score_components if component.name == "Requirement evidence")
+    first_match = result.evidence_matches[0]
+    assert requirement_component.score > 0
+    assert first_match.requirement
+    assert first_match.resume_excerpt in result.relevant_resume_evidence
+    assert first_match.contribution_score > 0
+    assert 0.0 < first_match.confidence <= 1.0
+    assert first_match.matched_keywords
+
 
 
 def test_structured_result_reports_missing_requirements_and_concerns() -> None:

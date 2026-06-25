@@ -187,6 +187,17 @@ Python, SQL, FastAPI
     assert "Missing requirements" in response.text
     assert "Relevant resume evidence" in response.text
     assert "Why this rank" in response.text
+    assert "Selected role · Evidence-first analysis" in response.text
+    assert 'id="job-1-tab-evidence"' in response.text
+    assert 'value="evidence" checked' in response.text
+    assert "Evidence ranked by available support" in response.text
+    assert "Resume excerpt / parsed claim" in response.text
+    assert "Contribution score" in response.text
+    assert "pts" in response.text
+    assert "100%" in response.text
+    assert "Inspect raw/debug details" in response.text
+    assert "Raw scoring/debug summary" in response.text
+    assert "evidence-card contribution comes from the requirement-evidence component" in response.text
     assert 'data-detail-target="job-job-1"' in response.text
     assert "Original listing:" in response.text
     assert "Application link:" in response.text
@@ -248,6 +259,38 @@ Python, SQL, FastAPI
     assert "## Agent-Friendly Implementation Checklist" in download.text
     assert "Built Python services for healthcare analytics teams." in download.text
 
+
+
+def test_evidence_tab_explains_missing_direct_resume_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    settings = AppSettings(_env_file=None)
+    storage = JobStorage(settings.job_scraper_db_path)
+    storage.upsert_job(
+        _job(
+            "job-1",
+            job_title="Clinical Data Engineer",
+            company_name="Acme Health",
+            job_description="Build Python services for healthcare analytics with FastAPI.",
+        )
+    )
+    app = create_app(settings)
+    client = TestClient(app)
+
+    response = client.post(
+        "/matches",
+        data={
+            "target_roles": "Data Engineer",
+            "target_industries": "Healthcare",
+            "keywords": "Python, FastAPI",
+        },
+        files={"resume_file": ("resume.txt", b"Ada Candidate\nManaged retail schedules and vendor escalations.", "text/plain")},
+    )
+
+    assert response.status_code == 200
+    assert "No direct resume evidence for extracted requirements" in response.text
+    assert "upload a richer resume source" in response.text
+    assert "Open raw/debug data" in response.text
+    assert "Contribution score" not in response.text
 
 
 def test_job_detail_route_shows_complete_listing_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

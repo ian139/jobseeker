@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import sqlite3
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -140,6 +142,64 @@ def test_cli_list_applications_empty_database(tmp_path: Path, monkeypatch: pytes
     assert code == 0
     assert "No applications found" in captured.out
 
+
+
+def test_cli_analyze_job_json_outputs_structured_analysis(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    storage = JobStorage(tmp_path / "jobs.sqlite3")
+    storage.upsert_job(
+        _job(
+            "job-1",
+            job_title="Python API Engineer",
+            job_description="Build Python APIs with FastAPI and PostgreSQL. Kubernetes preferred.",
+        )
+    )
+    profile_path = _write_profile(tmp_path)
+
+    code = main(["analyze-job", "--job-id", "job-1", "--profile", str(profile_path), "--json"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["job_id"] == "job-1"
+    assert payload["job"]["title"] == "Python API Engineer"
+    assert payload["analysis"]["requirements"]
+    assert payload["analysis"]["resume_claims"]
+    assert "summary" in payload["analysis"]
+
+
+def test_cli_analyze_job_summary_prints_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    storage = JobStorage(tmp_path / "jobs.sqlite3")
+    storage.upsert_job(
+        _job(
+            "job-1",
+            job_title="Python API Engineer",
+            job_description="Build Python APIs with FastAPI and PostgreSQL. Kubernetes preferred.",
+        )
+    )
+    profile_path = _write_profile(tmp_path)
+
+    code = main(["analyze-job", "--job-id", "job-1", "--profile", str(profile_path)])
+
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "Job: Python API Engineer at Acme" in output
+    assert "Score:" in output
+    assert "Requirement coverage:" in output
+    assert "Evidence:" in output
+    assert "Bottleneck:" in output
+
+
+def test_cli_analyze_job_unknown_job_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    profile_path = _write_profile(tmp_path)
+
+    with pytest.raises(ValueError, match="Unknown job id: missing"):
+        main(["analyze-job", "--job-id", "missing", "--profile", str(profile_path), "--json"])
 
 def _write_profile(tmp_path: Path) -> Path:
     profile_path = tmp_path / "profile.yaml"

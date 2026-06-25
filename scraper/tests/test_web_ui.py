@@ -140,6 +140,11 @@ def test_webui_scores_resume_against_market_and_downloads_prompt(tmp_path: Path,
     assert "Parse state" in response.text
     assert "Structured records" in response.text
     assert ".results-shell > *" in response.text
+    assert "grid-template-columns: minmax(22rem, 0.75fr) minmax(0, 1.25fr)" in response.text
+    assert ".table-panel, .detail-stack" in response.text
+    assert "max-height: calc(100vh - 2rem)" in response.text
+    assert "overflow-y: auto" in response.text
+    assert "overscroll-behavior: contain" in response.text
     assert "table-layout: fixed" in response.text
     assert "overflow-wrap: anywhere" in response.text
     assert 'class="table-actions"' in response.text
@@ -174,6 +179,11 @@ Python, SQL, FastAPI
     assert 'id="category-tabs"' in response.text
     assert 'id="job-table-container"' in response.text
     assert 'id="detail-panel"' in response.text
+    assert "<th>Score</th><th>Role</th><th>Company</th><th>Details</th>" in response.text
+    assert "<th>Metadata</th>" not in response.text
+    assert "<th>Matched</th>" not in response.text
+    assert "<th>Missing</th>" not in response.text
+    assert 'colspan="7">No jobs in this category.' not in response.text
     assert 'data-job-id="job-1"' in response.text
     assert "Best-supported US regions" in response.text
     assert "Resume strengths" in response.text
@@ -193,6 +203,11 @@ Python, SQL, FastAPI
     assert "Evidence ranked by available support" in response.text
     assert "Resume excerpt / parsed claim" in response.text
     assert "Contribution score" in response.text
+    assert 'id="job-1-tab-claims"' in response.text
+    assert 'id="job-1-tab-improvements"' in response.text
+    assert "Parsed resume claims" in response.text
+    assert "Grouped resume improvements" in response.text
+    assert "Honesty constraint" in response.text
     assert "pts" in response.text
     assert "100%" in response.text
     assert "Inspect raw/debug details" in response.text
@@ -202,13 +217,11 @@ Python, SQL, FastAPI
     assert "Original listing:" in response.text
     assert "Application link:" in response.text
     assert "https://acme.example/jobs/123" in response.text
-    assert "Work: Remote" in response.text
-    assert "Country: US" in response.text
-    assert "Posted: 2026-06-23" in response.text
-    assert "Seniority: Senior" in response.text
-    assert "Status: Full-time, Remote" in response.text
-    assert "Salary: $100k-$150k" in response.text
-    assert "Source: linkedin.com" in response.text
+    assert "Work model:" in response.text
+    assert "Remote" in response.text
+    assert "Compensation:" in response.text
+    assert "$100k-$150k" in response.text
+    assert "Source:" in response.text
     assert "Build Python services for healthcare analytics." in response.text
     assert "Requirements" in response.text
     assert "Healthcare analytics" in response.text

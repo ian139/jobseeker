@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import webbrowser
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +16,9 @@ from job_scraper.config import AppSettings, build_search_payload, has_company_id
 from job_scraper.llm import ChatCompletionsResumeLLM, ResumeLLMError
 from job_scraper.outreach import OutreachStorage, load_outreach_config, normalize_linkedin_profile_url
 from job_scraper.public_json import PublicJsonClient, import_public_json
-from job_scraper.resume import load_resume_profile, tailor_resume
+from job_scraper.matching import ScoredJob, score_jobs
+from job_scraper.resume import ResumeProfile, load_resume_profile, tailor_resume
+from job_scraper.resume_uploads import UploadedResumeAnalysis
 from job_scraper.scheduler import run_daemon
 from job_scraper.storage import APPLICATION_STATUSES, JobStorage
 from job_scraper.sync import SyncSummary, sync_once
@@ -87,6 +91,27 @@ def main(argv: list[str] | None = None) -> int:
                 notes=args.notes or "",
             )
         print(f"Prepared application {pack.application.id} for {args.job_id}: {pack.resume_path}")
+        return 0
+
+    if args.command == "analyze-job":
+        storage = JobStorage(settings.job_scraper_db_path)
+        job = storage.get_job(args.job_id)
+        if job is None:
+            raise ValueError(f"Unknown job id: {args.job_id}")
+        profile = load_resume_profile(Path(args.profile))
+        profile_text = _profile_analysis_text(profile)
+        analysis = UploadedResumeAnalysis(
+            filename=str(args.profile),
+            kind="text",
+            text=profile_text,
+            facts_markdown="Profile YAML converted to deterministic analysis text.",
+        )
+        scored = score_jobs([job], analysis, target_roles=[], target_industries=[], keywords=[])[0]
+        payload = _analysis_payload(scored)
+        if args.json:
+            print(json.dumps(payload, indent=2, sort_keys=True, default=str))
+        else:
+            _print_analysis_summary(payload)
         return 0
 
     if args.command == "apply":
@@ -224,6 +249,94 @@ def _resume_llm(settings: AppSettings, *, no_llm: bool) -> ChatCompletionsResume
         return None
     return ChatCompletionsResumeLLM(settings.llm_api_key, settings.llm_model, base_url=settings.llm_base_url)
 
+
+
+def _profile_analysis_text(profile: ResumeProfile) -> str:
+    lines = [f"# {profile.name}"]
+    if profile.headline:
+        lines.append(profile.headline)
+
+    contact_parts = [part for part in (profile.contact.email, profile.contact.phone, profile.contact.location) if part]
+    contact_parts.extend(profile.contact.links)
+    if contact_parts:
+        lines.append(" | ".join(contact_parts))
+
+    if profile.skills:
+        lines.append("## Skills")
+        for group, skills in profile.skills.items():
+            lines.append(f"- **{group}:** {', '.join(skills)}")
+
+    for section in profile.sections:
+        lines.append(f"## {section.heading}")
+        for item in section.items:
+            item_heading = f"### {item.title} — {item.organization}"
+            if item.location:
+                item_heading += f", {item.location}"
+            lines.append(item_heading)
+            lines.append(f"*{item.dates}*")
+            for bullet in item.bullets:
+                lines.append(f"- {bullet.text}")
+
+    return "\n".join(lines).strip()
+
+
+def _analysis_payload(scored: ScoredJob) -> dict[str, object]:
+    return {
+        "job_id": scored.job.theirstack_id,
+        "job": {
+            "title": scored.job.title,
+            "company": scored.job.company,
+            "company_domain": scored.job.company_domain,
+            "country_code": scored.job.country_code,
+            "remote": scored.job.remote,
+            "date_posted": scored.job.date_posted,
+            "discovered_at": scored.job.discovered_at,
+            "url": scored.job.url,
+            "source_url": scored.job.source_url,
+            "final_url": scored.job.final_url,
+        },
+        "score": {
+            "overall": scored.score,
+            "category": scored.category,
+            "region": scored.region,
+            "remote_label": scored.remote_label,
+            "category_fit": scored.category_fit,
+            "matched_terms": list(scored.matched_terms),
+            "missing_terms": list(scored.missing_terms),
+            "missing_requirements": list(scored.missing_requirements),
+            "concerns": list(scored.concerns),
+            "explanation": scored.explanation,
+            "components": [asdict(component) for component in scored.score_components],
+        },
+        "analysis": asdict(scored.analysis) if scored.analysis is not None else None,
+    }
+
+
+def _print_analysis_summary(payload: dict[str, object]) -> None:
+    job = payload.get("job") if isinstance(payload.get("job"), dict) else {}
+    score = payload.get("score") if isinstance(payload.get("score"), dict) else {}
+    job_id = str(payload.get("job_id") or "")
+    title = job.get("title") or job_id
+    company = job.get("company") or "Unknown company"
+
+    print(f"Job: {title} at {company}")
+    print(f"Score: {score.get('overall', 0)}/100")
+
+    analysis = payload.get("analysis")
+    if not isinstance(analysis, dict):
+        print("Analysis: unavailable")
+        return
+
+    summary = analysis.get("summary") if isinstance(analysis.get("summary"), dict) else {}
+    requirement_coverage = summary.get("requirement_coverage") or "0/0"
+    evidence = analysis.get("evidence") if isinstance(analysis.get("evidence"), list) else []
+    missing = analysis.get("missing_requirements") if isinstance(analysis.get("missing_requirements"), list) else []
+    improvements = analysis.get("improvements") if isinstance(analysis.get("improvements"), list) else []
+    bottleneck = summary.get("bottleneck") or "No missing requirements detected"
+
+    print(f"Requirement coverage: {requirement_coverage}")
+    print(f"Evidence: {len(evidence)}; Missing: {len(missing)}; Improvements: {len(improvements)}")
+    print(f"Bottleneck: {bottleneck}")
 
 def _handle_outreach(args: argparse.Namespace, settings: AppSettings, parser: argparse.ArgumentParser) -> int:
     storage = OutreachStorage(settings.job_scraper_db_path)
@@ -387,6 +500,11 @@ def _build_parser() -> argparse.ArgumentParser:
     prepare_application.add_argument("--notes", default="", help="Application notes")
     prepare_application.add_argument("--output-dir", help="Directory for application packs")
     prepare_application.add_argument("--no-llm", action="store_true", help="Disable optional LLM rewrite")
+
+    analyze_job = subparsers.add_parser("analyze-job", help="Inspect structured job/resume analysis for a saved job")
+    analyze_job.add_argument("--job-id", required=True, help="Saved job id")
+    analyze_job.add_argument("--profile", required=True, help="Path to resume profile YAML")
+    analyze_job.add_argument("--json", action="store_true", help="Print machine-readable structured analysis JSON")
 
     apply = subparsers.add_parser("apply", help="Fill a saved job application in Chromium")
     apply.add_argument("--job-id", required=True, help="Saved TheirStack job id")

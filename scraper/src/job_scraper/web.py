@@ -235,16 +235,16 @@ def _page(title: str, body: str) -> str:
     .analysis-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
     .analysis-card {{ background: #161C23; border: 1px solid #202832; border-radius: 0.75rem; padding: 0.85rem; }}
     .analysis-card ul {{ margin: 0.4rem 0 0; padding-left: 1.1rem; color: #BDAE93; }}
-    .results-shell {{ display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(24rem, 0.85fr); gap: 1rem; align-items: start; margin-top: 1rem; }}
-    .table-panel {{ background: #11161D; border: 1px solid #2B3440; border-radius: 0.85rem; max-width: 100%; min-width: 0; overflow-x: auto; }}
+    .results-shell {{ display: grid; grid-template-columns: minmax(22rem, 0.75fr) minmax(0, 1.25fr); gap: 1rem; align-items: start; margin-top: 1rem; }}
+    .table-panel, .detail-stack {{ max-height: calc(100vh - 2rem); overflow-y: auto; overscroll-behavior: contain; scrollbar-gutter: stable; }}
+    .table-panel {{ background: #11161D; border: 1px solid #2B3440; border-radius: 0.85rem; max-width: 100%; min-width: 0; overflow: auto; }}
     .table-tools {{ align-items: end; background: #161C23; border-bottom: 1px solid #202832; display: grid; gap: 0.75rem; grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 0.85rem; }}
     table {{ border-collapse: collapse; max-width: 100%; table-layout: fixed; width: 100%; }}
     th, td {{ border-bottom: 1px solid #202832; overflow-wrap: anywhere; padding: 0.65rem 0.75rem; text-align: left; vertical-align: top; word-break: break-word; }}
     th {{ color: #BDAE93; font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase; }}
     tr:hover td {{ background: #161C23; }}
     .data-table th:nth-child(1), .data-table td:nth-child(1) {{ width: 4.25rem; }}
-    .data-table th:nth-child(4), .data-table td:nth-child(4) {{ width: 24%; }}
-    .data-table th:nth-child(7), .data-table td:nth-child(7) {{ width: 5.5rem; }}
+    .data-table th:nth-child(4), .data-table td:nth-child(4) {{ width: 6.5rem; }}
     .score, .score-badge.high {{ color: #A9B665; font-weight: 900; }}
     .gap, .missing-field {{ color: #EA6962; }}
     .badge {{ border: 1px solid #2B3440; border-radius: 999px; color: #BDAE93; display: inline-block; font-size: 0.74rem; margin: 0.15rem 0.15rem 0 0; max-width: 100%; overflow-wrap: anywhere; padding: 0.15rem 0.42rem; white-space: normal; }}
@@ -286,7 +286,9 @@ def _page(title: str, body: str) -> str:
     .analysis-tabs:has(.tab-input[value="overview"]:checked) .tab-overview,
     .analysis-tabs:has(.tab-input[value="evidence"]:checked) .tab-evidence,
     .analysis-tabs:has(.tab-input[value="missing"]:checked) .tab-missing,
+    .analysis-tabs:has(.tab-input[value="claims"]:checked) .tab-claims,
     .analysis-tabs:has(.tab-input[value="factors"]:checked) .tab-factors,
+    .analysis-tabs:has(.tab-input[value="improvements"]:checked) .tab-improvements,
     .analysis-tabs:has(.tab-input[value="generator"]:checked) .tab-generator,
     .analysis-tabs:has(.tab-input[value="raw"]:checked) .tab-raw {{ display: block; }}
     .evidence-stack {{ display: grid; gap: 0.8rem; }}
@@ -296,6 +298,9 @@ def _page(title: str, body: str) -> str:
     .evidence-meta {{ display: grid; gap: 0.45rem; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 0.75rem 0; }}
     .evidence-meta div {{ background: #0B0F14; border: 1px solid #202832; border-radius: 0.55rem; padding: 0.6rem; }}
     .evidence-meta span, .evidence-keywords span {{ color: #928374; display: block; font-size: 0.72rem; text-transform: uppercase; }}
+    .gap-list, .improvement-list, .claim-list {{ display: grid; gap: 0.75rem; }}
+    .gap-card, .improvement-card, .claim-card {{ background: #161C23; border: 1px solid #2B3440; border-radius: 0.75rem; padding: 0.85rem; }}
+    .gap-card header, .improvement-card header, .claim-card header {{ align-items: start; display: flex; gap: 0.7rem; justify-content: space-between; }}
     .inline-tab-link {{ margin-top: 0.5rem; }}
     .debug-grid {{ display: grid; gap: 0.75rem; }}
     .external-url {{ overflow-wrap: anywhere; }}
@@ -304,6 +309,7 @@ def _page(title: str, body: str) -> str:
     @media (max-width: 980px) {{
       main {{ padding: 0.85rem; }}
       .intake-grid, .analysis-grid, .metrics, .results-shell, .table-tools, .summary-grid, .evidence-meta {{ grid-template-columns: 1fr; }}
+      .table-panel, .detail-stack {{ max-height: none; overflow: visible; scrollbar-gutter: auto; }}
       .detail-stack {{ position: static; }}
     }}
   </style>
@@ -539,11 +545,11 @@ def _category_analysis_card(category: object) -> str:
 def _category_table(category_name: str, jobs: list[object]) -> str:
     rows = "\n".join(_result_row(scored) for scored in jobs)
     if not rows:
-        rows = '<tr><td colspan="7">No jobs in this category.</td></tr>'
+        rows = '<tr><td colspan="4">No jobs in this category.</td></tr>'
     return f"""<section class="category-block">
   <h3>{html.escape(category_name)}</h3>
   <table class="data-table">
-    <thead><tr><th>Score</th><th>Role</th><th>Company</th><th>Metadata</th><th>Matched</th><th>Missing</th><th>Details</th></tr></thead>
+    <thead><tr><th>Score</th><th>Role</th><th>Company</th><th>Details</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
 </section>"""
@@ -552,17 +558,10 @@ def _category_table(category_name: str, jobs: list[object]) -> str:
 def _result_row(scored: object) -> str:
     job = getattr(scored, "job")
     detail_id = _job_detail_id(job)
-    matched_values = getattr(scored, "matched_terms", ()) or getattr(scored, "key_strengths", ())
-    missing_values = getattr(scored, "missing_requirements", ()) or getattr(scored, "missing_terms", ())
-    matched = "".join(f'<span class="badge">{html.escape(str(term))}</span>' for term in matched_values[:4])
-    missing = "".join(f'<span class="badge gap">{html.escape(str(term))}</span>' for term in missing_values[:4])
     return f"""<tr class="job-row {_score_tier(float(getattr(scored, "score", 0.0)))}" data-job-id="{html.escape(job.theirstack_id)}">
   <td class="score">{int(round(float(getattr(scored, "score", 0.0))))}</td>
   <td><a href="#{detail_id}" data-detail-target="{detail_id}" aria-controls="{detail_id}">{html.escape(_table_value(job, ("job_title", "title"), job.title))}</a></td>
   <td>{html.escape(_table_value(job, ("company_name", "company"), job.company))}</td>
-  <td>{_job_metadata_badges(job, scored)}</td>
-  <td>{matched or '<span class="muted">None</span>'}</td>
-  <td>{missing or '<span class="muted">None</span>'}</td>
   <td><a class="button ghost-button" href="#{detail_id}" data-detail-target="{detail_id}" aria-controls="{detail_id}">Open</a></td>
 </tr>"""
 
@@ -999,7 +998,9 @@ def _analysis_tabs(job: JobRecord, *, scored: object, listing_url: str) -> str:
         ("evidence", "Evidence"),
         ("overview", "Overview"),
         ("missing", "Missing Requirements"),
+        ("claims", "Resume Claims"),
         ("factors", "Ranking Factors"),
+        ("improvements", "Resume Improvements"),
         ("generator", "Resume Generator"),
         ("raw", "Raw / Debug"),
     )
@@ -1014,7 +1015,9 @@ def _analysis_tabs(job: JobRecord, *, scored: object, listing_url: str) -> str:
       <section class="tab-panel tab-evidence">{_evidence_tab(scored, raw_tab_id=f"{base}-tab-raw")}</section>
       <section class="tab-panel tab-overview">{_overview_tab(scored)}</section>
       <section class="tab-panel tab-missing">{_missing_requirements_tab(scored)}</section>
+      <section class="tab-panel tab-claims">{_resume_claims_tab(scored)}</section>
       <section class="tab-panel tab-factors">{_ranking_factors_tab(scored)}</section>
+      <section class="tab-panel tab-improvements">{_resume_improvements_tab(scored)}</section>
       <section class="tab-panel tab-generator">{_resume_generator_tab(job, listing_url)}</section>
       <section class="tab-panel tab-raw">{_raw_debug_tab(job, scored)}</section>
     </div>
@@ -1022,6 +1025,9 @@ def _analysis_tabs(job: JobRecord, *, scored: object, listing_url: str) -> str:
 
 
 def _overview_tab(scored: object) -> str:
+    analysis = getattr(scored, "analysis", None)
+    improvements = tuple(getattr(analysis, "improvements", ()) or ())
+    improve_next = tuple(getattr(item, "recommendation", "") for item in improvements[:3]) or getattr(scored, "missing_requirements", ())
     return f"""<section class="grid">
     <article class="analysis-card">
       <h3>Fit summary</h3>
@@ -1033,7 +1039,7 @@ def _overview_tab(scored: object) -> str:
     </article>
     <article class="analysis-card">
       <h3>Improve next</h3>
-      <ul>{_list_items(getattr(scored, "missing_requirements", ()), "No missing requirements detected from available scoring data.")}</ul>
+      <ul>{_list_items(improve_next, "No missing requirements detected from available scoring data.")}</ul>
     </article>
   </section>"""
 
@@ -1110,6 +1116,17 @@ def _evidence_limits(scored: object) -> str:
 
 
 def _missing_requirements_tab(scored: object) -> str:
+    analysis = getattr(scored, "analysis", None)
+    structured_missing = tuple(getattr(analysis, "missing_requirements", ()) or ())
+    if structured_missing:
+        cards = "\n".join(_missing_requirement_card(item) for item in structured_missing)
+        return f"""<section class="gap-list">
+    <article class="state-card warning">
+      <h3>Missing or weakly supported requirements</h3>
+      <p>Grouped deterministic gaps from parsed job requirements and parsed resume claims. Add only truthful evidence.</p>
+    </article>
+    {cards}
+  </section>"""
     return f"""<section class="grid">
     <article class="analysis-card">
       <h3>Missing or weakly supported requirements</h3>
@@ -1120,6 +1137,104 @@ def _missing_requirements_tab(scored: object) -> str:
       <ul>{_list_items(getattr(scored, "concerns", ()), "No major concerns detected from available resume text.")}</ul>
     </article>
   </section>"""
+
+
+def _missing_requirement_card(item: object) -> str:
+    related = tuple(str(value) for value in getattr(item, "related_resume_claims", ()) if str(value).strip())
+    related_html = "".join(f'<span class="badge">{html.escape(value)}</span>' for value in related) or '<span class="muted">No related claim</span>'
+    return f"""<article class="gap-card">
+    <header>
+      <div>
+        <span class="eyebrow">{html.escape(str(getattr(item, "category", "general")).replace("_", " "))}</span>
+        <h4>{html.escape(str(getattr(item, "requirement_text", "")))}</h4>
+      </div>
+      <span class="badge gap">{html.escape(str(getattr(item, "coverage", "missing")))}</span>
+    </header>
+    <p><strong>Importance:</strong> {html.escape(str(getattr(item, "importance", "")))} · <strong>Score impact:</strong> {html.escape(str(getattr(item, "score_impact", "")))} pts</p>
+    <p>{html.escape(str(getattr(item, "explanation", "")))}</p>
+    <p><strong>Improvement direction:</strong> {html.escape(str(getattr(item, "improvement_hint", "")))}</p>
+    <p><strong>Related resume evidence:</strong> {related_html}</p>
+  </article>"""
+
+
+def _resume_claims_tab(scored: object) -> str:
+    analysis = getattr(scored, "analysis", None)
+    claims = tuple(getattr(analysis, "resume_claims", ()) or ())
+    if not claims:
+        return """<article class="state-card warning">
+    <h3>No parsed resume claims</h3>
+    <p>Upload a resume with extractable text to inspect reusable resume evidence nodes.</p>
+  </article>"""
+    cards = "\n".join(_resume_claim_card(claim) for claim in claims[:24])
+    return f"""<section class="claim-list">
+    <article class="state-card success">
+      <h3>Parsed resume claims</h3>
+      <p>Claims are deterministic evidence nodes used by requirement matching and resume improvements.</p>
+    </article>
+    {cards}
+  </section>"""
+
+
+def _resume_claim_card(claim: object) -> str:
+    skills = "".join(f'<span class="badge">{html.escape(str(skill))}</span>' for skill in getattr(claim, "skills", ())[:8])
+    return f"""<article class="claim-card">
+    <header>
+      <div>
+        <span class="eyebrow">{html.escape(str(getattr(claim, "source_section", "resume")))}</span>
+        <h4>{html.escape(str(getattr(claim, "text", "")))}</h4>
+      </div>
+      <span class="badge">{html.escape(str(getattr(claim, "evidence_strength", "claim")))}</span>
+    </header>
+    <p><strong>Category:</strong> {html.escape(str(getattr(claim, "category", "general")).replace("_", " "))} · <strong>Confidence:</strong> {html.escape(str(getattr(claim, "confidence", "")))}</p>
+    <p><strong>Terms:</strong> {skills or '<span class="muted">No skill terms isolated</span>'}</p>
+  </article>"""
+
+
+def _resume_improvements_tab(scored: object) -> str:
+    analysis = getattr(scored, "analysis", None)
+    improvements = tuple(getattr(analysis, "improvements", ()) or ())
+    if not improvements:
+        return """<article class="state-card success">
+    <h3>No resume improvements required from parsed gaps</h3>
+    <p>The current analysis did not find actionable missing or weak requirements. Keep raw/debug data available for review.</p>
+  </article>"""
+    groups: dict[str, list[object]] = {}
+    for item in improvements:
+        groups.setdefault(str(getattr(item, "group", "Recommendations")), []).append(item)
+    sections = "\n".join(_resume_improvement_group(name, items) for name, items in groups.items())
+    return f"""<section class="improvement-list">
+    <article class="state-card success">
+      <h3>Grouped resume improvements</h3>
+      <p>Recommendations link back to parsed requirements, evidence, gaps, and resume claims. Honesty constraints are shown on every card.</p>
+    </article>
+    {sections}
+  </section>"""
+
+
+def _resume_improvement_group(name: str, items: list[object]) -> str:
+    cards = "\n".join(_resume_improvement_card(item) for item in items)
+    return f"""<section class="category-block">
+    <h3>{html.escape(name)}</h3>
+    {cards}
+  </section>"""
+
+
+def _resume_improvement_card(item: object) -> str:
+    evidence_ids = "".join(f'<span class="badge">{html.escape(str(value))}</span>' for value in getattr(item, "evidence_ids", ()) if str(value).strip())
+    claim_ids = "".join(f'<span class="badge">{html.escape(str(value))}</span>' for value in getattr(item, "resume_claim_ids", ()) if str(value).strip())
+    return f"""<article class="improvement-card">
+    <header>
+      <div>
+        <span class="eyebrow">{html.escape(str(getattr(item, "impact", "medium")))} impact</span>
+        <h4>{html.escape(str(getattr(item, "recommendation", "")))}</h4>
+      </div>
+      <span class="badge">{html.escape(str(getattr(item, "target_section", "resume")))}</span>
+    </header>
+    <p><strong>Why it matters:</strong> {html.escape(str(getattr(item, "why_it_matters", "")))}</p>
+    <p><strong>Suggested wording:</strong> {html.escape(str(getattr(item, "suggested_wording", "")))}</p>
+    <p><strong>Honesty constraint:</strong> {html.escape(str(getattr(item, "honesty_constraint", "")))}</p>
+    <p><strong>Requirement:</strong> {html.escape(str(getattr(item, "requirement_id", "")))} · <strong>Evidence:</strong> {evidence_ids or '<span class="muted">None</span>'} · <strong>Claims:</strong> {claim_ids or '<span class="muted">None</span>'}</p>
+  </article>"""
 
 
 def _ranking_factors_tab(scored: object) -> str:
@@ -1498,29 +1613,6 @@ def _salary_thousands(value: object) -> int:
         return 0
 
 
-def _job_metadata_badges(job: JobRecord, scored: object | None = None) -> str:
-    badge_values: list[tuple[str, str]] = []
-    work = _job_work_model(job, scored)
-    badge_values.append(("Work", work or _missing_field_reason(job, ("employment_statuses", "workplace", "work_model", "remote"))))
-    region = str(getattr(scored, "region", "") or "").strip() if scored is not None else ""
-    if region and region != "Unknown":
-        badge_values.append(("Region", region))
-    badge_values.append(("Country", job.country_code or _missing_field_reason(job, ("job_country_code", "country_code"))))
-    badge_values.append(("Posted", job.date_posted or job.discovered_at or _missing_field_reason(job, ("date_posted", "discovered_at", "posted_at"))))
-    seniority = _job_text_value(job, ("job_seniority", "seniority", "seniority_level"))
-    if seniority:
-        badge_values.append(("Seniority", seniority))
-    status = _job_text_value(job, ("employment_statuses", "employment_type", "employment_status"))
-    if status:
-        badge_values.append(("Status", status))
-    salary = _job_salary_label(job)
-    if salary:
-        badge_values.append(("Salary", salary))
-    badge_values.append(("Source", _job_source_label(job)))
-    return "".join(
-        f'<span class="badge">{html.escape(label)}: {html.escape(value)}</span>'
-        for label, value in badge_values
-    )
 
 
 def _job_link(url: str | None) -> str:

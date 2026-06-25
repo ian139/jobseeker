@@ -28,6 +28,82 @@ class ScoreComponent:
 
 
 @dataclass(frozen=True)
+class ParsedRequirement:
+    """One traceable job requirement extracted from a stored job."""
+
+    id: str
+    text: str
+    category: str
+    importance: str
+    weight: float
+    keywords: tuple[str, ...]
+    normalized_terms: tuple[str, ...]
+    source_span: str
+    evidence_type: str = "skill_or_experience"
+
+
+@dataclass(frozen=True)
+class ResumeClaim:
+    """One reusable claim parsed from an uploaded resume/profile text."""
+
+    id: str
+    text: str
+    category: str
+    skills: tuple[str, ...]
+    normalized_terms: tuple[str, ...]
+    source_section: str
+    source_item: str
+    confidence: float
+    evidence_strength: str
+
+
+@dataclass(frozen=True)
+class RequirementMatch:
+    """Comparison result for one job requirement against resume claims."""
+
+    requirement_id: str
+    resume_claim_ids: tuple[str, ...]
+    match_strength: str
+    confidence: float
+    matched_terms: tuple[str, ...]
+    coverage: str
+    explanation: str
+
+
+@dataclass(frozen=True)
+class MissingRequirement:
+    """Requirement that is missing, weak, or only partially supported."""
+
+    requirement_id: str
+    requirement_text: str
+    category: str
+    importance: str
+    coverage: str
+    score_impact: float
+    related_resume_claims: tuple[str, ...]
+    explanation: str
+    improvement_hint: str
+
+
+@dataclass(frozen=True)
+class ResumeImprovement:
+    """Actionable resume recommendation grounded in parsed evidence/gaps."""
+
+    id: str
+    group: str
+    requirement_id: str
+    missing_requirement_id: str | None
+    evidence_ids: tuple[str, ...]
+    resume_claim_ids: tuple[str, ...]
+    target_section: str
+    recommendation: str
+    why_it_matters: str
+    suggested_wording: str
+    honesty_constraint: str
+    impact: str
+
+
+@dataclass(frozen=True)
 class EvidenceMatch:
     """A resume evidence item matched to one extracted job requirement."""
 
@@ -37,6 +113,30 @@ class EvidenceMatch:
     confidence: float
     matched_keywords: tuple[str, ...]
     explanation: str
+    id: str = ""
+    requirement_id: str = ""
+    requirement_text: str = ""
+    requirement_category: str = ""
+    resume_claim_id: str = ""
+    resume_claim_text: str = ""
+    source_resume_section: str = ""
+    normalized_terms: tuple[str, ...] = ()
+    strength: str = ""
+
+
+@dataclass(frozen=True)
+class JobResumeAnalysis:
+    """Internal contract consumed by scorer, UI, and improvement generation."""
+
+    job_id: str
+    summary: dict[str, object]
+    requirements: tuple[ParsedRequirement, ...]
+    resume_claims: tuple[ResumeClaim, ...]
+    matches: tuple[RequirementMatch, ...]
+    evidence: tuple[EvidenceMatch, ...]
+    missing_requirements: tuple[MissingRequirement, ...]
+    improvements: tuple[ResumeImprovement, ...]
+    debug: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -58,6 +158,7 @@ class ScoredJob:
     explanation: str
     score_components: tuple[ScoreComponent, ...] = ()
     evidence_matches: tuple[EvidenceMatch, ...] = ()
+    analysis: JobResumeAnalysis | None = None
 
 
 @dataclass(frozen=True)
@@ -98,6 +199,7 @@ def score_jobs(
     job_index_cache: dict[str, _JobIndex] = {}
     for job in jobs:
         job_index = job_index_cache.setdefault(job.theirstack_id, _build_job_index(job))
+        analysis_result = analyze_job_resume(job, analysis)
         role_pts = max(_score_role_fit(job.title, target_roles), _score_resume_title_fit(job_index, resume_index))
         industry_pts = _score_industry(job, target_industries)
         kw_pts = _score_keywords(job, keywords)
@@ -158,6 +260,7 @@ def score_jobs(
                 explanation=explanation,
                 score_components=score_components,
                 evidence_matches=evidence_matches,
+                analysis=analysis_result,
             )
         )
 
@@ -184,6 +287,299 @@ def summarize_categories(scored_jobs: Sequence[ScoredJob]) -> list[CategorySumma
 
     summaries.sort(key=lambda cs: cs.avg_score, reverse=True)
     return summaries
+
+
+def analyze_job_resume(job: JobRecord, analysis: UploadedResumeAnalysis) -> JobResumeAnalysis:
+    """Build the structured, inspectable job/resume analysis contract."""
+    requirements = parse_job_requirements(job)
+    resume_claims = parse_resume_claims(analysis)
+    matches, evidence, missing = match_requirements_to_claims(requirements, resume_claims)
+    improvements = generate_resume_improvements(requirements, resume_claims, evidence, missing)
+    strong_or_partial = sum(1 for match in matches if match.coverage in {"satisfied", "partial"})
+    coverage = strong_or_partial / len(requirements) if requirements else 0.0
+    bottleneck = missing[0].requirement_text if missing else "No missing requirements detected"
+    return JobResumeAnalysis(
+        job_id=job.theirstack_id,
+        summary={
+            "overall_score": round(coverage, 2),
+            "confidence": _analysis_confidence(requirements, resume_claims, evidence),
+            "requirement_coverage": f"{strong_or_partial}/{len(requirements)}" if requirements else "0/0",
+            "bottleneck": bottleneck,
+        },
+        requirements=requirements,
+        resume_claims=resume_claims,
+        matches=matches,
+        evidence=evidence,
+        missing_requirements=missing,
+        improvements=improvements,
+        debug={
+            "job_text_chars": len(_job_text(job)),
+            "resume_text_chars": len(analysis.text or ""),
+            "parser": "deterministic_keyword_sections_v1",
+        },
+    )
+
+
+def parse_job_requirements(job: JobRecord) -> tuple[ParsedRequirement, ...]:
+    """Extract structured requirements from source JSON without hallucinating."""
+    candidates: list[tuple[str, str, str]] = []
+    raw = job.raw
+
+    structured_sources = (
+        ("requirements", "required", "requirements"),
+        ("job_requirements", "required", "requirements"),
+        ("required_qualifications", "required", "requirements"),
+        ("minimum_qualifications", "required", "requirements"),
+        ("qualifications", "required", "requirements"),
+        ("candidate_requirements", "required", "requirements"),
+        ("preferred_qualifications", "preferred", "preferred"),
+        ("nice_to_have", "preferred", "preferred"),
+        ("preferred_skills", "preferred", "preferred"),
+        ("bonus_points", "preferred", "preferred"),
+        ("responsibilities", "required", "responsibilities"),
+        ("job_responsibilities", "required", "responsibilities"),
+        ("core_responsibilities", "required", "responsibilities"),
+        ("role_responsibilities", "required", "responsibilities"),
+        ("skills", "required", "skills"),
+        ("technologies", "required", "skills"),
+        ("technology_stack", "required", "skills"),
+        ("tech_stack", "required", "skills"),
+        ("tools", "required", "tools"),
+    )
+    for key, importance, source_label in structured_sources:
+        for text in _flatten_requirement_value(raw.get(key)):
+            candidates.extend((item, importance, source_label) for item in _split_requirement_items(text, source_label))
+
+    for key in ("job_description", "description", "job_text", "summary", "overview"):
+        value = raw.get(key)
+        if not isinstance(value, str):
+            continue
+        candidates.extend(_requirements_from_description(value))
+
+    seen: set[str] = set()
+    requirements: list[ParsedRequirement] = []
+    for text, importance, source_label in candidates:
+        cleaned = _clean_requirement_text(text)
+        if not _useful_requirement_text(cleaned):
+            continue
+        normalized_key = _normalize_text(cleaned)
+        if normalized_key in seen:
+            continue
+        seen.add(normalized_key)
+        category = _requirement_category(cleaned, fallback=source_label)
+        keywords = _requirement_keywords(cleaned)
+        normalized_terms = _normalized_requirement_terms(cleaned, keywords)
+        if not normalized_terms:
+            continue
+        req_id = f"req_{len(requirements) + 1:03d}"
+        requirements.append(
+            ParsedRequirement(
+                id=req_id,
+                text=cleaned,
+                category=category,
+                importance=importance,
+                weight=_requirement_weight(importance, category),
+                keywords=keywords,
+                normalized_terms=normalized_terms,
+                source_span=cleaned,
+                evidence_type=_evidence_type_for_category(category),
+            )
+        )
+        if len(requirements) >= 40:
+            break
+
+    if requirements:
+        return tuple(requirements)
+
+    fallback_text = _job_text(job)
+    if not fallback_text:
+        return ()
+    keywords = tuple(term for term in _keyword_terms(fallback_text)[:8] if term not in _STOP_WORDS)
+    if not keywords:
+        return ()
+    return (
+        ParsedRequirement(
+            id="req_001",
+            text="Job description contains limited structured requirement data.",
+            category="general",
+            importance="required",
+            weight=0.4,
+            keywords=keywords,
+            normalized_terms=tuple(_normalize_alias(term) for term in keywords),
+            source_span=fallback_text[:240],
+            evidence_type="general_context",
+        ),
+    )
+
+
+def parse_resume_claims(analysis: UploadedResumeAnalysis) -> tuple[ResumeClaim, ...]:
+    """Parse uploaded resume/profile text into reusable evidence claims."""
+    claims: list[ResumeClaim] = []
+    current_section = "resume"
+    seen: set[str] = set()
+    for raw_line in re.split(r"[\r\n•]+", analysis.text or ""):
+        line = _clean_resume_line(raw_line)
+        if not line:
+            continue
+        if _looks_like_section_heading(line):
+            current_section = line.strip(":#").lower()
+            continue
+        if len(line) < 10 or line.casefold() in seen:
+            continue
+        seen.add(line.casefold())
+        skills = _requirement_keywords(line)
+        terms = _normalized_requirement_terms(line, skills)
+        if not terms and not _claim_has_signal(line):
+            continue
+        category = _requirement_category(line, fallback=current_section)
+        claim_id = f"claim_{len(claims) + 1:03d}"
+        claims.append(
+            ResumeClaim(
+                id=claim_id,
+                text=line,
+                category=category,
+                skills=skills,
+                normalized_terms=terms,
+                source_section=current_section,
+                source_item=_claim_source_item(line),
+                confidence=_claim_confidence(line, terms),
+                evidence_strength=_claim_strength(line, terms),
+            )
+        )
+        if len(claims) >= 120:
+            break
+    return tuple(claims)
+
+
+def match_requirements_to_claims(
+    requirements: Sequence[ParsedRequirement],
+    resume_claims: Sequence[ResumeClaim],
+) -> tuple[tuple[RequirementMatch, ...], tuple[EvidenceMatch, ...], tuple[MissingRequirement, ...]]:
+    """Compare requirements to resume claims and return matches/evidence/gaps."""
+    matches: list[RequirementMatch] = []
+    evidence: list[EvidenceMatch] = []
+    missing: list[MissingRequirement] = []
+    requirement_count = max(len(requirements), 1)
+    for requirement in requirements:
+        ranked = sorted(
+            (
+                _claim_match_score(requirement, claim)
+                for claim in resume_claims
+            ),
+            key=lambda item: (-item[0], -item[1].confidence, item[1].id),
+        )
+        ranked = [item for item in ranked if item[0] > 0.0]
+        best_score, best_claim, matched_terms = (0.0, None, ()) if not ranked else ranked[0]
+        related_claims = tuple(claim.id for score, claim, _terms in ranked[:3] if score >= 0.18)
+        coverage = _coverage_label(best_score)
+        confidence = round(min(1.0, best_score + (best_claim.confidence * 0.25 if best_claim else 0.0)), 2)
+        matches.append(
+            RequirementMatch(
+                requirement_id=requirement.id,
+                resume_claim_ids=related_claims,
+                match_strength=_strength_label(best_score),
+                confidence=confidence,
+                matched_terms=matched_terms,
+                coverage=coverage,
+                explanation=_requirement_match_explanation(requirement, best_claim, matched_terms, coverage),
+            )
+        )
+        if best_claim is not None and coverage in {"satisfied", "partial", "weak"}:
+            contribution = round((35.0 / requirement_count) * min(best_score, 1.0), 1)
+            evidence.append(
+                EvidenceMatch(
+                    requirement=requirement.text,
+                    resume_excerpt=best_claim.text,
+                    contribution_score=contribution,
+                    confidence=confidence,
+                    matched_keywords=matched_terms,
+                    explanation=_evidence_explanation(requirement, best_claim, matched_terms, coverage),
+                    id=f"evidence_{len(evidence) + 1:03d}",
+                    requirement_id=requirement.id,
+                    requirement_text=requirement.text,
+                    requirement_category=requirement.category,
+                    resume_claim_id=best_claim.id,
+                    resume_claim_text=best_claim.text,
+                    source_resume_section=best_claim.source_section,
+                    normalized_terms=tuple(dict.fromkeys((*requirement.normalized_terms, *best_claim.normalized_terms))),
+                    strength=_strength_label(best_score),
+                )
+            )
+        if coverage in {"missing", "weak", "partial"}:
+            missing.append(
+                MissingRequirement(
+                    requirement_id=requirement.id,
+                    requirement_text=requirement.text,
+                    category=requirement.category,
+                    importance=requirement.importance,
+                    coverage=coverage,
+                    score_impact=round((35.0 / requirement_count) * (1.0 - min(best_score, 1.0)), 2),
+                    related_resume_claims=related_claims,
+                    explanation=_missing_explanation(requirement, best_claim, coverage),
+                    improvement_hint=_improvement_hint(requirement, best_claim, coverage),
+                )
+            )
+    evidence.sort(key=lambda item: (-item.contribution_score, -item.confidence, item.requirement))
+    missing.sort(key=lambda item: (-item.score_impact, item.category, item.requirement_text))
+    return tuple(matches), tuple(evidence[:12]), tuple(missing[:16])
+
+
+def generate_resume_improvements(
+    requirements: Sequence[ParsedRequirement],
+    resume_claims: Sequence[ResumeClaim],
+    evidence: Sequence[EvidenceMatch],
+    missing_requirements: Sequence[MissingRequirement],
+) -> tuple[ResumeImprovement, ...]:
+    """Generate grouped, honesty-constrained resume recommendations."""
+    improvements: list[ResumeImprovement] = []
+    evidence_by_req = {item.requirement_id: item for item in evidence}
+    claims_by_id = {claim.id: claim for claim in resume_claims}
+    requirements_by_id = {requirement.id: requirement for requirement in requirements}
+
+    for item in missing_requirements[:10]:
+        requirement = requirements_by_id.get(item.requirement_id)
+        linked_evidence = evidence_by_req.get(item.requirement_id)
+        related_claims = tuple(claim_id for claim_id in item.related_resume_claims if claim_id in claims_by_id)
+        group = _improvement_group(item)
+        target_section = _target_section_for_gap(item, related_claims, claims_by_id)
+        suggested_wording = _suggested_wording(item, related_claims, claims_by_id)
+        improvements.append(
+            ResumeImprovement(
+                id=f"improvement_{len(improvements) + 1:03d}",
+                group=group,
+                requirement_id=item.requirement_id,
+                missing_requirement_id=item.requirement_id,
+                evidence_ids=(linked_evidence.id,) if linked_evidence and linked_evidence.id else (),
+                resume_claim_ids=related_claims,
+                target_section=target_section,
+                recommendation=_recommendation_text(item, requirement, related_claims, claims_by_id),
+                why_it_matters=f"The job explicitly asks for `{item.requirement_text}`; current coverage is {item.coverage}.",
+                suggested_wording=suggested_wording,
+                honesty_constraint=_honesty_constraint(item, related_claims),
+                impact="high" if item.importance == "required" and item.score_impact >= 2.0 else "medium",
+            )
+        )
+
+    supported_evidence = [item for item in evidence if item.strength in {"strong", "direct"}]
+    for item in supported_evidence[:4]:
+        improvements.append(
+            ResumeImprovement(
+                id=f"improvement_{len(improvements) + 1:03d}",
+                group="Quick Wins",
+                requirement_id=item.requirement_id,
+                missing_requirement_id=None,
+                evidence_ids=(item.id,) if item.id else (),
+                resume_claim_ids=(item.resume_claim_id,) if item.resume_claim_id else (),
+                target_section=item.source_resume_section or "experience",
+                recommendation=f"Move or preserve the resume evidence for `{item.requirement_text or item.requirement}` near the top of the relevant section.",
+                why_it_matters="This is already truthful support for the selected job and should be easy for a reviewer or ATS to find.",
+                suggested_wording=_supported_evidence_wording(item),
+                honesty_constraint="Use this only if the excerpt remains factually accurate; do not add scope, metrics, or tools that are not in the source claim.",
+                impact="medium",
+            )
+        )
+    return tuple(improvements[:16])
+
 def build_improvement_prompt(
     scored_job: ScoredJob,
     analysis: UploadedResumeAnalysis,
@@ -345,6 +741,7 @@ def build_improvement_report(
     preserve = "\n".join(f"- Keep `{line}` because it provides relevant evidence." for line in evidence_lines[:5]) or f"- Keep the candidate identity/headline as extracted: `{headline}`."
     rewrites = _rewrite_items(rewrite_candidates, target_role)
     project_ordering = _prioritization_items(resume_lines, job_keywords)
+    structured_improvements = _structured_improvement_sections(scored_job)
 
     return f"""# Resume Review Report — {target_role}
 
@@ -397,6 +794,9 @@ def build_improvement_report(
 - Surface supported job keywords naturally: {', '.join(job_keywords[:8]) or 'no reliable keyword list available'}.
 - Keep unsupported keywords out of the resume until verified.
 
+## Structured Resume Improvements
+{structured_improvements}
+
 ## Rewritten Bullet Suggestions
 {rewrites}
 
@@ -448,6 +848,390 @@ def build_improvement_report(
 
 
 # ── Internal helpers ─────────────────────────────────────────────────────────
+
+_TERM_ALIASES: dict[str, str] = {
+    "js": "javascript",
+    "ts": "typescript",
+    "postgres": "postgresql",
+    "postgresql": "postgresql",
+    "react.js": "react",
+    "node": "node.js",
+    "nodejs": "node.js",
+    "ci/cd": "continuous integration",
+    "llm": "large language model",
+    "genai": "generative ai",
+    "ml": "machine learning",
+    "ai": "artificial intelligence",
+    "k8s": "kubernetes",
+    "aws lambda": "serverless",
+    "fast api": "fastapi",
+}
+
+_CATEGORY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("programming_languages", ("python", "typescript", "javascript", "java", "go", "golang", "rust", "c++", "c#", "sql")),
+    ("frontend", ("react", "vue", "angular", "frontend", "front-end", "html", "css", "ui", "accessibility")),
+    ("backend", ("api", "apis", "backend", "service", "services", "microservice", "fastapi", "django", "flask", "node.js", "server")),
+    ("cloud_infrastructure", ("aws", "gcp", "azure", "kubernetes", "docker", "terraform", "serverless", "lambda", "cloud", "infrastructure")),
+    ("data_ml_ai", ("machine learning", "ml", "ai", "llm", "generative ai", "data", "analytics", "model", "tensorflow", "pytorch")),
+    ("databases", ("postgres", "postgresql", "mysql", "sqlite", "redis", "database", "sql", "nosql", "snowflake")),
+    ("security", ("security", "compliance", "soc2", "soc 2", "auth", "oauth", "iam", "vulnerability")),
+    ("testing_qa", ("test", "testing", "qa", "pytest", "unit test", "integration test", "ci/cd", "quality")),
+    ("architecture_system_design", ("architecture", "system design", "distributed", "scalable", "reliability", "observability")),
+    ("leadership_ownership", ("lead", "leadership", "mentor", "ownership", "roadmap", "stakeholder", "strategy")),
+    ("communication_collaboration", ("communicat", "collaborat", "cross-functional", "partner", "customer", "sales")),
+    ("education", ("degree", "bachelor", "master", "phd", "education", "certification", "certified")),
+    ("experience_years", ("years", "yrs", "experience")),
+    ("responsibilities", ("build", "develop", "design", "own", "ship", "maintain", "partner")),
+)
+
+
+def _flatten_requirement_value(value: object) -> list[str]:
+    if value in (None, "", [], {}):
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        flattened: list[str] = []
+        for key, nested in value.items():
+            for item in _flatten_requirement_value(nested):
+                flattened.append(f"{key}: {item}" if len(str(key)) <= 40 else item)
+        return flattened
+    if isinstance(value, (list, tuple, set)):
+        flattened = []
+        for item in value:
+            flattened.extend(_flatten_requirement_value(item))
+        return flattened
+    return [str(value)]
+
+
+def _split_requirement_items(text: str, source_label: str) -> list[str]:
+    cleaned = str(text).replace("\r", "\n")
+    if source_label in {"skills", "tools"} and len(cleaned) <= 160:
+        pieces = re.split(r"[,;/|]+", cleaned)
+    else:
+        pieces = re.split(r"\n+|(?:^|\s)[•*-]\s+|(?<=[.!?])\s+(?=[A-Z0-9])", cleaned)
+    items = [_clean_requirement_text(piece) for piece in pieces]
+    return [item for item in items if _useful_requirement_text(item)]
+
+
+def _requirements_from_description(text: str) -> list[tuple[str, str, str]]:
+    candidates: list[tuple[str, str, str]] = []
+    current_importance = "required"
+    current_source = "description"
+    section_cue = ""
+    for raw_line in text.replace("\r", "\n").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        lowered = line.casefold().strip(":")
+        if len(line) <= 80 and re.search(r"(requirements|qualifications|skills|responsibilities|what you|you have|preferred|nice|bonus)", lowered):
+            section_cue = lowered
+            current_importance = "preferred" if re.search(r"(preferred|nice|bonus|plus)", lowered) else "required"
+            current_source = "preferred" if current_importance == "preferred" else ("responsibilities" if "responsib" in lowered or "what you" in lowered else "requirements")
+            continue
+        item_importance = current_importance
+        if re.search(r"\b(preferred|nice to have|bonus|plus)\b", lowered):
+            item_importance = "preferred"
+        elif re.search(r"\b(required|must|required qualifications|minimum)\b", lowered):
+            item_importance = "required"
+        for item in _split_requirement_items(line, current_source):
+            if _line_is_requirement_like(item, section_cue):
+                candidates.append((item, item_importance, current_source))
+    return candidates
+
+
+def _clean_requirement_text(text: object) -> str:
+    cleaned = re.sub(r"\s+", " ", str(text).strip(" \t\r\n-•*"))
+    cleaned = re.sub(r"^(requirements?|qualifications?|responsibilities|skills?|preferred|nice to have):\s*", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
+
+def _useful_requirement_text(text: str) -> bool:
+    if len(text) < 3 or len(text) > 320:
+        return False
+    if text.count(" ") > 45:
+        return False
+    lowered = text.casefold()
+    if lowered in {"about us", "benefits", "what we offer", "equal opportunity employer"}:
+        return False
+    return bool(re.search(r"[a-zA-Z]", text))
+
+
+def _line_is_requirement_like(text: str, section_cue: str) -> bool:
+    lowered = text.casefold()
+    if section_cue and re.search(r"(requirements|qualifications|skills|responsibilities|preferred|nice|bonus|what you|you have)", section_cue):
+        return True
+    return bool(
+        re.search(
+            r"\b(experience|proficient|knowledge|familiar|build|design|develop|own|lead|manage|work with|skills?|required|must|responsible|ability)\b",
+            lowered,
+        )
+    )
+
+
+def _requirement_category(text: str, *, fallback: str) -> str:
+    lowered = _normalize_text(text)
+    best_category = ""
+    best_hits = 0
+    for category, needles in _CATEGORY_KEYWORDS:
+        hits = sum(1 for needle in needles if _normalize_alias(needle) in lowered)
+        if hits > best_hits:
+            best_category = category
+            best_hits = hits
+    if best_category:
+        return best_category
+    if fallback in {"skills", "tools", "preferred", "requirements", "responsibilities"}:
+        return fallback
+    return "general"
+
+
+def _requirement_keywords(text: str) -> tuple[str, ...]:
+    normalized = _normalize_text(text)
+    terms: list[str] = []
+    known_terms = (*_HIGH_VALUE_TERMS, *(_TERM_ALIASES.keys()), *(_TERM_ALIASES.values()))
+    for term in known_terms:
+        normalized_term = _normalize_alias(term)
+        if normalized_term and _text_has_term(normalized, normalized_term):
+            terms.append(normalized_term)
+    terms.extend(_keyword_terms(text))
+    return tuple(dict.fromkeys(term for term in terms if term and term not in _STOP_WORDS))[:10]
+
+
+def _normalized_requirement_terms(text: str, keywords: Sequence[str]) -> tuple[str, ...]:
+    terms: list[str] = []
+    terms.extend(_normalize_alias(term) for term in keywords)
+    tokens = [token for token in _keyword_terms(text) if token not in _STOP_WORDS]
+    terms.extend(_normalize_alias(token) for token in tokens[:8])
+    if not terms and text.strip():
+        terms.append(_normalize_text(text)[:80])
+    return tuple(dict.fromkeys(term for term in terms if term))
+
+
+def _keyword_terms(text: str) -> list[str]:
+    normalized = _normalize_text(text)
+    terms = []
+    for token in _TOKEN_RE.findall(normalized):
+        token = token.strip(".,;:!?()[]{}\"'")
+        if len(token) >= 3 or token in {"go", "c#", "c++", "ai", "ml"}:
+            terms.append(_normalize_alias(token))
+    return terms
+
+
+def _normalize_alias(term: str) -> str:
+    normalized = _normalize_text(str(term).strip())
+    return _TERM_ALIASES.get(normalized, normalized)
+
+
+def _requirement_weight(importance: str, category: str) -> float:
+    base = 0.9 if importance == "required" else 0.55
+    if category in {"programming_languages", "backend", "cloud_infrastructure", "architecture_system_design", "leadership_ownership"}:
+        base += 0.05
+    return round(min(base, 1.0), 2)
+
+
+def _evidence_type_for_category(category: str) -> str:
+    if category in {"education", "experience_years"}:
+        return "credential_or_duration"
+    if category in {"leadership_ownership", "communication_collaboration", "responsibilities"}:
+        return "responsibility_or_behavior"
+    return "skill_or_experience"
+
+
+def _clean_resume_line(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip(" \t\r\n-•*"))
+
+
+def _looks_like_section_heading(line: str) -> bool:
+    stripped = line.strip(" :#")
+    if not stripped or len(stripped) > 42:
+        return False
+    known = {"summary", "skills", "experience", "work experience", "projects", "education", "certifications", "accomplishments"}
+    return stripped.casefold() in known or (stripped.isupper() and len(stripped.split()) <= 4)
+
+
+def _claim_has_signal(line: str) -> bool:
+    return bool(re.search(r"\b(built|created|designed|led|owned|improved|reduced|increased|delivered|managed|python|api|react|aws|data|sql|test)\b", line, re.IGNORECASE))
+
+
+def _claim_source_item(line: str) -> str:
+    match = re.match(r"([^:]{3,60}):", line)
+    if match:
+        return match.group(1).strip()
+    return line[:64]
+
+
+def _claim_confidence(line: str, terms: Sequence[str]) -> float:
+    confidence = 0.55
+    if terms:
+        confidence += 0.2
+    if re.search(r"\b(built|created|designed|led|owned|delivered|improved|managed|reduced|increased)\b", line, re.IGNORECASE):
+        confidence += 0.15
+    if re.search(r"\d+[%x]|\$|\b\d+\+?\s*(users|customers|engineers|requests|ms|seconds|hours|days)\b", line, re.IGNORECASE):
+        confidence += 0.1
+    return round(min(confidence, 0.95), 2)
+
+
+def _claim_strength(line: str, terms: Sequence[str]) -> str:
+    if _claim_confidence(line, terms) >= 0.85:
+        return "strong"
+    if terms:
+        return "moderate"
+    return "weak"
+
+
+def _claim_match_score(requirement: ParsedRequirement, claim: ResumeClaim) -> tuple[float, ResumeClaim, tuple[str, ...]]:
+    req_terms = set(requirement.normalized_terms)
+    claim_terms = set(claim.normalized_terms)
+    matched_terms = tuple(sorted(req_terms & claim_terms))
+    if not req_terms:
+        return 0.0, claim, ()
+    overlap = len(matched_terms) / len(req_terms)
+    category_bonus = 0.15 if requirement.category == claim.category else 0.0
+    phrase_bonus = 0.25 if _text_has_term(_normalize_text(claim.text), _normalize_text(requirement.text)) else 0.0
+    score = min(1.0, overlap + category_bonus + phrase_bonus)
+    return round(score, 3), claim, matched_terms
+
+
+def _coverage_label(score: float) -> str:
+    if score >= 0.65:
+        return "satisfied"
+    if score >= 0.35:
+        return "partial"
+    if score > 0.0:
+        return "weak"
+    return "missing"
+
+
+def _strength_label(score: float) -> str:
+    if score >= 0.75:
+        return "strong"
+    if score >= 0.45:
+        return "partial"
+    if score > 0.0:
+        return "weak"
+    return "missing"
+
+
+def _requirement_match_explanation(
+    requirement: ParsedRequirement,
+    claim: ResumeClaim | None,
+    matched_terms: Sequence[str],
+    coverage: str,
+) -> str:
+    if claim is None:
+        return f"No resume claim clearly supports `{requirement.text}`."
+    terms = ", ".join(matched_terms) or "adjacent category/context"
+    return f"{coverage.title()} match: `{requirement.text}` maps to resume claim `{claim.text}` through {terms}."
+
+
+def _evidence_explanation(requirement: ParsedRequirement, claim: ResumeClaim, matched_terms: Sequence[str], coverage: str) -> str:
+    terms = ", ".join(matched_terms) or requirement.category.replace("_", " ")
+    return f"The resume {coverage}ly supports this {requirement.importance} requirement via {terms} evidence in `{claim.source_section}`."
+
+
+def _missing_explanation(requirement: ParsedRequirement, claim: ResumeClaim | None, coverage: str) -> str:
+    if claim is None:
+        return f"No clear resume claim was found for `{requirement.text}`."
+    return f"The closest resume claim is weak/partial, so `{requirement.text}` is not clearly satisfied."
+
+
+def _improvement_hint(requirement: ParsedRequirement, claim: ResumeClaim | None, coverage: str) -> str:
+    if claim is None or coverage == "missing":
+        return f"Add truthful evidence for {requirement.text} only if the experience exists; otherwise leave it out or build a relevant project."
+    return f"Strengthen the existing `{claim.source_section}` evidence by making the {requirement.category.replace('_', ' ')} connection explicit if accurate."
+
+
+def _analysis_confidence(
+    requirements: Sequence[ParsedRequirement],
+    claims: Sequence[ResumeClaim],
+    evidence: Sequence[EvidenceMatch],
+) -> float:
+    if not requirements or not claims:
+        return 0.35
+    return round(min(0.95, 0.5 + min(len(evidence), 6) * 0.05 + min(len(requirements), 20) * 0.01), 2)
+
+
+def _improvement_group(item: MissingRequirement) -> str:
+    if item.importance == "required" and item.coverage == "missing":
+        return "Highest Impact"
+    if item.coverage == "partial":
+        return "Quick Wins"
+    if item.related_resume_claims:
+        return "Rewrite Suggestions"
+    if item.category in {"programming_languages", "cloud_infrastructure", "data_ml_ai", "databases"}:
+        return "Missing Keywords"
+    return "Missing Evidence"
+
+
+def _target_section_for_gap(item: MissingRequirement, related_claims: Sequence[str], claims_by_id: dict[str, ResumeClaim]) -> str:
+    for claim_id in related_claims:
+        claim = claims_by_id.get(claim_id)
+        if claim is not None:
+            return claim.source_section
+    if item.category in {"programming_languages", "cloud_infrastructure", "databases"}:
+        return "skills"
+    if item.category == "education":
+        return "education"
+    return "experience or projects"
+
+
+def _suggested_wording(item: MissingRequirement, related_claims: Sequence[str], claims_by_id: dict[str, ResumeClaim]) -> str:
+    for claim_id in related_claims:
+        claim = claims_by_id.get(claim_id)
+        if claim is not None:
+            return f"Revise only if true: `{claim.text}` → add explicit context for {item.requirement_text} without changing the underlying fact."
+    return f"If true, add a concise bullet showing real experience with {item.requirement_text}; otherwise do not add this claim."
+
+
+def _recommendation_text(
+    item: MissingRequirement,
+    requirement: ParsedRequirement | None,
+    related_claims: Sequence[str],
+    claims_by_id: dict[str, ResumeClaim],
+) -> str:
+    del requirement
+    if related_claims:
+        claim = claims_by_id.get(related_claims[0])
+        if claim is not None:
+            return f"Clarify the existing `{claim.source_section}` claim so it visibly supports `{item.requirement_text}`."
+    return f"Create or surface truthful evidence for `{item.requirement_text}` before treating this job as a strong match."
+
+
+def _honesty_constraint(item: MissingRequirement, related_claims: Sequence[str]) -> str:
+    if related_claims:
+        return "Reframe adjacent experience only; do not claim direct ownership, production use, credentials, or metrics unless the resume source supports them."
+    return "Do not invent this experience. Add it only after real work, learning, or a verified project creates evidence."
+
+
+def _supported_evidence_wording(item: EvidenceMatch) -> str:
+    if item.resume_claim_text:
+        return f"Supported wording seed: `{item.resume_claim_text}`. Keep the fact intact; optionally foreground `{item.requirement_text or item.requirement}`."
+    return "Keep the supported evidence prominent and factual."
+
+
+def _structured_improvement_sections(scored_job: ScoredJob) -> str:
+    analysis = scored_job.analysis
+    improvements = tuple(getattr(analysis, "improvements", ()) or ())
+    if not improvements:
+        return "- No structured improvement recommendations were generated from parsed gaps."
+    groups: dict[str, list[ResumeImprovement]] = {}
+    for item in improvements:
+        groups.setdefault(item.group, []).append(item)
+    sections: list[str] = []
+    for group, items in groups.items():
+        sections.append(f"### {group}")
+        for item in items:
+            sections.append(f"- **{item.impact.title()} impact** — {item.recommendation}")
+            sections.append(f"  - Requirement: `{item.requirement_id}`")
+            if item.resume_claim_ids:
+                sections.append(f"  - Resume claim(s): {', '.join(item.resume_claim_ids)}")
+            if item.evidence_ids:
+                sections.append(f"  - Evidence: {', '.join(item.evidence_ids)}")
+            sections.append(f"  - Why: {item.why_it_matters}")
+            sections.append(f"  - Suggested wording: {item.suggested_wording}")
+            sections.append(f"  - Honesty constraint: {item.honesty_constraint}")
+    return "\n".join(sections)
+
 
 def _job_context(job: JobRecord) -> str:
     raw = job.raw

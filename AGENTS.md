@@ -8,6 +8,107 @@ Apply that direction specifically to the job scraper frontend, including the loc
 
 - `scraper/src/job_scraper/web.py`
 
+## Architecture Bias: Microservices, Functional Core, Container First
+
+Prefer a functional, service-oriented design over object-oriented architecture.
+
+Default architectural direction:
+
+- Split the system into as many small services as are justified by independently testable responsibilities.
+- Prefer explicit service boundaries over broad shared modules or hidden coupling.
+- Prefer functions, typed data structures, schemas, and plain modules over custom class hierarchies.
+- Avoid OOP unless a framework, library, or external API requires it.
+- If a class is unavoidable, keep it as a thin adapter around functional code.
+- Keep business logic in pure or mostly pure functions that can be tested without the web server, scraper runtime, browser session, or database.
+- Keep side effects at service boundaries: HTTP handlers, CLI entrypoints, filesystem access, network calls, database calls, queue consumers, and container startup.
+
+For this project, default service boundaries should be considered around:
+
+- job ingestion / scraping
+- job description normalization and parsing
+- resume parsing
+- resume-to-job matching and scoring
+- evidence extraction
+- improvement recommendation generation
+- report generation / UI serving
+- persistence / cache / queue infrastructure
+
+Do not force everything into one process for convenience if a service boundary would make testing, deployment, scaling, or failure isolation cleaner.
+
+Do not create microservices for their own sake. Each service must have:
+
+- a clear responsibility
+- a documented input/output contract
+- containerized execution
+- focused tests
+- a health check or equivalent smoke check
+- an explicit owner in the implementation plan
+
+## Containerization Contract
+
+Everything must run in containers by default.
+
+For every service or CLI entrypoint added or changed, the coordinator must ensure:
+
+- it has a Dockerfile or is included in a shared Dockerfile target
+- it is wired into `docker-compose.yml` or the project’s equivalent compose stack
+- required environment variables are documented with safe defaults or examples
+- dependencies are installed inside the container, not assumed from the host machine
+- tests can run inside the container
+- health checks or smoke checks exist for long-running services
+- containers can be rebuilt from a clean checkout
+
+Host-machine execution is allowed only as a developer convenience. It must not be the only verified path.
+
+## Pre-Push Verification Gate
+
+Do not push, merge, or mark work complete until the containerized path has been verified.
+
+Minimum default gate:
+
+```bash
+docker compose build
+docker compose up -d
+# run the project’s focused test command inside the relevant service container
+# examples:
+# docker compose exec <service> pytest
+# docker compose exec <service> uv run pytest
+# docker compose exec <service> npm test
+docker compose ps
+docker compose down
+```
+
+If the repository uses a different container runner, use the project-native equivalent, but keep the same standard: build cleanly, start cleanly, test inside the container, then tear down cleanly.
+
+Feature-specific verification must include at least one of:
+
+- unit tests for pure functions
+- contract tests between services
+- integration tests through the containerized service boundary
+- end-to-end smoke test through the UI or API
+- regression test for the exact bug fixed
+
+Never claim container verification unless the command was actually run.
+
+## Review Policy: Metrics and Executable Evidence Over Subjective Review
+
+Do not use model-based code review as a substitute for measurable verification.
+
+External or advisor review is optional and should only be used when it produces concrete, actionable findings tied to one of:
+
+- failing tests
+- missing tests
+- broken service contracts
+- unclear ownership boundaries
+- containerization gaps
+- security-sensitive logic
+- measurable complexity or maintainability risk
+- diffs outside the assigned scope
+
+Do not ask another model for a vague “code review” just to get a second opinion. A useful review must point to specific files, specific risks, and specific acceptance checks. Comments like “looks good,” “clean,” or “maintainable” are not evidence.
+
+The parent/coordinator still must inspect diffs before merging worker output, but this inspection is a scope and verification check, not a replacement for tests.
+
 ## Autonomous Orchestration Policy
 
 The coordinator is expected to actively orchestrate work, not merely describe how it could be done.
@@ -56,7 +157,7 @@ Spawn workers only when at least one of the following is true:
 
 - Two or more independent file ownership groups exist.
 - Estimated implementation time exceeds 15–20 minutes.
-- One worker can review while another implements.
+- One worker can write or run verification while another implements.
 - Research can proceed independently of implementation.
 - A risky refactor benefits from an independent verification pass.
 
@@ -154,7 +255,7 @@ Good worker splits:
 - one CLI command family
 - one storage/schema area
 - one focused test file
-- one read-only review pass
+- one read-only verification or contract-audit pass
 - one isolated experimental implementation
 - one competing patch approach
 
@@ -227,7 +328,7 @@ The parent/coordinator must:
 2. Write down file ownership before spawning workers.
 3. Spawn one worker per disjoint file, subsystem, or verification slice.
 4. Give each worker exact target files, symbols, non-goals, and acceptance checks.
-5. Prefer read-only review workers before risky merges or broad refactors.
+5. Prefer verification workers before risky merges or broad refactors.
 6. Review worker diffs before accepting them.
 7. Stop using worker output if the worker drifts out of scope.
 8. Resolve conflicts and duplicate implementations itself.
@@ -309,15 +410,18 @@ Before merging worker output, the parent must confirm:
 Every completed task must include:
 
 - Commands actually run
-- Tests actually run
+- Container build/start commands actually run
+- Tests actually run inside containers when applicable
 - Files modified
 - Files intentionally not modified
+- Services added, removed, or changed
+- Service contracts added or changed
 - Known risks
 - Remaining TODOs
 
 Never claim verification unless the command was executed.
 
-If verification cannot be run, explain why.
+If containerized verification cannot be run, explain why and do not present the work as ready to push.
 
 ## Final Response Requirements
 

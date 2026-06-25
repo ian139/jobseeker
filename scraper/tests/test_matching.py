@@ -696,3 +696,60 @@ def test_structured_result_reports_missing_requirements_and_concerns() -> None:
     assert any("years of experience" in concern for concern in result.concerns)
     assert result.category_fit
     assert "requirements" in result.explanation
+
+
+def test_scored_job_contains_structured_analysis_contract() -> None:
+    analysis = _analysis(
+        text=(
+            "Ada Candidate\n"
+            "Experience\n"
+            "Built FastAPI services with Python and PostgreSQL for customer workflows.\n"
+            "Led rollout with support and product stakeholders.\n"
+            "Skills\n"
+            "Python FastAPI PostgreSQL"
+        )
+    )
+    job = _job_record(
+        theirstack_id="analysis-contract",
+        title="Backend Platform Engineer",
+        raw={
+            "job_description": """
+Requirements:
+- Experience building production APIs with Python.
+- PostgreSQL database experience.
+- Kubernetes production operations.
+Preferred:
+- Cross-functional leadership.
+""",
+            "skills": ["Python", "PostgreSQL", "Kubernetes"],
+        },
+    )
+
+    result = score_jobs([job], analysis, target_roles=[], target_industries=[], keywords=[])[0]
+
+    assert result.analysis is not None
+    assert result.analysis.job_id == "analysis-contract"
+    assert result.analysis.requirements
+    assert result.analysis.resume_claims
+    assert result.analysis.evidence
+    assert result.analysis.missing_requirements
+    assert result.analysis.improvements
+    assert any(req.category == "backend" for req in result.analysis.requirements)
+    assert any(gap.coverage in {"missing", "weak", "partial"} for gap in result.analysis.missing_requirements)
+    assert any(item.group in {"Highest Impact", "Missing Keywords", "Rewrite Suggestions", "Quick Wins"} for item in result.analysis.improvements)
+
+
+def test_improvement_report_includes_grouped_structured_recommendations() -> None:
+    analysis = _analysis(text="Ada Candidate\nExperience\nBuilt Python APIs.\nSkills\nPython")
+    job = _job_record(
+        theirstack_id="structured-report",
+        title="Platform Engineer",
+        raw={"job_description": "Must build Python APIs and operate Kubernetes in production."},
+    )
+    scored = score_jobs([job], analysis, target_roles=[], target_industries=[], keywords=[])[0]
+
+    report = build_improvement_report(scored, analysis, target_roles=[], target_industries=[])
+
+    assert "## Structured Resume Improvements" in report
+    assert "Honesty constraint" in report
+    assert "kubernetes" in report.lower()

@@ -2,13 +2,67 @@
 
 ## Project Design Reference
 
-Use `SCRAPER_DESIGN.md` as the general product and visual design reference.
+Use `SCRAPER_UI.md` for product workflow, layout, information architecture, and UX behavior.
 
 Apply that direction specifically to the job scraper frontend, including the local resume-prompt web UI in:
 
 - `scraper/src/job_scraper/web.py`
 
+## Autonomous Orchestration Policy
 
+The coordinator is expected to actively orchestrate work, not merely describe how it could be done.
+
+When the required tools are available (Orca, OMP, Git, shell), the coordinator should prefer performing orchestration actions over suggesting them.
+
+For non-trivial tasks, the default workflow is:
+
+1. Run `/plan`.
+2. Determine whether parallel execution would reduce total completion time or improve isolation.
+3. If beneficial, create worker terminals or worktrees without waiting for additional permission.
+4. Assign explicit ownership to each worker.
+5. Monitor worker progress.
+6. Review all worker output.
+7. Integrate, verify, and report results.
+
+Assume permission to perform reversible development operations unless the user explicitly restricts them.
+
+Examples of expected autonomous actions:
+
+- creating feature worktrees
+- creating worker terminals
+- sending worker prompts
+- waiting for workers
+- collecting worker results
+- running tests
+- running linters
+- inspecting git diffs
+- merging completed worker output
+
+Do **not** ask whether to perform these routine orchestration steps. Perform them when they support the user's stated objective.
+
+Ask for confirmation only before:
+
+- destructive operations (deleting branches, worktrees, files, databases)
+- irreversible deployments
+- publishing externally
+- operations outside the project workspace
+- actions requiring credentials or billing
+
+## Worker Decision Heuristic
+
+Do not optimize for the number of agents.
+
+Spawn workers only when at least one of the following is true:
+
+- Two or more independent file ownership groups exist.
+- Estimated implementation time exceeds 15–20 minutes.
+- One worker can review while another implements.
+- Research can proceed independently of implementation.
+- A risky refactor benefits from an independent verification pass.
+
+Prefer 2–4 workers.
+
+Avoid more than 6 workers unless the task naturally decomposes into many independent slices.
 
 ## Default Coordinator Model
 
@@ -66,11 +120,33 @@ The planning phase is expected for nearly all non-trivial work and should be tre
 
 ## Worker Allocation
 
-Prefer smaller same-worktree worker terminals over nested worktrees.
+The coordinator may use either same-worktree worker terminals or sub-worktree workers.
 
-Do not create extra worktrees for subtasks unless the user explicitly asks for another checkout.
+Use same-worktree workers when:
 
-Use workers only when the subtask has clear ownership and can finish without depending on another worker’s unfinished result.
+- the task is small
+- file ownership is completely disjoint
+- workers only need read-only review
+- edits are unlikely to conflict
+- speed matters more than isolation
+
+Use sub-worktree workers when:
+
+- two or more implementation paths should be explored in parallel
+- the task is risky or broad
+- workers may need to run tests or modify overlapping project state
+- independent patches should be reviewed before integration
+- competing approaches should be compared
+- isolation is more valuable than speed
+
+Do not create sub-worktrees casually. Create them when they improve isolation, parallelism, or review quality.
+
+For non-trivial tasks, the coordinator should explicitly decide during `/plan`:
+
+- coordinator-only
+- same-worktree workers
+- sub-worktree workers
+- mixed approach
 
 Good worker splits:
 
@@ -79,13 +155,15 @@ Good worker splits:
 - one storage/schema area
 - one focused test file
 - one read-only review pass
+- one isolated experimental implementation
+- one competing patch approach
 
 Bad worker splits:
 
 - “clean up everything”
 - “make it better”
-- overlapping edits to the same file
-- broad architectural decisions
+- overlapping edits without sub-worktree isolation
+- broad architectural decisions delegated to workers
 - tasks that require another worker’s unfinished output
 
 ## Worker Launch Commands
@@ -113,6 +191,33 @@ orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
 orca terminal send --terminal <handle> --text '<narrow task prompt>' --enter --json
 
 ```
+
+## Sub-Worktree Worker Launch Commands
+
+Use sub-worktree workers when isolation is beneficial.
+
+Default pattern:
+
+```bash
+orca worktree create --name "<parent-feature>-<specific-subtask>" --json
+orca terminal create --worktree "<parent-feature>-<specific-subtask>" --title "<specific-subtask>" --command 'omp --model "openrouter/deepseek/deepseek-v4-pro" --thinking medium' --json
+orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
+orca terminal send --terminal <handle> --text '<narrow task prompt>' --enter --json
+
+```
+
+The coordinator must treat sub-worktree output as a patch proposal, not automatically accepted work.
+
+For every sub-worktree worker, the coordinator must:
+
+1. inspect the worker diff
+2. compare it against the assignment
+3. reject unrelated edits
+4. integrate the useful patch into the parent feature worktree
+5. rerun focused verification in the parent worktree
+6. only then continue to final verification
+
+Workers in sub-worktrees must not merge their own work into the parent.
 
 ## Coordinator Rules
 

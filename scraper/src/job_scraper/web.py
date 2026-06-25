@@ -5,7 +5,7 @@ import re
 from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse, Response
 
 from job_scraper.config import AppSettings
 from job_scraper.llm import ChatCompletionsResumeLLM, ResumeLLMError
@@ -15,6 +15,7 @@ from job_scraper.resume_uploads import (
     UploadedResumeAnalysis,
     analyze_resume_upload,
     build_tailored_resume_prompt,
+    facts_markdown_for_text,
 )
 from job_scraper.storage import JobRecord, JobStorage
 
@@ -37,6 +38,18 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
     @app.get("/favicon.ico")
     def favicon() -> Response:
         return Response(status_code=204)
+
+    @app.get("/api/jobs")
+    def jobs_api() -> JSONResponse:
+        jobs = storage.list_jobs(limit=250)
+        return JSONResponse({"jobs": [_job_detail_payload(job) for job in jobs]})
+
+    @app.get("/api/jobs/{job_id}")
+    def job_api(job_id: str) -> JSONResponse:
+        job = storage.get_job(job_id)
+        if job is None:
+            return JSONResponse({"error": "unknown_job", "job_id": job_id}, status_code=404)
+        return JSONResponse(_job_detail_payload(job))
 
     @app.get("/jobs/{job_id}", response_class=HTMLResponse)
     def job_detail(job_id: str) -> HTMLResponse:
@@ -189,7 +202,7 @@ def _page(title: str, body: str) -> str:
     :root {{ color-scheme: dark; background: #0B0F14; color: #EBDBB2; }}
     * {{ box-sizing: border-box; }}
     body {{ background: #0B0F14; color: #EBDBB2; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: 0; line-height: 1.45; }}
-    main {{ max-width: 118rem; margin: 0 auto; padding: 1.25rem; }}
+    main {{ max-width: 118rem; margin: 0 auto; padding: 1.25rem; width: min(118rem, 100%); }}
     h1, h2, h3 {{ letter-spacing: -0.03em; line-height: 1.05; margin: 0 0 0.8rem; }}
     p {{ margin: 0.35rem 0; }}
     a {{ color: #7DAEA3; text-decoration: none; }}
@@ -200,7 +213,11 @@ def _page(title: str, body: str) -> str:
     .muted {{ color: #928374; }}
     .lede {{ color: #BDAE93; max-width: 70rem; }}
     .grid {{ display: grid; gap: 1rem; }}
-    .intake-grid {{ grid-template-columns: minmax(0, 1.15fr) minmax(22rem, 0.85fr); align-items: start; }}
+    .grid > *, .intake-grid > *, .results-shell > * {{ min-width: 0; }}
+    .intake-grid {{ grid-template-columns: minmax(24rem, 0.85fr) minmax(0, 1.15fr); align-items: start; }}
+    .resume-primary {{ background: #161C23; border: 1px solid #D8A657; border-radius: 0.75rem; padding: 0.9rem; }}
+    .secondary-filters {{ border-top: 1px solid #202832; margin-top: 1rem; padding-top: 0.75rem; }}
+    .secondary-filters summary {{ color: #D8A657; cursor: pointer; font-weight: 850; }}
     .metrics {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }}
     .metric {{ background: #161C23; border: 1px solid #202832; border-radius: 0.75rem; padding: 0.85rem; }}
     .metric strong {{ display: block; color: #FABD2F; font-size: 1.35rem; }}
@@ -218,16 +235,19 @@ def _page(title: str, body: str) -> str:
     .analysis-grid {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
     .analysis-card {{ background: #161C23; border: 1px solid #202832; border-radius: 0.75rem; padding: 0.85rem; }}
     .analysis-card ul {{ margin: 0.4rem 0 0; padding-left: 1.1rem; color: #BDAE93; }}
-    .results-shell {{ display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(22rem, 0.85fr); gap: 1rem; align-items: start; margin-top: 1rem; }}
-    .table-panel {{ background: #11161D; border: 1px solid #2B3440; border-radius: 0.85rem; overflow: hidden; }}
+    .results-shell {{ display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(24rem, 0.85fr); gap: 1rem; align-items: start; margin-top: 1rem; }}
+    .table-panel {{ background: #11161D; border: 1px solid #2B3440; border-radius: 0.85rem; max-width: 100%; min-width: 0; overflow-x: auto; }}
     .table-tools {{ align-items: end; background: #161C23; border-bottom: 1px solid #202832; display: grid; gap: 0.75rem; grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 0.85rem; }}
-    table {{ border-collapse: collapse; width: 100%; }}
-    th, td {{ border-bottom: 1px solid #202832; padding: 0.65rem 0.75rem; text-align: left; vertical-align: top; }}
+    table {{ border-collapse: collapse; max-width: 100%; table-layout: fixed; width: 100%; }}
+    th, td {{ border-bottom: 1px solid #202832; overflow-wrap: anywhere; padding: 0.65rem 0.75rem; text-align: left; vertical-align: top; word-break: break-word; }}
     th {{ color: #BDAE93; font-size: 0.75rem; letter-spacing: 0.1em; text-transform: uppercase; }}
     tr:hover td {{ background: #161C23; }}
+    .data-table th:nth-child(1), .data-table td:nth-child(1) {{ width: 4.25rem; }}
+    .data-table th:nth-child(4), .data-table td:nth-child(4) {{ width: 24%; }}
+    .data-table th:nth-child(7), .data-table td:nth-child(7) {{ width: 5.5rem; }}
     .score, .score-badge.high {{ color: #A9B665; font-weight: 900; }}
-    .gap {{ color: #EA6962; }}
-    .badge {{ border: 1px solid #2B3440; border-radius: 999px; color: #BDAE93; display: inline-block; font-size: 0.74rem; margin: 0.15rem 0.15rem 0 0; padding: 0.15rem 0.42rem; }}
+    .gap, .missing-field {{ color: #EA6962; }}
+    .badge {{ border: 1px solid #2B3440; border-radius: 999px; color: #BDAE93; display: inline-block; font-size: 0.74rem; margin: 0.15rem 0.15rem 0 0; max-width: 100%; overflow-wrap: anywhere; padding: 0.15rem 0.42rem; white-space: normal; }}
     .job-row.gold td:first-child {{ border-left: 3px solid #D8A657; }}
     .job-row.silver td:first-child {{ border-left: 3px solid #928374; }}
     .job-row.bronze td:first-child {{ border-left: 3px solid #E78A4E; }}
@@ -240,12 +260,14 @@ def _page(title: str, body: str) -> str:
     .detail-stack.has-selection .detail-card.is-selected {{ display: block; }}
     .detail-stack:has(.detail-card:target) .detail-card {{ display: none; }}
     .detail-stack .detail-card:target {{ display: block; }}
+    .parse-quality {{ background: #0B0F14; border: 1px solid #202832; border-radius: 0.65rem; margin: 0.75rem 0; padding: 0.65rem; }}
+    .parse-quality details {{ margin-top: 0.35rem; }}
     .detail-meta {{ display: grid; gap: 0.35rem; margin: 0.75rem 0; }}
-    .detail-actions {{ display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }}
+    .detail-card .detail-actions {{ background: #11161D; border-top: 1px solid #202832; display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0.75rem 0 1rem; padding-top: 0.75rem; position: sticky; top: 0; z-index: 2; }}
+    .table-actions {{ display: flex; flex-wrap: wrap; gap: 0.35rem; }}
     .action-row {{ align-items: center; }}
     .copy-status {{ color: #A9B665; font-size: 0.8rem; margin-top: 1rem; }}
-    .description {{ background: #0B0F14; border: 1px solid #202832; border-radius: 0.55rem; color: #BDAE93; max-height: 24rem; overflow: auto; padding: 0.75rem; white-space: pre-wrap; }}
-    .requirements {{ max-height: 16rem; }}
+    .description {{ background: #0B0F14; border: 1px solid #202832; border-radius: 0.55rem; color: #BDAE93; overflow-wrap: anywhere; padding: 0.75rem; white-space: pre-wrap; }}
     .external-url {{ overflow-wrap: anywhere; }}
     pre {{ background: #0B0F14; color: #EBDBB2; border: 1px solid #2B3440; border-radius: 0.5rem; padding: 1rem; white-space: pre-wrap; overflow-wrap: anywhere; }}
     .legacy-list {{ display: grid; gap: 0.75rem; margin-top: 1rem; }}
@@ -348,37 +370,46 @@ document.addEventListener('click', async (event) => {
 
 def _intake_page(jobs: list[JobRecord]) -> str:
     job_count = len(jobs)
-    latest = html.escape(jobs[0].discovered_at or jobs[0].date_posted or "n/a") if jobs else "n/a"
-    recent_rows = "\n".join(_compact_job_row(job) for job in jobs[:8]) or '<tr><td colspan="8">No scraped jobs found. Run job-scraper run-once first.</td></tr>'
+    latest = html.escape(jobs[0].discovered_at or jobs[0].date_posted or "No stored jobs") if jobs else "No stored jobs"
+    ready_count = sum(1 for job in jobs if _job_storage_state(job) == "Stored structured record")
+    review_count = max(job_count - ready_count, 0)
+    recent_rows = "\n".join(_compact_job_row(job) for job in jobs[:8]) or '<tr><td colspan="9">No scraped jobs found. Run job-scraper run-once first.</td></tr>'
     return f"""<section id="input-strip" class="grid intake-grid">
   <form id="resume-upload" method="post" enctype="multipart/form-data" action="/matches" aria-labelledby="strategy-title">
-    <span class="eyebrow">Start with roles, filters, or resume</span>
-    <h2 id="strategy-title">Build a scored target market</h2>
-    <p class="muted">Choose roles/industries first when exploring. If you already know the target, upload the resume and use filters as the search brief.</p>
-    <label for="target_roles">Target roles</label>
-    <input id="target_roles" name="target_roles" type="text" placeholder="Frontend Engineer, Product Engineer, Data Platform">
-    <span class="hint">Optional; comma-separated role titles or functions.</span>
-    <label for="target_industries">Industries or subsectors</label>
-    <input id="target_industries" name="target_industries" type="text" placeholder="Healthcare, Fintech, Climate, Developer Tools">
-    <span class="hint">Optional; used for category tabs and industry-fit scoring.</span>
-    <label for="keywords">Filter keywords</label>
-    <input id="keywords" name="keywords" type="text" placeholder="React, TypeScript, Python, remote, platform">
-    <span class="hint">Optional; boosts and filters the top match list.</span>
-    <label for="resume-file">Resume file</label>
-    <input id="resume-file" name="resume_file" type="file" accept=".pdf,.tex,.latex,.txt,.md" required>
-    <button id="resume-upload-btn" type="submit">Score jobs against resume</button>
+    <span class="eyebrow">First-time action</span>
+    <h2 id="strategy-title">Import a resume first</h2>
+    <p class="muted">Upload the resume to parse candidate evidence, then score stored jobs. Filters are optional refinements after the resume is understood.</p>
+    <section class="resume-primary" aria-label="Resume import">
+      <label for="resume-file">Resume file</label>
+      <input id="resume-file" name="resume_file" type="file" accept=".pdf,.tex,.latex,.txt,.md" required>
+      <span class="hint">PDF, LaTeX, text, or Markdown. The parser extracts roles, skills, projects, metrics, education, certifications, gaps, and ambiguous claims before report generation.</span>
+      <button id="resume-upload-btn" type="submit">Import resume and score stored jobs</button>
+    </section>
+    <details class="secondary-filters">
+      <summary>Optional filters and scoring boosts</summary>
+      <label for="target_roles">Target roles</label>
+      <input id="target_roles" name="target_roles" type="text" placeholder="Frontend Engineer, Product Engineer, Data Platform">
+      <span class="hint">Optional; comma-separated role titles or functions.</span>
+      <label for="target_industries">Industries or subsectors</label>
+      <input id="target_industries" name="target_industries" type="text" placeholder="Healthcare, Fintech, Climate, Developer Tools">
+      <span class="hint">Optional; used for category tabs and industry-fit scoring.</span>
+      <label for="keywords">Filter keywords</label>
+      <input id="keywords" name="keywords" type="text" placeholder="React, TypeScript, Python, remote, platform">
+      <span class="hint">Optional; boosts and filters the top match list using stored structured job details.</span>
+    </details>
   </form>
   <section class="panel">
-    <span class="eyebrow">Scrape status</span>
+    <span class="eyebrow">Scrape and storage status</span>
     <div class="grid metrics">
-      <div class="metric"><span class="muted">Jobs loaded</span><strong>{job_count}</strong></div>
+      <div class="metric"><span class="muted">Jobs stored</span><strong>{job_count}</strong></div>
+      <div class="metric"><span class="muted">Structured records</span><strong>{ready_count}</strong></div>
+      <div class="metric"><span class="muted">Need review</span><strong>{review_count}</strong></div>
       <div class="metric"><span class="muted">Latest signal</span><strong>{latest}</strong></div>
-      <div class="metric"><span class="muted">Workflow</span><strong>2 paths</strong></div>
-      <div class="metric"><span class="muted">Output</span><strong>Prompts</strong></div>
     </div>
+    <p class="hint">Filters, detail cards, prompt generation, Markdown reports, and API consumers read from the same stored job records.</p>
     <h3>Recent scraped roles</h3>
     <table>
-      <thead><tr><th>Role</th><th>Company</th><th>Domain</th><th>Work model</th><th>Country</th><th>Posted</th><th>Source</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Role</th><th>Company</th><th>Domain</th><th>Work model</th><th>Country</th><th>Posted</th><th>Parse state</th><th>Source</th><th>Actions</th></tr></thead>
       <tbody>{recent_rows}</tbody>
     </table>
   </section>
@@ -413,17 +444,17 @@ def _matches_page(
     return f"""<section class="panel">
   <span class="eyebrow">Resume-to-market analysis</span>
   <h2>Top scored matches</h2>
-  <p class="muted">Scoring brief: {html.escape(terms)}. Top match score: <span class="score">{top_score}</span>.</p>
+  <p class="muted">Scoring brief: {html.escape(terms)}. Top match score: <span class="score">{top_score}</span>. Job details and Markdown actions remain pinned beside the result list.</p>
   <nav id="category-tabs" class="tabs tab-bar" aria-label="Industry categories">{category_tabs}</nav>
   <div class="grid analysis-grid">{analysis_cards}</div>
 </section>
 <section class="results-shell" aria-label="Scored job results and details">
   <section id="job-table-container" class="table-panel">
     <form class="table-tools" method="post" enctype="multipart/form-data" action="/matches">
-      <div><label for="target_roles_refine">Roles</label><input id="target_roles_refine" name="target_roles" type="text" value="{html.escape(', '.join(target_roles))}"></div>
-      <div><label for="target_industries_refine">Industries</label><input id="target_industries_refine" name="target_industries" type="text" value="{html.escape(', '.join(target_industries))}"></div>
-      <div><label for="keywords_refine">Keywords</label><input id="keywords_refine" name="keywords" type="text" value="{html.escape(', '.join(keywords))}"></div>
-      <div><label for="resume_refine">Resume</label><input id="resume_refine" name="resume_file" type="file" accept=".pdf,.tex,.latex,.txt,.md" required><button type="submit">Refilter</button></div>
+      <div><label for="resume_refine">Resume</label><input id="resume_refine" name="resume_file" type="file" accept=".pdf,.tex,.latex,.txt,.md" required><button type="submit">Re-score</button></div>
+      <div><label for="target_roles_refine">Optional roles</label><input id="target_roles_refine" name="target_roles" type="text" value="{html.escape(', '.join(target_roles))}"></div>
+      <div><label for="target_industries_refine">Optional industries</label><input id="target_industries_refine" name="target_industries" type="text" value="{html.escape(', '.join(target_industries))}"></div>
+      <div><label for="keywords_refine">Optional keywords</label><input id="keywords_refine" name="keywords" type="text" value="{html.escape(', '.join(keywords))}"></div>
     </form>
     {category_tables}
   </section>
@@ -434,17 +465,24 @@ def _matches_page(
 <form id="resume-prompt-payload" hidden aria-hidden="true" method="post">{hidden_resume}</form>"""
 
 
+def _table_value(job: JobRecord, keys: tuple[str, ...], value: object) -> str:
+    return _format_detail_text(value) or _missing_field_reason(job, keys)
+
+
 def _compact_job_row(job: JobRecord) -> str:
     job_path_id = quote(job.theirstack_id, safe="")
+    quality = _job_parse_quality(job)
+    parse_state = f"{quality['storage_state']} · {quality['present_fields']}/{quality['total_fields']} fields"
     return f"""<tr>
-  <td><a href="/jobs/{job_path_id}">{html.escape(job.title or "Untitled role")}</a></td>
-  <td>{html.escape(job.company or "Unknown company")}</td>
-  <td>{html.escape(_job_company_domain(job))}</td>
-  <td>{html.escape(_job_work_model(job))}</td>
-  <td>{html.escape(job.country_code or "Unknown country")}</td>
-  <td>{html.escape(job.date_posted or job.discovered_at or "Unknown date")}</td>
+  <td><a href="/jobs/{job_path_id}">{html.escape(_table_value(job, ("job_title", "title"), job.title))}</a></td>
+  <td>{html.escape(_table_value(job, ("company_name", "company"), job.company))}</td>
+  <td>{html.escape(_table_value(job, ("company_domain", "domain"), _job_company_domain(job)))}</td>
+  <td>{html.escape(_table_value(job, ("employment_statuses", "workplace", "work_model", "remote"), _job_work_model(job)))}</td>
+  <td>{html.escape(_table_value(job, ("job_country_code", "country_code"), job.country_code))}</td>
+  <td>{html.escape(_table_value(job, ("date_posted", "discovered_at", "posted_at"), job.date_posted or job.discovered_at))}</td>
+  <td>{html.escape(parse_state)}</td>
   <td>{html.escape(_job_source_label(job))}</td>
-  <td class="detail-actions"><a class="button ghost-button" href="/jobs/{job_path_id}">Details</a><a class="button ghost-button" href="/jobs/{job_path_id}/prompt">Tailor prompt</a></td>
+  <td class="table-actions"><a class="button ghost-button" href="/jobs/{job_path_id}">Details</a><a class="button ghost-button" href="/jobs/{job_path_id}/prompt">Tailor prompt</a></td>
 </tr>"""
 
 
@@ -484,8 +522,8 @@ def _result_row(scored: object) -> str:
     missing = "".join(f'<span class="badge gap">{html.escape(str(term))}</span>' for term in missing_values[:4])
     return f"""<tr class="job-row {_score_tier(float(getattr(scored, "score", 0.0)))}" data-job-id="{html.escape(job.theirstack_id)}">
   <td class="score">{int(round(float(getattr(scored, "score", 0.0))))}</td>
-  <td><a href="#{detail_id}" data-detail-target="{detail_id}" aria-controls="{detail_id}">{html.escape(job.title or "Untitled role")}</a></td>
-  <td>{html.escape(job.company or "Unknown")}</td>
+  <td><a href="#{detail_id}" data-detail-target="{detail_id}" aria-controls="{detail_id}">{html.escape(_table_value(job, ("job_title", "title"), job.title))}</a></td>
+  <td>{html.escape(_table_value(job, ("company_name", "company"), job.company))}</td>
   <td>{_job_metadata_badges(job, scored)}</td>
   <td>{matched or '<span class="muted">None</span>'}</td>
   <td>{missing or '<span class="muted">None</span>'}</td>
@@ -493,11 +531,20 @@ def _result_row(scored: object) -> str:
 </tr>"""
 
 
+def _open_source_action(job: JobRecord) -> str:
+    url = _job_listing_url(job)
+    if not url:
+        return ""
+    return f'<a class="button ghost-button" href="{html.escape(url)}" target="_blank" rel="noopener noreferrer">Open source</a>'
+
+
 def _job_detail_page(job: JobRecord) -> str:
     job_path_id = quote(job.theirstack_id, safe="")
     actions = f"""<div class="detail-actions">
   <a class="button ghost-button" href="/">Back to dashboard</a>
   <a class="button" href="/jobs/{job_path_id}/prompt">Tailor prompt</a>
+  {_open_source_action(job)}
+  <span class="badge">Saved in structured storage</span>
 </div>"""
     return f"""<article class="detail-card detail-pane is-selected" id="{_job_detail_id(job)}">
   {_job_detail_body(job, scored=None, actions=actions)}
@@ -512,7 +559,9 @@ def _detail_card(scored: object) -> str:
   <button class="download-prompt" type="submit" form="resume-prompt-payload" formaction="{action}" formmethod="post">Download Markdown review report</button>
   <button class="ghost-button copy-report" type="button" data-copy-report="{action}" aria-describedby="{status_id}">Copy Markdown report</button>
   <span id="{status_id}" class="copy-status" role="status" aria-live="polite"></span>
+  {_open_source_action(job)}
   <a class="button ghost-button" href="/jobs/{quote(job.theirstack_id, safe='')}">Open full details</a>
+  <span class="badge">Saved in structured storage</span>
 </div>"""
     return f"""<article class="detail-card detail-pane" id="{_job_detail_id(job)}">
   {_job_detail_body(job, scored=scored, actions=actions)}
@@ -604,38 +653,247 @@ def _download_slug(value: str) -> str:
     return _dom_id(value)[:80] or "job"
 
 
+def _job_detail_payload(job: JobRecord) -> dict[str, object]:
+    quality = _job_parse_quality(job)
+    fields = {
+        "title": _field_payload(job, "Job title", ("job_title", "title"), normalized=job.title),
+        "company": _field_payload(job, "Company", ("company_name", "company"), normalized=job.company),
+        "location": _value_payload(job, "Location", _job_location(job), ("location", "job_location", "workplace", "job_country_code", "remote")),
+        "compensation": _value_payload(job, "Compensation", _job_compensation_label(job), ("compensation", "salary", "min_annual_salary_usd", "max_annual_salary_usd")),
+        "employment_type": _field_payload(job, "Employment type", ("employment_statuses", "employment_type", "employment_status")),
+        "seniority": _field_payload(job, "Seniority level", ("job_seniority", "seniority", "seniority_level")),
+        "responsibilities": _field_payload(job, "Core responsibilities", ("responsibilities", "job_responsibilities", "core_responsibilities")),
+        "required_qualifications": _field_payload(job, "Required qualifications", ("requirements", "job_requirements", "required_qualifications", "minimum_qualifications", "qualifications", "candidate_requirements")),
+        "preferred_qualifications": _field_payload(job, "Preferred qualifications", ("preferred_qualifications", "nice_to_have", "preferred_skills", "bonus_points")),
+        "technologies": _field_payload(job, "Technologies and keywords", ("technologies", "technology_stack", "tech_stack", "tools", "skills", "keywords", "tools_mentioned", "job_categories")),
+        "source_url": _value_payload(job, "Source URL", _job_listing_url(job), ("source_url", "url", "link")),
+        "scraped_timestamp": _value_payload(job, "Scraped timestamp", job.discovered_at or job.date_posted or "", ("discovered_at", "date_posted", "posted_at")),
+    }
+    return {
+        "id": job.theirstack_id,
+        "storage_state": _job_storage_state(job),
+        "parse_quality": quality,
+        "fields": fields,
+        "raw": job.raw,
+    }
+
+
+def _field_payload(
+    job: JobRecord,
+    label: str,
+    keys: tuple[str, ...],
+    *,
+    normalized: object | None = None,
+) -> dict[str, object]:
+    value = _format_detail_text(normalized) if normalized not in (None, "", [], {}) else _format_detail_text(_job_raw_value(job, keys))
+    return _value_payload(job, label, value, keys)
+
+
+def _value_payload(job: JobRecord, label: str, value: object, keys: tuple[str, ...]) -> dict[str, object]:
+    text = _format_detail_text(value)
+    if text:
+        return {"label": label, "status": "parsed", "value": text, "message": ""}
+    message = _missing_field_reason(job, keys)
+    return {"label": label, "status": _missing_status_class(message), "value": None, "message": message}
+
+
+def _detail_fact(job: JobRecord, label: str, keys: tuple[str, ...], *, value: object | None = None, normalized: object | None = None) -> str:
+    payload = _value_payload(job, label, value, keys) if value is not None else _field_payload(job, label, keys, normalized=normalized)
+    display = payload["value"] if payload["status"] == "parsed" else _missing_badge(str(payload["message"]))
+    return f"<p><strong>{html.escape(label)}:</strong> {html.escape(str(display)) if payload['status'] == 'parsed' else display}</p>"
+
+
+def _detail_block(job: JobRecord, label: str, keys: tuple[str, ...], *, value: object | None = None) -> str:
+    payload = _value_payload(job, label, value, keys) if value is not None else _field_payload(job, label, keys)
+    if payload["status"] == "parsed":
+        body = html.escape(str(payload["value"]))
+    else:
+        body = _missing_badge(str(payload["message"]))
+    return f"""<h3>{html.escape(label)}</h3>
+  <div class="description">{body}</div>"""
+
+
+def _missing_badge(message: str) -> str:
+    return f'<span class="missing-field">{html.escape(message)}</span>'
+
+
+def _missing_status_class(message: str) -> str:
+    normalized = message.casefold()
+    if "pending" in normalized or "not yet" in normalized:
+        return "pending"
+    if "failed" in normalized:
+        return "parser_failed"
+    if "not separately parsed" in normalized:
+        return "not_separately_parsed"
+    return "absent_in_source"
+
+
+def _missing_field_reason(job: JobRecord, keys: tuple[str, ...]) -> str:
+    status = _parse_status(job).casefold()
+    if status in {"pending", "queued", "not_parsed", "not parsed", "unparsed"}:
+        return "Not yet parsed"
+    if status in {"failed", "error"} or _job_raw_value(job, ("parser_error", "parse_error", "extraction_error")):
+        return "Parser failed"
+    diagnostics = _job_raw_value(job, ("missing_field_diagnostics", "parser_warnings", "parse_warnings", "missing_fields"))
+    if _diagnostics_mentions(diagnostics, keys):
+        return "Parser failed"
+    if _is_detail_subfield(keys) and _job_description(job):
+        return "Not separately parsed from listing description"
+    if _is_detail_subfield(keys) and _job_source(job) == "public_json":
+        return "Not included in public source feed"
+    return "Not present in source"
+
+
+def _is_detail_subfield(keys: tuple[str, ...]) -> bool:
+    detail_keys = {
+        "responsibilities",
+        "job_responsibilities",
+        "core_responsibilities",
+        "role_responsibilities",
+        "requirements",
+        "job_requirements",
+        "required_qualifications",
+        "minimum_qualifications",
+        "qualifications",
+        "candidate_requirements",
+        "preferred_qualifications",
+        "nice_to_have",
+        "preferred_skills",
+        "bonus_points",
+    }
+    return any(key in detail_keys for key in keys)
+
+
+def _diagnostics_mentions(diagnostics: object, keys: tuple[str, ...]) -> bool:
+    if diagnostics in (None, "", [], {}):
+        return False
+    text = _normalize_space(_format_detail_text(diagnostics)).casefold()
+    return any(key.casefold() in text for key in keys)
+
+
+def _parse_status(job: JobRecord) -> str:
+    raw_status = _job_raw_value(job, ("parse_status", "parser_status", "extraction_status"))
+    if raw_status not in (None, "", [], {}):
+        return str(raw_status)
+    if _job_raw_value(job, ("parser_error", "parse_error", "extraction_error")):
+        return "failed"
+    return "parsed"
+
+
+def _job_storage_state(job: JobRecord) -> str:
+    status = _parse_status(job).casefold()
+    if status in {"pending", "queued", "not_parsed", "not parsed", "unparsed"}:
+        return "Stored; parse pending"
+    if status in {"failed", "error"}:
+        return "Stored; parser needs review"
+    return "Stored structured record"
+
+
+def _job_parse_quality(job: JobRecord) -> dict[str, object]:
+    checks: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+        ("Job title", _format_detail_text(job.title), ("job_title", "title")),
+        ("Company", _format_detail_text(job.company), ("company_name", "company")),
+        ("Location", _job_location(job), ("location", "job_location", "workplace", "job_country_code", "remote")),
+        ("Compensation", _job_compensation_label(job), ("compensation", "salary", "min_annual_salary_usd", "max_annual_salary_usd")),
+        ("Employment type", _job_text_value(job, ("employment_statuses", "employment_type", "employment_status")), ("employment_statuses", "employment_type", "employment_status")),
+        ("Seniority level", _job_text_value(job, ("job_seniority", "seniority", "seniority_level")), ("job_seniority", "seniority", "seniority_level")),
+        ("Core responsibilities", _job_responsibilities(job), ("responsibilities", "job_responsibilities", "core_responsibilities")),
+        ("Required qualifications", _job_requirements(job), ("requirements", "job_requirements", "required_qualifications", "minimum_qualifications", "qualifications", "candidate_requirements")),
+        ("Preferred qualifications", _job_preferred_qualifications(job), ("preferred_qualifications", "nice_to_have", "preferred_skills", "bonus_points")),
+        ("Technologies and keywords", _job_technologies(job), ("technologies", "technology_stack", "tech_stack", "tools", "skills", "keywords", "tools_mentioned", "job_categories")),
+        ("Source URL", _job_listing_url(job), ("source_url", "url", "link")),
+        ("Scraped timestamp", job.discovered_at or job.date_posted or "", ("discovered_at", "date_posted", "posted_at")),
+    )
+    missing = [
+        {"field": label, "reason": _missing_field_reason(job, keys)}
+        for label, value, keys in checks
+        if not _format_detail_text(value)
+    ]
+    present = len(checks) - len(missing)
+    computed_confidence = round(present / len(checks), 2)
+    confidence = _job_parser_confidence(job, fallback=computed_confidence)
+    return {
+        "status": _parse_status(job),
+        "storage_state": _job_storage_state(job),
+        "present_fields": present,
+        "total_fields": len(checks),
+        "confidence": confidence,
+        "missing_fields": missing,
+    }
+
+
+def _job_parser_confidence(job: JobRecord, *, fallback: float) -> float:
+    value = _job_raw_value(job, ("parser_confidence", "parse_confidence", "confidence"))
+    if value in (None, "", [], {}):
+        confidence = fallback
+    else:
+        try:
+            raw_confidence = float(value)
+        except (TypeError, ValueError):
+            confidence = fallback
+        else:
+            confidence = raw_confidence / 100.0 if raw_confidence > 1 else raw_confidence
+    return round(min(max(confidence, 0.0), 1.0), 2)
+
+
+def _parse_quality_panel(job: JobRecord) -> str:
+    quality = _job_parse_quality(job)
+    missing = quality["missing_fields"]
+    missing_items = ""
+    if isinstance(missing, list) and missing:
+        missing_items = "".join(
+            f"<li><strong>{html.escape(str(item['field']))}:</strong> {html.escape(str(item['reason']))}</li>"
+            for item in missing[:8]
+            if isinstance(item, dict)
+        )
+    else:
+        missing_items = "<li>All required detail fields are populated.</li>"
+    percent = int(round(float(quality["confidence"]) * 100))
+    return f"""<section class="parse-quality" aria-label="Parse and storage quality">
+    <span class="badge">Storage: {html.escape(str(quality["storage_state"]))}</span>
+    <span class="badge">Parse status: {html.escape(str(quality["status"]))}</span>
+    <span class="badge">Parser confidence: {percent}%</span>
+    <span class="badge">Fields parsed: {quality["present_fields"]}/{quality["total_fields"]}</span>
+    <details>
+      <summary>Missing-field diagnostics</summary>
+      <ul>{missing_items}</ul>
+    </details>
+  </section>"""
+
+
 def _job_detail_body(job: JobRecord, *, scored: object | None, actions: str) -> str:
     description = _job_description(job)
-    requirements = _job_requirements(job)
+    title = _format_detail_text(job.title) or f"Stored job {job.theirstack_id}"
     listing_url = _job_listing_url(job)
     application_url = _job_application_url(job)
     application_link = ""
     if application_url and application_url != listing_url:
         application_link = f'<p><strong>Application link:</strong> {_job_link(application_url)}</p>'
-    salary = _job_salary_label(job)
-    salary_row = f"<p><strong>Salary:</strong> {html.escape(salary)}</p>" if salary else ""
     return f"""<span class="eyebrow">Selected role</span>
-  <h2 class="detail-title">{html.escape(job.title or "Untitled role")}</h2>
+  <h2 class="detail-title">{html.escape(title)}</h2>
+  {_parse_quality_panel(job)}
   <div class="detail-meta">
-    <p><strong>Company:</strong> {html.escape(job.company or "Unknown company")}</p>
-    <p><strong>Company domain:</strong> {html.escape(_job_company_domain(job))}</p>
-    <p><strong>Location:</strong> {html.escape(_job_location(job))}</p>
-    <p><strong>Work model:</strong> {html.escape(_job_work_model(job, scored))}</p>
-    <p><strong>Country:</strong> {html.escape(job.country_code or "Unknown country")}</p>
-    <p><strong>Posted:</strong> {html.escape(job.date_posted or job.discovered_at or "Unknown date")}</p>
-    <p><strong>Seniority:</strong> {html.escape(_job_text_value(job, ("job_seniority", "seniority")) or "Unknown seniority")}</p>
-    <p><strong>Status:</strong> {html.escape(_job_text_value(job, ("employment_statuses", "employment_type")) or "Unknown status")}</p>
-    {salary_row}
+    {_detail_fact(job, "Company", ("company_name", "company"), normalized=job.company)}
+    {_detail_fact(job, "Company domain", ("company_domain", "domain"), value=_job_company_domain(job))}
+    {_detail_fact(job, "Location", ("location", "job_location", "workplace", "job_country_code", "remote"), value=_job_location(job))}
+    {_detail_fact(job, "Work model", ("employment_statuses", "workplace", "work_model", "remote"), value=_job_work_model(job, scored))}
+    {_detail_fact(job, "Country", ("job_country_code", "country_code"), normalized=job.country_code)}
+    {_detail_fact(job, "Scraped timestamp", ("discovered_at", "date_posted", "posted_at"), value=job.discovered_at or job.date_posted or "")}
+    {_detail_fact(job, "Seniority level", ("job_seniority", "seniority", "seniority_level"))}
+    {_detail_fact(job, "Employment type", ("employment_statuses", "employment_type", "employment_status"))}
+    {_detail_fact(job, "Compensation", ("compensation", "salary", "min_annual_salary_usd", "max_annual_salary_usd"), value=_job_compensation_label(job))}
     {_score_metadata(scored)}
     <p><strong>Source:</strong> {html.escape(_job_source_label(job))}</p>
     <p><strong>Original listing:</strong> {_job_link(listing_url)}</p>
     {application_link}
   </div>
-  <h3>Description</h3>
-  <div class="description">{html.escape(description or "No description available.")}</div>
-  <h3>Requirements</h3>
-  <div class="description requirements">{html.escape(requirements or "No requirements extracted from this listing.")}</div>
-  {actions}"""
+  {actions}
+  {_detail_block(job, "Description", ("job_description", "description", "job_text", "summary", "overview"), value=description)}
+  {_detail_block(job, "Core responsibilities", ("responsibilities", "job_responsibilities", "core_responsibilities"), value=_job_responsibilities(job))}
+  {_detail_block(job, "Required qualifications / Requirements", ("requirements", "job_requirements", "required_qualifications", "minimum_qualifications", "qualifications", "candidate_requirements"), value=_job_requirements(job))}
+  {_detail_block(job, "Preferred qualifications", ("preferred_qualifications", "nice_to_have", "preferred_skills", "bonus_points"), value=_job_preferred_qualifications(job))}
+  {_detail_block(job, "Technologies, tools, domains, and keywords", ("technologies", "technology_stack", "tech_stack", "tools", "skills", "keywords", "tools_mentioned", "job_categories"), value=_job_technologies(job))}
+  {_source_signal_block(job)}"""
 
 
 def _score_metadata(scored: object | None) -> str:
@@ -666,6 +924,12 @@ def _job_description(job: JobRecord) -> str:
     return _format_detail_text(_job_raw_value(job, ("job_description", "description", "job_text", "summary", "overview")))
 
 
+def _job_responsibilities(job: JobRecord) -> str:
+    return _format_detail_text(
+        _job_raw_value(job, ("responsibilities", "job_responsibilities", "core_responsibilities", "role_responsibilities"))
+    )
+
+
 def _job_requirements(job: JobRecord) -> str:
     return _format_detail_text(
         _job_raw_value(
@@ -683,6 +947,44 @@ def _job_requirements(job: JobRecord) -> str:
     )
 
 
+def _job_preferred_qualifications(job: JobRecord) -> str:
+    return _format_detail_text(
+        _job_raw_value(job, ("preferred_qualifications", "nice_to_have", "preferred_skills", "bonus_points"))
+    )
+
+
+def _job_technologies(job: JobRecord) -> str:
+    return _format_detail_text(
+        _job_raw_value(job, ("technologies", "technology_stack", "tech_stack", "tools", "skills", "keywords", "tools_mentioned", "job_categories"))
+    )
+
+
+def _source_signal_block(job: JobRecord) -> str:
+    signals = _source_signals(job)
+    if not signals:
+        return ""
+    return f"""<h3>Source-provided role signals</h3>
+  <div class="description">{html.escape(_format_detail_text(signals))}</div>"""
+
+
+def _source_signals(job: JobRecord) -> dict[str, object]:
+    signals: dict[str, object] = {}
+    for label, keys in (
+        ("Title group", ("title_group",)),
+        ("Job categories", ("job_categories",)),
+        ("Seniority level", ("seniority_level", "job_seniority", "seniority")),
+        ("Employment type", ("employment_type", "employment_statuses")),
+        ("Tools mentioned", ("tools_mentioned", "tools", "technologies")),
+        ("Cloud providers mentioned", ("cloud_providers_mentioned",)),
+        ("Pain points detected", ("pain_points_detected",)),
+        ("Job language", ("job_language",)),
+    ):
+        value = _job_raw_value(job, keys)
+        if value not in (None, "", [], {}):
+            signals[label] = value
+    return signals
+
+
 def _job_location(job: JobRecord) -> str:
     raw_location = _job_raw_value(job, ("location", "job_location", "workplace"))
     if isinstance(raw_location, dict):
@@ -695,9 +997,11 @@ def _job_location(job: JobRecord) -> str:
         parts = [str(raw_location).strip()] if raw_location not in (None, "") else []
     if job.country_code and job.country_code not in parts:
         parts.append(job.country_code)
-    if job.remote is not None:
-        parts.append("Remote" if job.remote else "On-site / hybrid not specified")
-    return ", ".join(part for part in parts if part) or "Location not listed"
+    if job.remote == 1 and "Remote" not in parts:
+        parts.append("Remote")
+    elif job.remote == 0 and not any(part.casefold() in {"on-site", "onsite", "hybrid"} for part in parts):
+        parts.append("On-site")
+    return ", ".join(part for part in parts if part)
 
 
 def _job_source(job: JobRecord) -> str:
@@ -717,7 +1021,7 @@ def _job_application_url(job: JobRecord) -> str:
     return _clean_url(job.final_url or _job_raw_value(job, ("final_url", "link_final_url", "application_url")))
 
 def _job_company_domain(job: JobRecord) -> str:
-    return job.company_domain or _job_text_value(job, ("company_domain", "domain")) or "Unknown domain"
+    return job.company_domain or _job_text_value(job, ("company_domain", "domain"))
 
 
 def _job_text_value(job: JobRecord, keys: tuple[str, ...]) -> str:
@@ -733,7 +1037,7 @@ def _job_source_label(job: JobRecord) -> str:
         if host:
             return host
     domain = _job_company_domain(job)
-    if domain != "Unknown domain":
+    if domain:
         return domain
     return _job_source(job)
 
@@ -753,7 +1057,7 @@ def _job_work_model(job: JobRecord, scored: object | None = None) -> str:
         return "Remote"
     if job.remote == 0:
         return "On-site"
-    return "Unknown work model"
+    return ""
 
 
 def _job_salary_label(job: JobRecord) -> str:
@@ -768,6 +1072,20 @@ def _job_salary_label(job: JobRecord) -> str:
     return ""
 
 
+def _job_compensation_label(job: JobRecord) -> str:
+    raw_compensation = _job_raw_value(job, ("compensation", "salary", "salary_range", "pay"))
+    if raw_compensation not in (None, "", [], {}):
+        text = _format_detail_text(raw_compensation).replace("\n", ", ")
+        confidence = _job_raw_value(job, ("compensation_confidence", "salary_confidence"))
+        if confidence not in (None, "", [], {}):
+            text = f"{text} (confidence: {confidence})"
+        return text
+    salary = _job_salary_label(job)
+    if salary:
+        return f"{salary} USD/year"
+    return ""
+
+
 def _salary_thousands(value: object) -> int:
     if value is None or isinstance(value, bool):
         return 0
@@ -778,16 +1096,18 @@ def _salary_thousands(value: object) -> int:
 
 
 def _job_metadata_badges(job: JobRecord, scored: object | None = None) -> str:
-    badge_values: list[tuple[str, str]] = [("Work", _job_work_model(job, scored))]
+    badge_values: list[tuple[str, str]] = []
+    work = _job_work_model(job, scored)
+    badge_values.append(("Work", work or _missing_field_reason(job, ("employment_statuses", "workplace", "work_model", "remote"))))
     region = str(getattr(scored, "region", "") or "").strip() if scored is not None else ""
     if region and region != "Unknown":
         badge_values.append(("Region", region))
-    badge_values.append(("Country", job.country_code or "Unknown country"))
-    badge_values.append(("Posted", job.date_posted or job.discovered_at or "Unknown date"))
-    seniority = _job_text_value(job, ("job_seniority", "seniority"))
+    badge_values.append(("Country", job.country_code or _missing_field_reason(job, ("job_country_code", "country_code"))))
+    badge_values.append(("Posted", job.date_posted or job.discovered_at or _missing_field_reason(job, ("date_posted", "discovered_at", "posted_at"))))
+    seniority = _job_text_value(job, ("job_seniority", "seniority", "seniority_level"))
     if seniority:
         badge_values.append(("Seniority", seniority))
-    status = _job_text_value(job, ("employment_statuses", "employment_type"))
+    status = _job_text_value(job, ("employment_statuses", "employment_type", "employment_status"))
     if status:
         badge_values.append(("Status", status))
     salary = _job_salary_label(job)
@@ -820,9 +1140,13 @@ def _job_raw_sources(job: JobRecord) -> list[dict[str, object]]:
     sources: list[dict[str, object]] = [job.raw]
     public_json = job.raw.get("public_json")
     if isinstance(public_json, dict):
+        sources.append(public_json)
         nested_raw = public_json.get("raw")
         if isinstance(nested_raw, dict):
             sources.append(nested_raw)
+            extra_fields = nested_raw.get("extra_public_fields")
+            if isinstance(extra_fields, dict):
+                sources.append(extra_fields)
     return sources
 
 
@@ -841,6 +1165,10 @@ def _format_detail_text(value: object) -> str:
                 lines.append(f"{str(key).replace('_', ' ').title()}: {text}")
         return "\n".join(lines)
     return str(value).strip()
+
+
+def _normalize_space(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def _clean_url(value: object) -> str:
@@ -906,5 +1234,4 @@ def _ranked_values(values: object) -> list[str]:
 
 
 def _resume_fact_summary(*, filename: str, kind: str, text: str) -> str:
-    preview = text[:700].strip()
-    return f"**Source:** {filename}\n\n**Kind:** {kind}\n\n**Resume preview:** {preview}"
+    return facts_markdown_for_text(filename=filename, kind=kind, text=text)

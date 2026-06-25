@@ -46,6 +46,10 @@ Python, SQL, FastAPI
     assert "Skills" in analysis.text
     assert "Python" in analysis.text
     assert "Detected sections" in analysis.facts_markdown
+    assert "Current and prior role signals" in analysis.facts_markdown
+    assert "Skills, technologies, and domains" in analysis.facts_markdown
+    assert "Projects, accomplishments, and impact evidence" in analysis.facts_markdown
+    assert "Gaps, weak evidence, or ambiguous claims" in analysis.facts_markdown
 
 
 def test_analyze_pdf_resume_uses_pypdf(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -131,6 +135,14 @@ def test_webui_scores_resume_against_market_and_downloads_prompt(tmp_path: Path,
     assert 'name="target_roles"' in response.text
     assert 'name="target_industries"' in response.text
     assert 'id="resume-file"' in response.text
+    assert "Import a resume first" in response.text
+    assert "Optional filters and scoring boosts" in response.text
+    assert "Parse state" in response.text
+    assert "Structured records" in response.text
+    assert ".results-shell > *" in response.text
+    assert "table-layout: fixed" in response.text
+    assert "overflow-wrap: anywhere" in response.text
+    assert 'class="table-actions"' in response.text
     assert "Clinical Data Engineer" in response.text
     assert 'href="/jobs/job-1/prompt"' in response.text
     assert 'href="/jobs/job-1"' in response.text
@@ -167,6 +179,8 @@ Python, SQL, FastAPI
     assert "Resume strengths" in response.text
     assert "Download Markdown review report" in response.text
     assert "Copy Markdown report" in response.text
+    assert "Open source" in response.text
+    assert "Saved in structured storage" in response.text
     assert "/jobs/job-1/improvement-report" in response.text
     assert "Category fit" in response.text
     assert "Key strengths" in response.text
@@ -277,6 +291,130 @@ def test_job_detail_without_urls_shows_no_url_placeholder(tmp_path: Path, monkey
     assert '<span class="muted">No URL found</span>' in response.text
     assert "Application link:" not in response.text
     assert 'href="None"' not in response.text
+
+def test_job_detail_categorizes_missing_fields_without_default_facts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    settings = AppSettings(_env_file=None)
+    storage = JobStorage(settings.job_scraper_db_path)
+    storage.upsert_job(
+        {
+            "id": "sparse-job",
+            "job_title": "Sparse Role",
+            "source_url": "https://example.test/jobs/sparse",
+            "parse_status": "parsed",
+        }
+    )
+    app = create_app(settings)
+    client = TestClient(app)
+
+    response = client.get("/jobs/sparse-job")
+    payload = client.get("/api/jobs/sparse-job")
+
+    assert response.status_code == 200
+    assert "Sparse Role" in response.text
+    assert "Not present in source" in response.text
+    assert "Unknown company" not in response.text
+    assert "Unknown country" not in response.text
+    assert "Unknown date" not in response.text
+    assert "Untitled role" not in response.text
+    assert "Missing-field diagnostics" in response.text
+    assert payload.status_code == 200
+    data = payload.json()
+    assert data["storage_state"] == "Stored structured record"
+    assert data["fields"]["company"]["status"] == "absent_in_source"
+    assert data["fields"]["source_url"]["value"] == "https://example.test/jobs/sparse"
+
+
+def test_job_api_lists_parse_state_and_clamps_confidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    settings = AppSettings(_env_file=None)
+    storage = JobStorage(settings.job_scraper_db_path)
+    storage.upsert_job(_job("pending-job", raw_extra={"parse_status": "pending", "parser_confidence": 250}))
+    storage.upsert_job(_job("failed-job", raw_extra={"parse_status": "failed", "parser_confidence": -10}))
+    app = create_app(settings)
+    client = TestClient(app)
+
+    response = client.get("/")
+    payload = client.get("/api/jobs").json()
+    jobs = {job["id"]: job for job in payload["jobs"]}
+
+    assert response.status_code == 200
+    assert "Stored; parse pending" in response.text
+    assert "Stored; parser needs review" in response.text
+    assert jobs["pending-job"]["storage_state"] == "Stored; parse pending"
+    assert jobs["pending-job"]["parse_quality"]["status"] == "pending"
+    assert jobs["pending-job"]["parse_quality"]["confidence"] == 1.0
+    assert jobs["failed-job"]["storage_state"] == "Stored; parser needs review"
+    assert jobs["failed-job"]["parse_quality"]["status"] == "failed"
+    assert jobs["failed-job"]["parse_quality"]["confidence"] == 0.0
+
+def test_job_detail_explains_unparsed_subfields_when_description_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    settings = AppSettings(_env_file=None)
+    storage = JobStorage(settings.job_scraper_db_path)
+    storage.upsert_job(
+        {
+            "id": "description-only",
+            "job_title": "Description Only Role",
+            "company_name": "Acme",
+            "description": "Build reliable services. Must know Python and SQL.",
+            "source_url": "https://example.test/jobs/description-only",
+        }
+    )
+    app = create_app(settings)
+    client = TestClient(app)
+
+    response = client.get("/jobs/description-only")
+    payload = client.get("/api/jobs/description-only").json()
+
+    assert response.status_code == 200
+    assert "Build reliable services. Must know Python and SQL." in response.text
+    assert "Not separately parsed from listing description" in response.text
+    assert payload["fields"]["required_qualifications"]["status"] == "not_separately_parsed"
+
+
+
+def test_job_detail_surfaces_public_json_role_signals(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    settings = AppSettings(_env_file=None)
+    storage = JobStorage(settings.job_scraper_db_path)
+    storage.upsert_job(
+        _job(
+            "public-json-job",
+            raw_extra={
+                "public_json": {
+                    "title_group": "platform engineer",
+                    "ats": "greenhouse",
+                    "raw": {
+                        "title_group": "backend engineer",
+                        "job_categories": ["backend"],
+                        "seniority_level": "senior",
+                        "employment_type": "full_time",
+                        "tools_mentioned": ["aws", "kubernetes"],
+                        "extra_public_fields": {
+                            "cloud_providers_mentioned": ["aws"],
+                            "pain_points_detected": ["reliability"],
+                        },
+                    }
+                }
+            },
+        )
+    )
+    app = create_app(settings)
+    client = TestClient(app)
+
+    response = client.get("/jobs/public-json-job")
+    payload = client.get("/api/jobs/public-json-job").json()
+
+    assert response.status_code == 200
+    assert "Technologies, tools, domains, and keywords" in response.text
+    assert "aws" in response.text
+    assert "kubernetes" in response.text
+    assert "Source-provided role signals" in response.text
+    assert "platform engineer" in response.text
+    assert payload["fields"]["technologies"]["status"] == "parsed"
+    assert "aws" in payload["fields"]["technologies"]["value"]
+
 
 
 

@@ -8,6 +8,8 @@ Apply that direction specifically to the job scraper frontend, including the loc
 
 - `scraper/src/job_scraper/web.py`
 
+
+
 ## Default Coordinator Model
 
 Every new feature worktree should have exactly one advisor-enabled parent agent.
@@ -32,6 +34,35 @@ omp --advisor --model "openai-codex/gpt-5.5" --thinking xhigh
 The advisor is a guardrail for the parent. It helps keep plans, assignments, and final merges in scope.
 
 Do not assume the advisor controls child terminals. The parent must inspect worker output and enforce boundaries.
+
+
+
+## Planning Workflow
+
+For every new feature, bug fix, refactor, or research task, begin with `/plan` unless the request is a clearly trivial one-file change.
+
+The parent/coordinator agent owns planning.
+
+The planning phase should:
+
+1. Understand the user's goal.
+2. Identify affected files, modules, and repositories.
+3. Determine whether worker agents are beneficial.
+4. Define file ownership before any implementation begins.
+5. Identify risks, dependencies, and verification steps.
+6. Decide whether the work should be completed by:
+  - the coordinator alone, or
+  - one or more worker agents.
+
+After `/plan` completes:
+
+- If the work is small, the coordinator may implement it directly.
+- If the work naturally decomposes into independent slices, spawn worker agents only after ownership has been established.
+- Do not spawn workers before completing the planning phase.
+
+Do not repeatedly re-plan unless the task scope changes substantially.
+
+The planning phase is expected for nearly all non-trivial work and should be treated as the default starting point.
 
 ## Worker Allocation
 

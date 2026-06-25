@@ -1,3 +1,5 @@
+# Job scraper UI and job detail experience design
+
 Design a dark, premium "Market Signal Console" interface inspired by Bloomberg Terminal, military command dashboards, and the Gruvbox color palette.
 
 Visual style:

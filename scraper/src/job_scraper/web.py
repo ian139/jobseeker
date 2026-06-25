@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import html
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
@@ -302,12 +302,16 @@ def _detail_selection_script() -> str:
   }
 
   for (const link of links) {
-    link.addEventListener("click", () => {
+    link.addEventListener("click", (event) => {
       const id = link.getAttribute("data-detail-target");
-      if (id) window.setTimeout(() => selectCard(id), 0);
+      if (!id || !cardsById.has(id)) return;
+      event.preventDefault();
+      selectCard(id);
+      if (window.location.hash !== `#${id}`) history.pushState(null, "", `#${id}`);
     });
   }
   window.addEventListener("hashchange", selectFromHash);
+  window.addEventListener("popstate", selectFromHash);
   selectFromHash();
 })();
 </script>"""
@@ -345,7 +349,7 @@ document.addEventListener('click', async (event) => {
 def _intake_page(jobs: list[JobRecord]) -> str:
     job_count = len(jobs)
     latest = html.escape(jobs[0].discovered_at or jobs[0].date_posted or "n/a") if jobs else "n/a"
-    recent_rows = "\n".join(_compact_job_row(job) for job in jobs[:8]) or '<tr><td colspan="5">No scraped jobs found. Run job-scraper run-once first.</td></tr>'
+    recent_rows = "\n".join(_compact_job_row(job) for job in jobs[:8]) or '<tr><td colspan="8">No scraped jobs found. Run job-scraper run-once first.</td></tr>'
     return f"""<section id="input-strip" class="grid intake-grid">
   <form id="resume-upload" method="post" enctype="multipart/form-data" action="/matches" aria-labelledby="strategy-title">
     <span class="eyebrow">Start with roles, filters, or resume</span>
@@ -374,7 +378,7 @@ def _intake_page(jobs: list[JobRecord]) -> str:
     </div>
     <h3>Recent scraped roles</h3>
     <table>
-      <thead><tr><th>Role</th><th>Company</th><th>Country</th><th>Date</th><th>Actions</th></tr></thead>
+      <thead><tr><th>Role</th><th>Company</th><th>Domain</th><th>Work model</th><th>Country</th><th>Posted</th><th>Source</th><th>Actions</th></tr></thead>
       <tbody>{recent_rows}</tbody>
     </table>
   </section>
@@ -434,9 +438,12 @@ def _compact_job_row(job: JobRecord) -> str:
     job_path_id = quote(job.theirstack_id, safe="")
     return f"""<tr>
   <td><a href="/jobs/{job_path_id}">{html.escape(job.title or "Untitled role")}</a></td>
-  <td>{html.escape(job.company or "Unknown")}</td>
-  <td>{html.escape(job.country_code or "")}</td>
-  <td>{html.escape(job.date_posted or "")}</td>
+  <td>{html.escape(job.company or "Unknown company")}</td>
+  <td>{html.escape(_job_company_domain(job))}</td>
+  <td>{html.escape(_job_work_model(job))}</td>
+  <td>{html.escape(job.country_code or "Unknown country")}</td>
+  <td>{html.escape(job.date_posted or job.discovered_at or "Unknown date")}</td>
+  <td>{html.escape(_job_source_label(job))}</td>
   <td class="detail-actions"><a class="button ghost-button" href="/jobs/{job_path_id}">Details</a><a class="button ghost-button" href="/jobs/{job_path_id}/prompt">Tailor prompt</a></td>
 </tr>"""
 
@@ -462,7 +469,7 @@ def _category_table(category_name: str, jobs: list[object]) -> str:
     return f"""<section class="category-block">
   <h3>{html.escape(category_name)}</h3>
   <table class="data-table">
-    <thead><tr><th>Score</th><th>Role</th><th>Company</th><th>Region</th><th>Matched</th><th>Missing</th><th>Details</th></tr></thead>
+    <thead><tr><th>Score</th><th>Role</th><th>Company</th><th>Metadata</th><th>Matched</th><th>Missing</th><th>Details</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
 </section>"""
@@ -479,7 +486,7 @@ def _result_row(scored: object) -> str:
   <td class="score">{int(round(float(getattr(scored, "score", 0.0))))}</td>
   <td><a href="#{detail_id}" data-detail-target="{detail_id}" aria-controls="{detail_id}">{html.escape(job.title or "Untitled role")}</a></td>
   <td>{html.escape(job.company or "Unknown")}</td>
-  <td>{html.escape(str(getattr(scored, "region", "") or getattr(scored, "remote_label", "")))}</td>
+  <td>{_job_metadata_badges(job, scored)}</td>
   <td>{matched or '<span class="muted">None</span>'}</td>
   <td>{missing or '<span class="muted">None</span>'}</td>
   <td><a class="button ghost-button" href="#{detail_id}" data-detail-target="{detail_id}" aria-controls="{detail_id}">Open</a></td>
@@ -605,13 +612,22 @@ def _job_detail_body(job: JobRecord, *, scored: object | None, actions: str) -> 
     application_link = ""
     if application_url and application_url != listing_url:
         application_link = f'<p><strong>Application link:</strong> {_job_link(application_url)}</p>'
+    salary = _job_salary_label(job)
+    salary_row = f"<p><strong>Salary:</strong> {html.escape(salary)}</p>" if salary else ""
     return f"""<span class="eyebrow">Selected role</span>
   <h2 class="detail-title">{html.escape(job.title or "Untitled role")}</h2>
   <div class="detail-meta">
     <p><strong>Company:</strong> {html.escape(job.company or "Unknown company")}</p>
+    <p><strong>Company domain:</strong> {html.escape(_job_company_domain(job))}</p>
     <p><strong>Location:</strong> {html.escape(_job_location(job))}</p>
+    <p><strong>Work model:</strong> {html.escape(_job_work_model(job, scored))}</p>
+    <p><strong>Country:</strong> {html.escape(job.country_code or "Unknown country")}</p>
+    <p><strong>Posted:</strong> {html.escape(job.date_posted or job.discovered_at or "Unknown date")}</p>
+    <p><strong>Seniority:</strong> {html.escape(_job_text_value(job, ("job_seniority", "seniority")) or "Unknown seniority")}</p>
+    <p><strong>Status:</strong> {html.escape(_job_text_value(job, ("employment_statuses", "employment_type")) or "Unknown status")}</p>
+    {salary_row}
     {_score_metadata(scored)}
-    <p><strong>Source:</strong> {html.escape(_job_source(job))}</p>
+    <p><strong>Source:</strong> {html.escape(_job_source_label(job))}</p>
     <p><strong>Original listing:</strong> {_job_link(listing_url)}</p>
     {application_link}
   </div>
@@ -699,6 +715,89 @@ def _job_listing_url(job: JobRecord) -> str:
 
 def _job_application_url(job: JobRecord) -> str:
     return _clean_url(job.final_url or _job_raw_value(job, ("final_url", "link_final_url", "application_url")))
+
+def _job_company_domain(job: JobRecord) -> str:
+    return job.company_domain or _job_text_value(job, ("company_domain", "domain")) or "Unknown domain"
+
+
+def _job_text_value(job: JobRecord, keys: tuple[str, ...]) -> str:
+    value = _job_raw_value(job, keys)
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item).strip() for item in value if str(item).strip())
+    return _format_detail_text(value).replace("\n", ", ")
+
+
+def _job_source_label(job: JobRecord) -> str:
+    for url in (_job_listing_url(job), _job_application_url(job)):
+        host = urlparse(url).netloc.removeprefix("www.")
+        if host:
+            return host
+    domain = _job_company_domain(job)
+    if domain != "Unknown domain":
+        return domain
+    return _job_source(job)
+
+
+def _job_work_model(job: JobRecord, scored: object | None = None) -> str:
+    remote_label = str(getattr(scored, "remote_label", "") or "").strip() if scored is not None else ""
+    if remote_label and remote_label != "Unknown":
+        return remote_label
+    raw_model = _job_text_value(job, ("employment_statuses", "workplace", "work_model", "remote")).casefold()
+    if "remote" in raw_model:
+        return "Remote"
+    if "hybrid" in raw_model:
+        return "Hybrid"
+    if "on-site" in raw_model or "onsite" in raw_model:
+        return "On-site"
+    if job.remote == 1:
+        return "Remote"
+    if job.remote == 0:
+        return "On-site"
+    return "Unknown work model"
+
+
+def _job_salary_label(job: JobRecord) -> str:
+    min_salary = _salary_thousands(_job_raw_value(job, ("min_annual_salary_usd", "min_salary_usd", "salary_min_usd")))
+    max_salary = _salary_thousands(_job_raw_value(job, ("max_annual_salary_usd", "max_salary_usd", "salary_max_usd")))
+    if min_salary and max_salary:
+        return f"${min_salary}k-${max_salary}k"
+    if min_salary:
+        return f"${min_salary}k+"
+    if max_salary:
+        return f"Up to ${max_salary}k"
+    return ""
+
+
+def _salary_thousands(value: object) -> int:
+    if value is None or isinstance(value, bool):
+        return 0
+    try:
+        return int(round(float(value) / 1000))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _job_metadata_badges(job: JobRecord, scored: object | None = None) -> str:
+    badge_values: list[tuple[str, str]] = [("Work", _job_work_model(job, scored))]
+    region = str(getattr(scored, "region", "") or "").strip() if scored is not None else ""
+    if region and region != "Unknown":
+        badge_values.append(("Region", region))
+    badge_values.append(("Country", job.country_code or "Unknown country"))
+    badge_values.append(("Posted", job.date_posted or job.discovered_at or "Unknown date"))
+    seniority = _job_text_value(job, ("job_seniority", "seniority"))
+    if seniority:
+        badge_values.append(("Seniority", seniority))
+    status = _job_text_value(job, ("employment_statuses", "employment_type"))
+    if status:
+        badge_values.append(("Status", status))
+    salary = _job_salary_label(job)
+    if salary:
+        badge_values.append(("Salary", salary))
+    badge_values.append(("Source", _job_source_label(job)))
+    return "".join(
+        f'<span class="badge">{html.escape(label)}: {html.escape(value)}</span>'
+        for label, value in badge_values
+    )
 
 
 def _job_link(url: str | None) -> str:

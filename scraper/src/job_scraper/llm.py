@@ -75,7 +75,7 @@ class ChatCompletionsResumeLLM:
         except httpx.HTTPError as exc:
             raise ResumeLLMError(str(exc)) from exc
 
-        data = response.json()
+        data = _response_json(response)
         content = _message_content(data)
         if content is None:
             raise ResumeLLMError("LLM response did not contain Markdown resume content")
@@ -111,12 +111,22 @@ class ChatCompletionsResumeLLM:
         except httpx.HTTPError as exc:
             raise ResumeLLMError(str(exc)) from exc
 
-        data = response.json()
+        data = _response_json(response)
         content = _message_content(data)
         if content is None or "# " not in content or "## " not in content:
             raise ResumeLLMError("LLM response did not contain Markdown resume review report")
         return content
 
+
+
+def _response_json(response: httpx.Response) -> Mapping[str, Any]:
+    try:
+        data = response.json()
+    except json.JSONDecodeError as exc:
+        raise ResumeLLMError("LLM response was not valid JSON") from exc
+    if not isinstance(data, Mapping):
+        raise ResumeLLMError("LLM response JSON was not an object")
+    return data
 
 
 def _message_content(data: Mapping[str, Any]) -> str | None:

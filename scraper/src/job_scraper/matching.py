@@ -474,7 +474,7 @@ def _keyword_evidence_rows(keywords: Sequence[str], resume_text: str) -> list[st
         if not normalized:
             continue
         keyword_tokens = _tokenize(normalized)
-        if _contains_phrase(resume_norm, normalized):
+        if _text_has_term(resume_norm, normalized):
             status = "supported"
             action = "keep visible and use naturally"
         elif keyword_tokens and resume_tokens & keyword_tokens:

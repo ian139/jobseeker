@@ -462,6 +462,20 @@ def test_improvement_report_is_finished_markdown_not_a_prompt() -> None:
     assert "LaTeX" in report
 
 
+def test_improvement_report_does_not_treat_substring_keyword_as_supported() -> None:
+    analysis = _analysis(text="Ada Candidate\nExperience\nBuilt NoSQL data stores for analytics teams.")
+    job = _job_record(
+        theirstack_id="substring-report",
+        title="Analytics Engineer",
+        raw={"job_description": "Build analytics workflows. Must know SQL."},
+    )
+    scored = score_jobs([job], analysis, target_roles=[], target_industries=[], keywords=["SQL"])
+
+    report = build_improvement_report(scored[0], analysis, target_roles=[], target_industries=[])
+
+    assert "- **sql** — `not supported by resume text`" in report
+    assert "- **sql** — `supported`" not in report
+
 def test_improvement_prompt_latex_guidance() -> None:
     """LaTeX uploads get LaTeX-specific guidance."""
     analysis = _analysis(filename="resume.tex", kind="latex")

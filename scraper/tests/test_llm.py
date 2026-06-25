@@ -80,6 +80,37 @@ def test_llm_error_message_is_provider_neutral(monkeypatch) -> None:
     else:
         raise AssertionError("Expected ResumeLLMError")
 
+def test_llm_rewrite_wraps_invalid_json_response(monkeypatch) -> None:
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        request = httpx.Request("POST", url)
+        return httpx.Response(200, content=b"not json", request=request)
+
+    monkeypatch.setattr("job_scraper.llm.httpx.post", fake_post)
+    llm = ChatCompletionsResumeLLM("key", "model", base_url="https://llm.example/v1")
+
+    try:
+        llm.rewrite(draft_markdown="# Ada", job={}, selected_bullets=[])
+    except ResumeLLMError as exc:
+        assert str(exc) == "LLM response was not valid JSON"
+    else:
+        raise AssertionError("Expected ResumeLLMError")
+
+
+def test_llm_review_wraps_invalid_json_response(monkeypatch) -> None:
+    def fake_post(url: str, **kwargs: object) -> httpx.Response:
+        request = httpx.Request("POST", url)
+        return httpx.Response(200, content=b"not json", request=request)
+
+    monkeypatch.setattr("job_scraper.llm.httpx.post", fake_post)
+    llm = ChatCompletionsResumeLLM("key", "model", base_url="https://llm.example/v1")
+
+    try:
+        llm.review(prompt_markdown="# Resume Review Report Generator")
+    except ResumeLLMError as exc:
+        assert str(exc) == "LLM response was not valid JSON"
+    else:
+        raise AssertionError("Expected ResumeLLMError")
+
 
 def test_settings_use_general_llm_env_names(monkeypatch) -> None:
     monkeypatch.setenv("LLM_API_KEY", "llm-key")

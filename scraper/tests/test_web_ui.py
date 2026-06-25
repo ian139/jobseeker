@@ -98,7 +98,19 @@ def test_webui_scores_resume_against_market_and_downloads_prompt(tmp_path: Path,
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     settings = AppSettings(_env_file=None)
     storage = JobStorage(settings.job_scraper_db_path)
-    storage.upsert_job(_job("job-1", job_title="Clinical Data Engineer", company_name="Acme Health"))
+    storage.upsert_job(
+        _job(
+            "job-1",
+            job_title="Clinical Data Engineer",
+            company_name="Acme Health",
+            raw_extra={
+                "job_seniority": "Senior",
+                "employment_statuses": ["Full-time", "Remote"],
+                "min_annual_salary_usd": 100000,
+                "max_annual_salary_usd": 150000,
+            },
+        )
+    )
     storage.upsert_job(
         _job(
             "job-2",
@@ -122,6 +134,11 @@ def test_webui_scores_resume_against_market_and_downloads_prompt(tmp_path: Path,
     assert "Clinical Data Engineer" in response.text
     assert 'href="/jobs/job-1/prompt"' in response.text
     assert 'href="/jobs/job-1"' in response.text
+    assert "acme.example" in response.text
+    assert "Remote" in response.text
+    assert "US" in response.text
+    assert "2026-06-23" in response.text
+    assert "linkedin.com" in response.text
 
     latex = b"""
 Ada Candidate
@@ -160,11 +177,21 @@ Python, SQL, FastAPI
     assert "Original listing:" in response.text
     assert "Application link:" in response.text
     assert "https://acme.example/jobs/123" in response.text
+    assert "Work: Remote" in response.text
+    assert "Country: US" in response.text
+    assert "Posted: 2026-06-23" in response.text
+    assert "Seniority: Senior" in response.text
+    assert "Status: Full-time, Remote" in response.text
+    assert "Salary: $100k-$150k" in response.text
+    assert "Source: linkedin.com" in response.text
     assert "Build Python services for healthcare analytics." in response.text
     assert "Requirements" in response.text
     assert "Healthcare analytics" in response.text
     assert "const panel = document.getElementById(&quot;detail-panel&quot;);" not in response.text
     assert 'document.getElementById("detail-panel")' in response.text
+    assert "event.preventDefault();" in response.text
+    assert 'history.pushState(null, "", `#${id}`);' in response.text
+    assert 'window.addEventListener("popstate", selectFromHash);' in response.text
     assert response.text.count('name="resume_text"') == 1
     download = client.post(
         "/jobs/job-1/improvement-report",
@@ -235,6 +262,23 @@ def test_job_detail_route_shows_complete_listing_context(tmp_path: Path, monkeyp
     assert 'target="_blank" rel="noopener noreferrer"' in response.text
     assert 'href="/jobs/job-1/prompt"' in response.text
 
+def test_job_detail_without_urls_shows_no_url_placeholder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    settings = AppSettings(_env_file=None)
+    storage = JobStorage(settings.job_scraper_db_path)
+    storage.upsert_job(_job("job-no-url", job_title="No URL Role", final_url=None, url=None, source_url=None))
+    app = create_app(settings)
+    client = TestClient(app)
+
+    response = client.get("/jobs/job-no-url")
+
+    assert response.status_code == 200
+    assert "No URL Role" in response.text
+    assert '<span class="muted">No URL found</span>' in response.text
+    assert "Application link:" not in response.text
+    assert 'href="None"' not in response.text
+
+
 
 def test_webui_handles_matches_refresh_and_favicon(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
@@ -260,8 +304,12 @@ def _job(
     job_title: str = "Software Engineer",
     company_name: str = "Acme",
     job_description: str = "Build Python services for healthcare analytics.",
+    final_url: str | None = "https://acme.example/jobs/123",
+    url: str | None = "https://www.linkedin.com/jobs/view/123",
+    source_url: str | None = "https://www.linkedin.com/jobs/view/123",
+    raw_extra: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    return {
+    job = {
         "id": job_id,
         "job_title": job_title,
         "company_name": company_name,
@@ -270,9 +318,12 @@ def _job(
         "remote": True,
         "date_posted": date_posted,
         "discovered_at": discovered_at,
-        "url": "https://www.linkedin.com/jobs/view/123",
-        "source_url": "https://www.linkedin.com/jobs/view/123",
-        "final_url": "https://acme.example/jobs/123",
+        "url": url,
+        "source_url": source_url,
+        "final_url": final_url,
         "job_description": job_description,
         "requirements": ["Python", "Healthcare analytics", "Stakeholder collaboration"],
     }
+    if raw_extra:
+        job.update(raw_extra)
+    return job

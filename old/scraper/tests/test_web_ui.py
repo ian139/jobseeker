@@ -72,7 +72,7 @@ def test_analyze_pdf_resume_uses_pypdf(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_build_tailored_resume_prompt_requires_industry_and_includes_job_resume(tmp_path: Path) -> None:
     storage = JobStorage(tmp_path / "jobs.sqlite3")
-    storage.upsert_job(_job("job-1", job_title="Healthcare Data Engineer", company_name="Acme Health"))
+    storage.upsert_job(_job("job-1", job_title="Healthcare Data Engineering Intern", company_name="Acme Health"))
     job = storage.get_job("job-1")
     assert job is not None
     analysis = UploadedResumeAnalysis(
@@ -88,7 +88,7 @@ def test_build_tailored_resume_prompt_requires_industry_and_includes_job_resume(
     prompt = build_tailored_resume_prompt(job=job, industry="Healthcare", analysis=analysis)
 
     assert "Healthcare" in prompt
-    assert "Healthcare Data Engineer" in prompt
+    assert "Healthcare Data Engineering Intern" in prompt
     assert "Acme Health" in prompt
     assert "Python services" in prompt
     assert "Resume Review Report Generator" in prompt
@@ -105,7 +105,7 @@ def test_webui_scores_resume_against_market_and_downloads_prompt(tmp_path: Path,
     storage.upsert_job(
         _job(
             "job-1",
-            job_title="Clinical Data Engineer",
+            job_title="Clinical Data Engineering Intern",
             company_name="Acme Health",
             raw_extra={
                 "job_seniority": "Senior",
@@ -118,7 +118,7 @@ def test_webui_scores_resume_against_market_and_downloads_prompt(tmp_path: Path,
     storage.upsert_job(
         _job(
             "job-2",
-            job_title="Retail Operations Analyst",
+            job_title="Retail Operations Analyst Intern",
             company_name="ShopCo",
             discovered_at="2026-06-22T12:00:00+00:00",
             job_description="Manage store staffing, retail shifts, and vendor escalations.",
@@ -138,7 +138,7 @@ def test_webui_scores_resume_against_market_and_downloads_prompt(tmp_path: Path,
     assert "Import a resume first" in response.text
     assert "Optional filters and scoring boosts" in response.text
     assert "Parse state" in response.text
-    assert "Structured records" in response.text
+    assert "Recent structured" in response.text
     assert ".results-shell > *" in response.text
     assert "grid-template-columns: minmax(22rem, 0.75fr) minmax(0, 1.25fr)" in response.text
     assert ".table-panel, .detail-stack" in response.text
@@ -273,6 +273,50 @@ Python, SQL, FastAPI
     assert "Built Python services for healthcare analytics teams." in download.text
 
 
+def test_webui_scores_beyond_first_250_recent_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    settings = AppSettings(_env_file=None)
+    storage = JobStorage(settings.job_scraper_db_path)
+    for index in range(260):
+        storage.upsert_job(
+            _job(
+                f"distractor-{index}",
+                job_title=f"Retail Operations Intern {index}",
+                company_name="ShopCo",
+                discovered_at=f"2026-06-25T12:{index % 60:02d}:00+00:00",
+                job_description="Manage store staffing and vendor escalations.",
+            )
+        )
+    storage.upsert_job(
+        _job(
+            "deep-match",
+            job_title="Deep Match Data Engineering Intern",
+            company_name="DeepCo",
+            discovered_at="2026-01-01T00:00:00+00:00",
+            job_description="Build VectorForge data pipelines with Python and SQL.",
+        )
+    )
+    app = create_app(settings)
+    client = TestClient(app)
+    home = client.get("/")
+
+    assert home.status_code == 200
+    assert "Jobs stored" in home.text
+    assert "<strong>261</strong>" in home.text
+
+    response = client.post(
+        "/matches",
+        data={"target_roles": "Data Engineer", "target_industries": "", "keywords": "VectorForge"},
+        files={"resume_file": ("resume.txt", b"Built VectorForge data pipelines with Python and SQL.", "text/plain")},
+    )
+
+    assert response.status_code == 200
+    assert 'data-job-id="deep-match"' in response.text
+    assert "Deep Match Data Engineering Intern" in response.text
+    assert "Scored 261 stored jobs. Showing the top 250; rich detail panes are generated for the top 50" in response.text
+    assert response.text.count('class="detail-card detail-pane') == 50
+
+
 
 def test_evidence_tab_explains_missing_direct_resume_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
@@ -281,7 +325,7 @@ def test_evidence_tab_explains_missing_direct_resume_evidence(tmp_path: Path, mo
     storage.upsert_job(
         _job(
             "job-1",
-            job_title="Clinical Data Engineer",
+            job_title="Clinical Data Engineering Intern",
             company_name="Acme Health",
             job_description="Build Python services for healthcare analytics with FastAPI.",
         )
@@ -310,7 +354,7 @@ def test_job_detail_route_shows_complete_listing_context(tmp_path: Path, monkeyp
     monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
     settings = AppSettings(_env_file=None)
     storage = JobStorage(settings.job_scraper_db_path)
-    storage.upsert_job(_job("job-1", job_title="Clinical Data Engineer", company_name="Acme Health"))
+    storage.upsert_job(_job("job-1", job_title="Clinical Data Engineering Intern", company_name="Acme Health"))
     app = create_app(settings)
     client = TestClient(app)
 
@@ -326,7 +370,7 @@ def test_job_detail_route_shows_complete_listing_context(tmp_path: Path, monkeyp
     assert "https://www.linkedin.com/jobs/view/123" in response.text
     assert "Application link:" in response.text
     assert "https://acme.example/jobs/123" in response.text
-    assert "Build Python services for healthcare analytics." in response.text
+    assert "Build Python services for healthcare analytics." not in response.text
     assert "Requirements" in response.text
     assert "Healthcare analytics" in response.text
     assert 'target="_blank" rel="noopener noreferrer"' in response.text
@@ -336,14 +380,14 @@ def test_job_detail_without_urls_shows_no_url_placeholder(tmp_path: Path, monkey
     monkeypatch.setenv("JOB_SCRAPER_DB_PATH", str(tmp_path / "jobs.sqlite3"))
     settings = AppSettings(_env_file=None)
     storage = JobStorage(settings.job_scraper_db_path)
-    storage.upsert_job(_job("job-no-url", job_title="No URL Role", final_url=None, url=None, source_url=None))
+    storage.upsert_job(_job("job-no-url", job_title="No URL Intern", final_url=None, url=None, source_url=None))
     app = create_app(settings)
     client = TestClient(app)
 
     response = client.get("/jobs/job-no-url")
 
     assert response.status_code == 200
-    assert "No URL Role" in response.text
+    assert "No URL Intern" in response.text
     assert '<span class="muted">No URL found</span>' in response.text
     assert "Application link:" not in response.text
     assert 'href="None"' not in response.text
@@ -355,7 +399,7 @@ def test_job_detail_categorizes_missing_fields_without_default_facts(tmp_path: P
     storage.upsert_job(
         {
             "id": "sparse-job",
-            "job_title": "Sparse Role",
+            "job_title": "Sparse Intern",
             "source_url": "https://example.test/jobs/sparse",
             "parse_status": "parsed",
         }
@@ -367,7 +411,7 @@ def test_job_detail_categorizes_missing_fields_without_default_facts(tmp_path: P
     payload = client.get("/api/jobs/sparse-job")
 
     assert response.status_code == 200
-    assert "Sparse Role" in response.text
+    assert "Sparse Intern" in response.text
     assert "Not present in source" in response.text
     assert "Unknown company" not in response.text
     assert "Unknown country" not in response.text
@@ -411,7 +455,7 @@ def test_job_detail_explains_unparsed_subfields_when_description_exists(tmp_path
     storage.upsert_job(
         {
             "id": "description-only",
-            "job_title": "Description Only Role",
+            "job_title": "Description Only Intern",
             "company_name": "Acme",
             "description": "Build reliable services. Must know Python and SQL.",
             "source_url": "https://example.test/jobs/description-only",
@@ -424,9 +468,10 @@ def test_job_detail_explains_unparsed_subfields_when_description_exists(tmp_path
     payload = client.get("/api/jobs/description-only").json()
 
     assert response.status_code == 200
-    assert "Build reliable services. Must know Python and SQL." in response.text
+    assert "Build reliable services. Must know Python and SQL." not in response.text
     assert "Not separately parsed from listing description" in response.text
     assert payload["fields"]["required_qualifications"]["status"] == "not_separately_parsed"
+    assert "description" not in payload["raw"]
 
 
 
@@ -495,7 +540,7 @@ def _job(
     *,
     discovered_at: str | None = "2026-06-23T12:00:00+00:00",
     date_posted: str | None = "2026-06-23",
-    job_title: str = "Software Engineer",
+    job_title: str = "Software Engineering Intern",
     company_name: str = "Acme",
     job_description: str = "Build Python services for healthcare analytics.",
     final_url: str | None = "https://acme.example/jobs/123",

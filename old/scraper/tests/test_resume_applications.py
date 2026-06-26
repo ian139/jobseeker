@@ -65,7 +65,7 @@ def test_prepare_application_pack_creates_crm_row_resume_file_and_version(tmp_pa
     storage.upsert_job(
         _job(
             "job-1",
-            job_title="Frontend Python Engineer",
+            job_title="Frontend Python Engineering Intern",
             company_name="Acme",
             job_description="Build Python services and frontend tools",
         )
@@ -99,7 +99,7 @@ def test_prepare_application_pack_uses_llm_rewrite_when_available(tmp_path: Path
     storage.upsert_job(
         _job(
             "job-1",
-            job_title="Frontend Python Engineer",
+            job_title="Frontend Python Engineering Intern",
             company_name="Acme",
             job_description="Build Python services and frontend tools",
         )
@@ -152,7 +152,7 @@ def test_cli_analyze_job_json_outputs_structured_analysis(
     storage.upsert_job(
         _job(
             "job-1",
-            job_title="Python API Engineer",
+            job_title="Python API Engineering Intern",
             job_description="Build Python APIs with FastAPI and PostgreSQL. Kubernetes preferred.",
         )
     )
@@ -163,7 +163,7 @@ def test_cli_analyze_job_json_outputs_structured_analysis(
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
     assert payload["job_id"] == "job-1"
-    assert payload["job"]["title"] == "Python API Engineer"
+    assert payload["job"]["title"] == "Python API Engineering Intern"
     assert payload["analysis"]["requirements"]
     assert payload["analysis"]["resume_claims"]
     assert "summary" in payload["analysis"]
@@ -177,7 +177,7 @@ def test_cli_analyze_job_summary_prints_counts(
     storage.upsert_job(
         _job(
             "job-1",
-            job_title="Python API Engineer",
+            job_title="Python API Engineering Intern",
             job_description="Build Python APIs with FastAPI and PostgreSQL. Kubernetes preferred.",
         )
     )
@@ -187,7 +187,7 @@ def test_cli_analyze_job_summary_prints_counts(
 
     output = capsys.readouterr().out
     assert code == 0
-    assert "Job: Python API Engineer at Acme" in output
+    assert "Job: Python API Engineering Intern at Acme" in output
     assert "Score:" in output
     assert "Requirement coverage:" in output
     assert "Evidence:" in output

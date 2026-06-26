@@ -1,12 +1,136 @@
 # Agent Operating Notes
 
-## Project Design Reference
+## Product direction
 
-Use `SCRAPER_UI.md` for product workflow, layout, information architecture, and UX behavior.
+This repo is now centered on a local job-application assistant, not a mass auto-apply bot.
 
-Apply that direction specifically to the job scraper frontend, including the local resume-prompt web UI in:
+The target workflow:
 
-- `scraper/src/job_scraper/web.py`
+```text
+SQLite job backlog
+  ↓
+Playwright opens apply URL
+  ↓
+Deterministic observer scans DOM/frames
+  ↓
+Normalized page snapshot
+  fields: id, kind, label, required, options
+  buttons: id, text, type, disabled
+  errors
+  ↓
+LLM resolver
+  input: page snapshot + profile + resume + facts + job description + policies
+  output: JSON answers + nextButton + submitButton
+  ↓
+Guarded executor
+  fills text/select/radio/checkbox/typeahead/file fields
+  uploads resume only
+  clicks non-final Next/Continue/Apply navigation
+  never clicks final submit
+  ↓
+Loop observe → resolve → fill → advance
+  ↓
+Run result
+```
+
+Run results:
+
+- `dry_run_ready`: ready at final submit; not submitted.
+- `needs_review`: unknown, sensitive, or manual field.
+- `blocked`: sign-in, CAPTCHA, no form, job gone, weird upload, unsupported workflow.
+- `failed`: browser, LLM, parser, executor, or navigation failure.
+
+## Architectural split
+
+Keep these responsibilities separate. Do not blur them for convenience.
+
+### Observer: what exists on the page
+
+- Input: browser page/frame state.
+- Output: normalized page snapshot.
+- No profile facts, no resume facts, no answer decisions.
+- Deterministic and testable from static HTML fixtures where possible.
+
+### Resolver: what answers should be used
+
+- Input: normalized snapshot + profile + resume + facts + job description + policies.
+- Output: strict JSON answers, next button, submit button, and uncertainty flags.
+- Must refuse unknown/sensitive fields instead of guessing.
+- Never performs browser actions.
+
+### Executor: allowed actions only
+
+- Input: normalized snapshot + resolver JSON.
+- Performs fills, safe uploads, and non-final navigation.
+- Never clicks final submit.
+- Must stop on final submit, CAPTCHA, sign-in, unsupported controls, or sensitive fields.
+
+## Applicant reference
+
+Use these as the user's default applicant facts for local dry-run preparation and resolver context. Do not infer sensitive or legal answers from them.
+
+- Resume file: `Main_Resume.pdf`
+- LinkedIn: `https://www.linkedin.com/in/ianrapko`
+- Personal site: `https://immemorized.com`
+
+## Safety policy
+
+Hard rules:
+
+- Never mass-submit applications.
+- Never click final submit.
+- Never answer sensitive fields by inference.
+- Never bypass sign-in, CAPTCHA, assessments, or identity checks.
+- Upload only the configured resume file unless the user explicitly changes policy.
+- Treat any destructive database cleanup as requiring a clear user instruction.
+
+Soft preference:
+
+- Use minimal Playwright R&D, not brittle per-board automations.
+- Prefer deterministic observation and guarded generic execution.
+- When a board fails, collect samples and reasons, then add targeted policies/fixtures.
+
+## Code layout
+
+Active code:
+
+- `scraper/src/theirstack/`: TheirStack query/client code.
+- `scraper/src/sync/`: SQLite backlog sync and dedupe.
+- `scraper/src/db/schema.sql`: backlog and application-run schema.
+- `scraper/src/apply_pipeline/`: application assistant contracts and pure helpers.
+- `scraper/tests/`: unit tests for contracts, sync, and query behavior.
+
+Archived code belongs under `old/`. Do not move active entrypoints or tests there.
+
+## Development rules
+
+- Keep business logic as pure functions over typed data where possible.
+- Keep side effects at boundaries: CLI, browser, filesystem, HTTP, SQLite.
+- Add tests for every new branch in observer/resolver/executor policy.
+- Prefer boring schemas and explicit JSON contracts.
+- Do not add a second convention beside an existing one.
+- Use DeepSeek through Ollama Cloud as the provider for most tasking agents unless a task specifically needs another model family.
+
+## Verification
+
+For normal Python changes in `scraper/`:
+
+```bash
+.venv/bin/python -m pytest
+```
+
+For TheirStack preview changes, also run a safe preview:
+
+```bash
+.venv/bin/job-sync dry-run --call-api --posted-at-max-age-days 2
+```
+
+For paid fetches, only run after explicit user approval because returned jobs can spend credits:
+
+```bash
+ENABLE_PAID_FETCH=true JOB_SYNC_DB_PATH=data/job_sync_test.sqlite3 \
+.venv/bin/job-sync sync-once --limit <preview_total> --max-pages 1 --posted-at-max-age-days 2
+```
 
 ## OMP + Orca Workflow
 
@@ -17,145 +141,104 @@ Mandatory workflow invariants:
 - Launch OMP from the repository root so this `AGENTS.md` file is auto-loaded.
 - Treat this file as always-on policy for every coordinator, worker, and review prompt.
 - Use test-first development: add or update the focused failing test before implementation.
-- Use DeepSeek V4 Pro through Ollama Cloud for implementation workers by default: `omp --model "ollama/deepseek-v4-pro:cloud" --thinking medium`.
+- Use DeepSeek V4 Pro through Ollama Cloud for implementation workers by default: `omp --model "ollama-cloud/deepseek-v4-pro" --thinking medium`.
 - Use `orca-dev` instead of `orca` only when operating an Orca development build; keep the same worktree, terminal, and verification workflow.
 
 ## Architecture Bias: Microservices, Functional Core, Container First
 
 Prefer a functional, service-oriented design over object-oriented architecture.
 
-Default architectural direction:
-
-- Split the system into as many small services as are justified by independently testable responsibilities.
-- Prefer explicit service boundaries over broad shared modules or hidden coupling.
-- Prefer functions, typed data structures, schemas, and plain modules over custom class hierarchies.
-- Avoid OOP unless a framework, library, or external API requires it.
+- Split responsibilities only when the boundary is independently testable and useful.
+- Prefer functions, typed data structures, schemas, and plain modules over class hierarchies.
+- Keep business logic pure or mostly pure.
+- Keep side effects at service boundaries: HTTP, CLI, browser, filesystem, network, database, queues.
 - If a class is unavoidable, keep it as a thin adapter around functional code.
-- Keep business logic in pure or mostly pure functions that can be tested without the web server, scraper runtime, browser session, or database.
-- Keep side effects at service boundaries: HTTP handlers, CLI entrypoints, filesystem access, network calls, database calls, queue consumers, and container startup.
 
-For this project, default service boundaries should be considered around:
+Candidate service boundaries:
 
-- job ingestion / scraping
-- job description normalization and parsing
-- resume parsing
-- resume-to-job matching and scoring
-- evidence extraction
-- improvement recommendation generation
-- report generation / UI serving
-- persistence / cache / queue infrastructure
+- job ingestion / TheirStack sync
+- job description normalization
+- resume/profile/facts loading
+- page observation
+- answer resolution
+- guarded execution
+- failure sampling / review queue
+- report/UI serving
+- persistence/cache/queue infrastructure
 
-Do not force everything into one process for convenience if a service boundary would make testing, deployment, scaling, or failure isolation cleaner.
+Each real service boundary needs:
 
-Do not create microservices for their own sake. Each service must have:
-
-- a clear responsibility
-- a documented input/output contract
-- containerized execution
+- documented input/output contract
 - focused tests
-- a health check or equivalent smoke check
-- an explicit owner in the implementation plan
+- container or CLI execution path
+- smoke check or health check for long-running processes
 
-## Containerization Contract
+## Containerization contract
 
-Everything must run in containers by default.
+Everything should be able to run in containers by default. Host execution is a developer convenience, not the only verified path.
 
-For every service or CLI entrypoint added or changed, the coordinator must ensure:
+For every service or CLI entrypoint added or changed, ensure:
 
-- it has a Dockerfile or is included in a shared Dockerfile target
-- it is wired into `docker-compose.yml` or the project’s equivalent compose stack
-- required environment variables are documented with safe defaults or examples
-- dependencies are installed inside the container, not assumed from the host machine
-- tests can run inside the container
-- health checks or smoke checks exist for long-running services
-- containers can be rebuilt from a clean checkout
+- dependencies are declared in project files
+- required environment variables have examples or safe defaults
+- tests can run from a clean checkout
+- long-running services have a health check or smoke check
+- Docker/compose wiring is updated when a service boundary needs it
 
-Host-machine execution is allowed only as a developer convenience. It must not be the only verified path.
-
-## Pre-Push Verification Gate
-
-Do not push, merge, or mark work complete until the containerized path has been verified.
-
-Minimum default gate:
+Default container verification before merge/push when containers are in scope:
 
 ```bash
 docker compose build
 docker compose up -d
-# run the project’s focused test command inside the relevant service container
-# examples:
-# docker compose exec <service> pytest
-# docker compose exec <service> uv run pytest
-# docker compose exec <service> npm test
 docker compose ps
 docker compose down
 ```
 
-If the repository uses a different container runner, use the project-native equivalent, but keep the same standard: build cleanly, start cleanly, test inside the container, then tear down cleanly.
+Never claim container verification unless those commands were actually run.
 
-Feature-specific verification must include at least one of:
+## Review policy
 
-- unit tests for pure functions
-- contract tests between services
-- integration tests through the containerized service boundary
-- end-to-end smoke test through the UI or API
-- regression test for the exact bug fixed
+Prefer executable evidence over subjective review.
 
-Never claim container verification unless the command was actually run.
-
-## Review Policy: Metrics and Executable Evidence Over Subjective Review
-
-Do not use model-based code review as a substitute for measurable verification.
-
-External or advisor review is optional and should only be used when it produces concrete, actionable findings tied to one of:
+Useful review findings cite:
 
 - failing tests
 - missing tests
-- broken service contracts
+- broken contracts
 - unclear ownership boundaries
 - containerization gaps
 - security-sensitive logic
-- measurable complexity or maintainability risk
-- diffs outside the assigned scope
+- measurable complexity
+- diffs outside scope
 
-Do not ask another model for a vague “code review” just to get a second opinion. A useful review must point to specific files, specific risks, and specific acceptance checks. Comments like “looks good,” “clean,” or “maintainable” are not evidence.
+Do not ask for vague “looks good” reviews. The coordinator owns scope review and verification.
 
-The parent/coordinator still must inspect diffs before merging worker output, but this inspection is a scope and verification check, not a replacement for tests.
+## Orchestration policy
 
-## Autonomous Orchestration Policy
+For non-trivial work:
 
-The coordinator is expected to actively orchestrate work, not merely describe how it could be done.
+1. Understand the goal and affected files.
+2. Decide whether workers reduce risk or latency.
+3. Assign explicit ownership if workers are used.
+4. Integrate results.
+5. Run the focused verification gate.
 
-When the required tools are available (Orca, OMP, Git, shell), the coordinator should prefer performing orchestration actions over suggesting them.
+Use workers when:
 
-For non-trivial tasks, the default workflow is:
+- independent file ownership groups exist
+- one worker can verify while another implements
+- research can proceed independently
+- risky refactors need independent checking
 
-1. Run `/plan`.
-2. Determine whether parallel execution would reduce total completion time or improve isolation.
-3. If beneficial, create worker terminals or worktrees without waiting for additional permission.
-4. Assign explicit ownership to each worker.
-5. Monitor worker progress.
-6. Review all worker output.
-7. Integrate, verify, and report results.
+Avoid workers when:
 
-Assume permission to perform reversible development operations unless the user explicitly restricts them.
+- the change is a small one-file edit
+- file ownership would overlap heavily
+- coordination costs exceed implementation costs
 
-Examples of expected autonomous actions:
+Ask confirmation before:
 
-- creating feature worktrees
-- creating worker terminals
-- sending worker prompts
-- waiting for workers
-- collecting worker results
-- running tests
-- running linters
-- inspecting git diffs
-- merging completed worker output
-
-Do **not** ask whether to perform these routine orchestration steps. Perform them when they support the user's stated objective.
-
-Ask for confirmation only before:
-
-- destructive operations (deleting branches, worktrees, files, databases)
+- deleting branches, worktrees, files, or databases
 - irreversible deployments
 - publishing externally
 - operations outside the project workspace
@@ -286,7 +369,7 @@ Implementation workers default to DeepSeek V4 Pro through Ollama Cloud at medium
 DeepSeek V4 Pro worker:
 
 ```bash
-orca terminal create --worktree active --title "<specific-subtask>" --command 'omp --model "ollama/deepseek-v4-pro:cloud" --thinking medium' --json
+orca terminal create --worktree active --title "<specific-subtask>" --command 'omp --model "ollama-cloud/deepseek-v4-pro" --thinking medium' --json
 ```
 
 GPT-5.5 fallback worker:
@@ -311,7 +394,7 @@ Default pattern:
 
 ```bash
 orca worktree create --name "<parent-feature>-<specific-subtask>" --parent-worktree active --json
-orca terminal create --worktree "<parent-feature>-<specific-subtask>" --title "<specific-subtask>" --command 'omp --model "ollama/deepseek-v4-pro:cloud" --thinking medium' --json
+orca terminal create --worktree "<parent-feature>-<specific-subtask>" --title "<specific-subtask>" --command 'omp --model "ollama-cloud/deepseek-v4-pro" --thinking medium' --json
 orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
 orca terminal send --terminal <handle> --text '<narrow task prompt>' --enter --json
 

@@ -25,6 +25,9 @@ _RAW_FIELDS = (
     "employment_statuses",
     "remote",
     "skills",
+    "responsibilities",
+    "requirements",
+    "benefits",
 )
 
 

@@ -51,9 +51,47 @@ def test_first_run_sends_freshness_source_limit_page_and_saves_jobs(tmp_path: Pa
     ]
     assert payload["limit"] == config.search.limit
     assert payload["page"] == 0
-    assert "remote" not in payload
+    assert payload["remote"] is True
+    assert payload["job_title_pattern_or"] == ["(?i)\\b(co[- ]?op|coop|intern(ship)?)\\b"]
+    assert payload["job_description_pattern_or"] == [
+        "(?i)\\b(software|software engineering|swe|engineer|developer|data|analytics|data engineering|data science|machine learning|ml|artificial intelligence|ai|frontend|front[- ]end|backend|back[- ]end|full[- ]stack|devops|sre|site reliability|cloud|platform|infrastructure)\\b"
+    ]
     assert summary.inserted == 1
     assert storage.count_jobs() == 1
+
+
+def test_sync_skips_non_coop_intern_titles_without_writing(tmp_path: Path) -> None:
+    config = _example_config()
+    storage = JobStorage(tmp_path / "jobs.sqlite3")
+    client = FakeTheirStackClient(
+        [
+            {
+                "data": [
+                    {
+                        "id": "job-senior",
+                        "job_title": "Senior Software Engineer",
+                        "company_name": "Acme",
+                        "company_domain": "acme.example",
+                        "job_country_code": "US",
+                        "remote": False,
+                        "date_posted": "2026-06-23",
+                        "discovered_at": "2026-06-23T12:00:00+00:00",
+                        "url": "https://www.linkedin.com/jobs/view/456",
+                        "source_url": "https://www.linkedin.com/jobs/view/456",
+                        "final_url": "https://acme.example/jobs/456",
+                    }
+                ]
+            }
+        ]
+    )
+
+    summary = sync_once(client, storage, config)
+
+    assert summary.jobs_returned == 1
+    assert summary.skipped == 1
+    assert summary.inserted == 0
+    assert summary.checkpoint_after is None
+    assert storage.count_jobs() == 0
 
 
 def test_second_run_uses_checkpoint_overlap_and_dedupes_existing_job(tmp_path: Path) -> None:

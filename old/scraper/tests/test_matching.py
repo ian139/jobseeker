@@ -34,6 +34,16 @@ def _job_record(
     url: str | None = "https://acme.com/jobs/1",
     source_url: str | None = None,
     final_url: str | None = None,
+    min_annual_salary_usd: float | None = None,
+    max_annual_salary_usd: float | None = None,
+    role_kind: str | None = None,
+    source: str | None = None,
+    description: str | None = None,
+    locations: tuple[str, ...] = (),
+    skills: tuple[str, ...] = (),
+    seniority: str | None = None,
+    employment_statuses: tuple[str, ...] = (),
+    digest: dict[str, object] | None = None,
     raw: dict[str, Any] | None = None,
 ) -> JobRecord:
     return JobRecord(
@@ -48,6 +58,16 @@ def _job_record(
         url=url,
         source_url=source_url,
         final_url=final_url,
+        min_annual_salary_usd=min_annual_salary_usd,
+        max_annual_salary_usd=max_annual_salary_usd,
+        role_kind=role_kind,
+        source=source,
+        description=description,
+        locations=locations,
+        skills=skills,
+        seniority=seniority,
+        employment_statuses=employment_statuses,
+        digest=digest or {},
         raw=raw or {},
     )
 
@@ -111,6 +131,22 @@ def test_scoring_favors_resume_and_role_match() -> None:
     # Perfect should have a materially higher score
     assert scored[0].score > scored[1].score, "Perfect match should score higher than partial"
     assert scored[1].score > scored[2].score, "Partial match should score higher than mismatch"
+
+
+def test_parsed_description_field_feeds_scoring_without_raw_description() -> None:
+    analysis = _analysis(text="Built Python FastAPI services backed by PostgreSQL.")
+    job = _job_record(
+        title="Backend Engineering Intern",
+        description="Build Python APIs with FastAPI and PostgreSQL.",
+        raw={},
+    )
+
+    scored = score_jobs([job], analysis, target_roles=[], target_industries=[], keywords=["FastAPI"])
+
+    assert scored[0].score > 0
+    assert "fastapi" in scored[0].matched_terms
+    assert scored[0].analysis is not None
+    assert scored[0].analysis.requirements
 
 
 def test_scoring_industry_alignment_boosts_score() -> None:

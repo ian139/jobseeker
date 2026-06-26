@@ -8,7 +8,7 @@ and resume-text overlap with the job description.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Sequence
 
 from job_scraper.storage import JobRecord
@@ -181,6 +181,7 @@ def score_jobs(
     target_roles: Sequence[str],
     target_industries: Sequence[str],
     keywords: Sequence[str],
+    detailed_limit: int | None = None,
 ) -> list[ScoredJob]:
     """Score every job in *jobs* and return them sorted descending by score.
 
@@ -199,7 +200,6 @@ def score_jobs(
     job_index_cache: dict[str, _JobIndex] = {}
     for job in jobs:
         job_index = job_index_cache.setdefault(job.theirstack_id, _build_job_index(job))
-        analysis_result = analyze_job_resume(job, analysis)
         role_pts = max(_score_role_fit(job.title, target_roles), _score_resume_title_fit(job_index, resume_index))
         industry_pts = _score_industry(job, target_industries)
         kw_pts = _score_keywords(job, keywords)
@@ -260,13 +260,18 @@ def score_jobs(
                 explanation=explanation,
                 score_components=score_components,
                 evidence_matches=evidence_matches,
-                analysis=analysis_result,
             )
         )
 
     scored.sort(key=lambda s: s.job.theirstack_id)
     scored.sort(key=lambda s: (s.job.date_posted or "", s.job.discovered_at or ""), reverse=True)
     scored.sort(key=lambda s: s.score, reverse=True)
+    if detailed_limit is None:
+        detail_indexes = range(len(scored))
+    else:
+        detail_indexes = range(min(max(detailed_limit, 0), len(scored)))
+    for index in detail_indexes:
+        scored[index] = replace(scored[index], analysis=analyze_job_resume(scored[index].job, analysis))
     return scored
 
 
@@ -355,6 +360,10 @@ def parse_job_requirements(job: JobRecord) -> tuple[ParsedRequirement, ...]:
         if not isinstance(value, str):
             continue
         candidates.extend(_requirements_from_description(value))
+    if job.description:
+        candidates.extend(_requirements_from_description(job.description))
+    for skill in job.skills:
+        candidates.extend((item, "required", "skills") for item in _split_requirement_items(skill, "skills"))
 
     seen: set[str] = set()
     requirements: list[ParsedRequirement] = []
@@ -1550,10 +1559,28 @@ _US_STATE_NAMES: frozenset[str] = frozenset(
 
 def _job_text(job: JobRecord) -> str:
     """Assemble searchable text from normalized + raw job fields."""
-    parts: list[str] = [job.title or ""]
+    parts: list[str] = [
+        job.title or "",
+        job.description or "",
+        job.source or "",
+        " ".join(job.locations),
+        " ".join(job.skills),
+        " ".join(job.employment_statuses),
+        " ".join(str(value) for value in job.digest.values() if value not in (None, "", [], {})),
+    ]
     raw = job.raw
 
-    for key in ("job_description", "description", "company_name", "company", "company_description", "job_seniority"):
+    for key in (
+        "job_description",
+        "description",
+        "responsibilities",
+        "requirements",
+        "benefits",
+        "company_name",
+        "company",
+        "company_description",
+        "job_seniority",
+    ):
         val = raw.get(key)
         if val is not None:
             if isinstance(val, str):
@@ -1561,21 +1588,18 @@ def _job_text(job: JobRecord) -> str:
             elif isinstance(val, (list, tuple)):
                 parts.extend(str(v) for v in val)
 
-    # employment_statuses could be a list like ["Full-time", "Contract"]
     statuses = raw.get("employment_statuses")
     if isinstance(statuses, (list, tuple)):
         parts.extend(str(s) for s in statuses)
     elif isinstance(statuses, str):
         parts.append(statuses)
 
-    # skills could be a list or comma-separated string
     skills = raw.get("skills")
     if isinstance(skills, (list, tuple)):
         parts.extend(str(s) for s in skills)
     elif isinstance(skills, str):
         parts.append(skills)
 
-    # location info
     for loc_key in ("location", "city", "state", "country"):
         loc_val = raw.get(loc_key)
         if isinstance(loc_val, str):
@@ -1644,6 +1668,7 @@ def _job_requirement_terms(
         terms.extend(_split_skill_text(skills))
     elif isinstance(skills, (list, tuple)):
         terms.extend(str(skill) for skill in skills if str(skill).strip())
+    terms.extend(job.skills)
 
     for term in _HIGH_VALUE_TERMS:
         if _text_has_term(job_index.text, term):
@@ -1661,7 +1686,9 @@ def _split_skill_text(value: str) -> list[str]:
 
 def _important_requirement_tokens(job: JobRecord) -> tuple[str, ...]:
     raw = job.raw
-    parts: list[str] = []
+    parts: list[str] = [job.description or ""]
+    parts.extend(job.skills)
+    parts.extend(job.employment_statuses)
     for key in ("requirements", "qualifications", "responsibilities", "job_description", "description", "job_text", "summary"):
         value = raw.get(key)
         if isinstance(value, str):

@@ -3,31 +3,33 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "job-sync"
+name = "job-scraper"
 version = "0.1.0"
-description = "Credit-safe TheirStack job sync prototype"
+description = "TheirStack job scraper with SQLite dedupe and 24-hour scheduling"
 requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.27",
+    "pydantic-settings>=2.2",
+    "PyYAML>=6.0",
+    "APScheduler>=3.10",
     "python-dotenv>=1.0",
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
+    "python-multipart>=0.0.9",
+    "playwright>=1.40",
+    "pypdf>=4.3",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
 ]
-live = [
-    "playwright>=1.45",
-]
 
 [project.scripts]
-job-sync = "sync.jobs:main"
+job-scraper = "job_scraper.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-db = ["schema.sql"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Sequence
+from job_scraper.job_parser import ParsedJob, parse_theirstack_job, parsed_job_to_storage_mapping
 
 LOGGER = logging.getLogger(__name__)
 
@@ -47,7 +48,23 @@ class JobRecord:
     url: str | None
     source_url: str | None
     final_url: str | None
+    min_annual_salary_usd: float | None
+    max_annual_salary_usd: float | None
+    role_kind: str | None
+    source: str | None
+    description: str | None
+    locations: tuple[str, ...]
+    skills: tuple[str, ...]
+    seniority: str | None
+    employment_statuses: tuple[str, ...]
+    digest: dict[str, object]
     raw: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class IndustryJobCount:
+    industry: str
+    count: int
 
 
 @dataclass(frozen=True)
@@ -101,12 +118,21 @@ class JobStorage:
                     final_url TEXT,
                     min_annual_salary_usd REAL,
                     max_annual_salary_usd REAL,
+                    role_kind TEXT,
+                    source TEXT,
+                    description TEXT,
+                    locations_json TEXT NOT NULL DEFAULT '[]',
+                    skills_json TEXT NOT NULL DEFAULT '[]',
+                    seniority TEXT,
+                    employment_statuses_json TEXT NOT NULL DEFAULT '[]',
+                    digest_json TEXT NOT NULL DEFAULT '{}',
                     raw_json TEXT NOT NULL,
                     first_seen_at TEXT NOT NULL,
                     last_seen_at TEXT NOT NULL
                 )
                 """
             )
+            self._ensure_job_columns(connection)
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sync_state (
@@ -208,38 +234,73 @@ class JobStorage:
                     (checkpoint_after,),
                 )
 
-    def upsert_job(self, job: dict[str, Any]) -> UpsertResult:
+    def upsert_job(self, job: ParsedJob | dict[str, Any]) -> UpsertResult:
         self.initialize()
-        theirstack_id = job.get("id")
-        if theirstack_id in (None, ""):
-            LOGGER.warning(
-                "Skipping TheirStack job without id: title=%r company=%r",
-                _get_field(job, "job_title", "title"),
-                _company_name(job),
-            )
+        if isinstance(job, dict):
+            parsed = parse_theirstack_job(job)
+            if parsed is None:
+                LOGGER.warning(
+                    "Skipping job without a co-op/intern title or id: title=%r company=%r",
+                    _get_field(job, "job_title", "title"),
+                    _company_name(job),
+                )
+                return UpsertResult(status="skipped")
+        else:
+            parsed = job
+
+        mapping = parsed_job_to_storage_mapping(parsed)
+        theirstack_id = parsed.id
+        if not theirstack_id:
             return UpsertResult(status="skipped")
 
-        theirstack_id_text = str(theirstack_id)
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        raw_json = json.dumps(job, separators=(",", ":"), sort_keys=True)
-        row = _normalized_row(job, theirstack_id_text, raw_json, now)
+        row = {
+            "theirstack_id": theirstack_id,
+            "title": mapping["title"],
+            "company": mapping["company"],
+            "company_domain": mapping["company_domain"],
+            "country_code": mapping["country_code"],
+            "remote": mapping["remote"],
+            "date_posted": mapping["date_posted"],
+            "discovered_at": mapping["discovered_at"],
+            "url": mapping["url"],
+            "source_url": mapping["source_url"],
+            "final_url": mapping["final_url"],
+            "min_annual_salary_usd": mapping["min_annual_salary_usd"],
+            "max_annual_salary_usd": mapping["max_annual_salary_usd"],
+            "role_kind": mapping["role_kind"],
+            "source": mapping["source"],
+            "description": mapping["description"],
+            "locations_json": _json_list(mapping["locations"]),
+            "skills_json": _json_list(mapping["skills"]),
+            "seniority": mapping["seniority"],
+            "employment_statuses_json": _json_list(mapping["employment_statuses"]),
+            "digest_json": json.dumps(mapping["digest"], separators=(",", ":"), sort_keys=True),
+            "raw_json": mapping["raw_json"],
+            "first_seen_at": now,
+            "last_seen_at": now,
+        }
 
         with self._connect() as connection:
             existing = connection.execute(
-                "SELECT theirstack_id FROM jobs WHERE theirstack_id = ?", (theirstack_id_text,)
+                "SELECT theirstack_id FROM jobs WHERE theirstack_id = ?", (theirstack_id,)
             ).fetchone()
             connection.execute(
                 """
                 INSERT INTO jobs (
                     theirstack_id, title, company, company_domain, country_code, remote,
                     date_posted, discovered_at, url, source_url, final_url,
-                    min_annual_salary_usd, max_annual_salary_usd, raw_json,
+                    min_annual_salary_usd, max_annual_salary_usd,
+                    role_kind, source, description, locations_json, skills_json,
+                    seniority, employment_statuses_json, digest_json, raw_json,
                     first_seen_at, last_seen_at
                 )
                 VALUES (
                     :theirstack_id, :title, :company, :company_domain, :country_code, :remote,
                     :date_posted, :discovered_at, :url, :source_url, :final_url,
-                    :min_annual_salary_usd, :max_annual_salary_usd, :raw_json,
+                    :min_annual_salary_usd, :max_annual_salary_usd,
+                    :role_kind, :source, :description, :locations_json, :skills_json,
+                    :seniority, :employment_statuses_json, :digest_json, :raw_json,
                     :first_seen_at, :last_seen_at
                 )
                 ON CONFLICT(theirstack_id) DO UPDATE SET
@@ -255,19 +316,48 @@ class JobStorage:
                     final_url = excluded.final_url,
                     min_annual_salary_usd = excluded.min_annual_salary_usd,
                     max_annual_salary_usd = excluded.max_annual_salary_usd,
+                    role_kind = excluded.role_kind,
+                    source = excluded.source,
+                    description = excluded.description,
+                    locations_json = excluded.locations_json,
+                    skills_json = excluded.skills_json,
+                    seniority = excluded.seniority,
+                    employment_statuses_json = excluded.employment_statuses_json,
+                    digest_json = excluded.digest_json,
                     raw_json = excluded.raw_json,
                     last_seen_at = excluded.last_seen_at
                 """,
                 row,
             )
         status: UpsertStatus = "updated" if existing else "inserted"
-        return UpsertResult(status=status, discovered_at=_string_or_none(job.get("discovered_at")))
+        return UpsertResult(status=status, discovered_at=parsed.discovered_at)
 
     def count_jobs(self) -> int:
         self.initialize()
         with self._connect() as connection:
             row = connection.execute("SELECT COUNT(*) AS count FROM jobs").fetchone()
         return int(row["count"])
+
+    def list_industry_counts(self) -> list[IndustryJobCount]:
+        self.initialize()
+        with self._connect() as connection:
+            rows = connection.execute("SELECT raw_json FROM jobs").fetchall()
+
+        counts: dict[str, int] = {}
+        for row in rows:
+            try:
+                raw = json.loads(str(row["raw_json"]))
+            except json.JSONDecodeError as exc:
+                raise ValueError("Stored job raw_json is invalid for industry count") from exc
+            if not isinstance(raw, dict):
+                raise ValueError("Stored job raw_json is invalid for industry count")
+            label = _industry_label(raw)
+            counts[label] = counts.get(label, 0) + 1
+
+        return [
+            IndustryJobCount(industry=industry, count=count)
+            for industry, count in sorted(counts.items(), key=lambda item: (-item[1], item[0].casefold()))
+        ]
 
     def list_jobs(self, *, limit: int = 100) -> list[JobRecord]:
         self.initialize()
@@ -278,7 +368,10 @@ class JobStorage:
             rows = connection.execute(
                 """
                 SELECT theirstack_id, title, company, company_domain, country_code, remote,
-                       date_posted, discovered_at, url, source_url, final_url, raw_json
+                       date_posted, discovered_at, url, source_url, final_url,
+                       min_annual_salary_usd, max_annual_salary_usd,
+                       role_kind, source, description, locations_json, skills_json,
+                       seniority, employment_statuses_json, digest_json, raw_json
                 FROM jobs
                 ORDER BY CASE WHEN COALESCE(discovered_at, date_posted) IS NULL THEN 1 ELSE 0 END,
                          COALESCE(discovered_at, date_posted, last_seen_at, first_seen_at) DESC,
@@ -295,7 +388,10 @@ class JobStorage:
             row = connection.execute(
                 """
                 SELECT theirstack_id, title, company, company_domain, country_code, remote,
-                       date_posted, discovered_at, url, source_url, final_url, raw_json
+                       date_posted, discovered_at, url, source_url, final_url,
+                       min_annual_salary_usd, max_annual_salary_usd,
+                       role_kind, source, description, locations_json, skills_json,
+                       seniority, employment_statuses_json, digest_json, raw_json
                 FROM jobs
                 WHERE theirstack_id = ?
                 """,
@@ -509,6 +605,25 @@ class JobStorage:
             )
         return int(cursor.lastrowid)
 
+    def _ensure_job_columns(self, connection: sqlite3.Connection) -> None:
+        existing_columns = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        column_definitions = {
+            "role_kind": "role_kind TEXT",
+            "source": "source TEXT",
+            "description": "description TEXT",
+            "locations_json": "locations_json TEXT NOT NULL DEFAULT '[]'",
+            "skills_json": "skills_json TEXT NOT NULL DEFAULT '[]'",
+            "seniority": "seniority TEXT",
+            "employment_statuses_json": "employment_statuses_json TEXT NOT NULL DEFAULT '[]'",
+            "digest_json": "digest_json TEXT NOT NULL DEFAULT '{}'",
+        }
+        for column, definition in column_definitions.items():
+            if column not in existing_columns:
+                connection.execute(f"ALTER TABLE jobs ADD COLUMN {definition}")
+
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
         connection.execute("PRAGMA foreign_keys = ON")
@@ -517,14 +632,18 @@ class JobStorage:
 
 
 def _job_record_from_row(row: sqlite3.Row) -> JobRecord:
+    job_id = str(row["theirstack_id"])
     try:
         raw = json.loads(str(row["raw_json"]))
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Stored job raw_json is invalid for {row['theirstack_id']}") from exc
+        raise ValueError(f"Stored job raw_json is invalid for {job_id}") from exc
     if not isinstance(raw, dict):
-        raise ValueError(f"Stored job raw_json is invalid for {row['theirstack_id']}")
+        raise ValueError(f"Stored job raw_json is invalid for {job_id}")
+
+    digest = _json_dict(row["digest_json"], field="digest", job_id=job_id)
+
     return JobRecord(
-        theirstack_id=str(row["theirstack_id"]),
+        theirstack_id=job_id,
         title=_string_or_none(row["title"]),
         company=_string_or_none(row["company"]),
         company_domain=_string_or_none(row["company_domain"]),
@@ -535,6 +654,18 @@ def _job_record_from_row(row: sqlite3.Row) -> JobRecord:
         url=_string_or_none(row["url"]),
         source_url=_string_or_none(row["source_url"]),
         final_url=_string_or_none(row["final_url"]),
+        min_annual_salary_usd=_number_or_none(row["min_annual_salary_usd"]),
+        max_annual_salary_usd=_number_or_none(row["max_annual_salary_usd"]),
+        role_kind=_string_or_none(row["role_kind"]),
+        source=_string_or_none(row["source"]),
+        description=_string_or_none(row["description"]),
+        locations=_json_string_tuple(row["locations_json"], field="locations", job_id=job_id),
+        skills=_json_string_tuple(row["skills_json"], field="skills", job_id=job_id),
+        seniority=_string_or_none(row["seniority"]),
+        employment_statuses=_json_string_tuple(
+            row["employment_statuses_json"], field="employment_statuses", job_id=job_id
+        ),
+        digest=digest,
         raw=raw,
     )
 
@@ -568,6 +699,56 @@ def _application_attempt_record_from_row(row: sqlite3.Row) -> ApplicationAttempt
         resume_uploaded=int(row["resume_uploaded"]),
         created_at=str(row["created_at"]),
     )
+
+
+def _json_list(value: Any) -> str:
+    return json.dumps(list(value), separators=(",", ":"), sort_keys=True)
+
+
+def _json_string_tuple(row_value: Any, *, field: str, job_id: str) -> tuple[str, ...]:
+    try:
+        parsed = json.loads(str(row_value))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Stored job {field} is invalid for {job_id}") from exc
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        raise ValueError(f"Stored job {field} is invalid for {job_id}")
+    return tuple(parsed)
+
+
+def _json_dict(row_value: Any, *, field: str, job_id: str) -> dict[str, object]:
+    try:
+        parsed = json.loads(str(row_value))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Stored job {field} is invalid for {job_id}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Stored job {field} is invalid for {job_id}")
+    return dict(parsed)
+
+
+def _industry_label(raw: dict[str, Any]) -> str:
+    company_object = raw.get("company_object")
+    if isinstance(company_object, dict):
+        value = company_object.get("industry")
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())
+
+    company = raw.get("company")
+    if isinstance(company, dict):
+        value = company.get("industry")
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())
+
+    value = raw.get("industry")
+    if isinstance(value, str) and value.strip():
+        return " ".join(value.split())
+
+    industries = raw.get("industries")
+    if isinstance(industries, list) and industries:
+        value = industries[0]
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())
+
+    return "Uncategorized"
 
 
 def _normalized_row(job: dict[str, Any], theirstack_id: str, raw_json: str, now: str) -> dict[str, Any]:

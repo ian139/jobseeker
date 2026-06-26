@@ -15,8 +15,7 @@ filters:
   company_description_pattern_or:
     - "(?i)\\b(software|technology|internet|cloud|saas|developer platform|artificial intelligence|machine learning|data platform|cybersecurity|fintech)\\b"
   job_title_pattern_or:
-    - "(?i)\\b(fall|autumn)\\b.*\\b(co[- ]?op|coop|intern(ship)?)\\b"
-    - "(?i)\\b(co[- ]?op|coop|intern(ship)?)\\b.*\\b(fall|autumn)\\b"
+    - "(?i)\\b(co[- ]?op|coop|intern(ship)?)\\b"
   job_title_not:
     - sales
     - marketing
@@ -29,14 +28,14 @@ filters:
     - accounting
     - legal
   job_description_pattern_or:
-    - "(?i)\\b(software|engineer|developer|data|machine learning|ml|artificial intelligence|ai|product|security|cloud|platform|frontend|front[- ]end|backend|back[- ]end|full[- ]stack|devops|sre|site reliability)\\b"
+    - "(?i)\\b(software|software engineering|swe|engineer|developer|data|analytics|data engineering|data science|machine learning|ml|artificial intelligence|ai|frontend|front[- ]end|backend|back[- ]end|full[- ]stack|devops|sre|site reliability|cloud|platform|infrastructure)\\b"
   job_description_pattern_not:
     - "(?i)\\b(unpaid|volunteer)\\b"
   employment_statuses_or:
     - internship
     - temporary
   job_country_code_or: []
-  remote: null
+  remote: true
   job_seniority_or: []
   min_salary_usd: null
   url_domain_or:

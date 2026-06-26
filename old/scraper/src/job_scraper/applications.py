@@ -70,11 +70,25 @@ def _merged_job_mapping(job: JobRecord) -> dict[str, object]:
         "url": job.url,
         "source_url": job.source_url,
         "final_url": job.final_url,
+        "role_kind": job.role_kind,
+        "source": job.source,
+        "description": job.description,
+        "locations": job.locations or None,
+        "skills": job.skills or None,
+        "seniority": job.seniority,
+        "employment_statuses": job.employment_statuses or None,
+        "min_annual_salary_usd": job.min_annual_salary_usd,
+        "max_annual_salary_usd": job.max_annual_salary_usd,
+        "digest": job.digest or None,
     }
     for key, value in normalized.items():
-        if value is not None and merged.get(key) in (None, ""):
+        if value is not None and _is_empty_raw_value(merged.get(key)):
             merged[key] = value
     return merged
+
+
+def _is_empty_raw_value(value: object) -> bool:
+    return value is None or value == "" or value == [] or value == () or value == {}
 
 
 def _resume_path(output_dir: Path, job: JobRecord) -> Path:

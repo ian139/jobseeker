@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
 from job_scraper.config import ScraperConfig, build_search_payload
+from job_scraper.job_parser import parse_theirstack_job
 from job_scraper.storage import JobStorage
 
 
@@ -57,7 +58,11 @@ def sync_once(client: SearchClient, storage: JobStorage, config: ScraperConfig) 
             if not isinstance(item, dict):
                 skipped += 1
                 continue
-            result = storage.upsert_job(item)
+            parsed = parse_theirstack_job(item)
+            if parsed is None:
+                skipped += 1
+                continue
+            result = storage.upsert_job(parsed)
             if result.status == "inserted":
                 inserted += 1
             elif result.status == "updated":

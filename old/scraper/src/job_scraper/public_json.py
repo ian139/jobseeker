@@ -3,16 +3,17 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 from urllib.parse import urljoin
 
 import httpx
+from job_scraper.job_parser import parse_public_json_job
 
 from job_scraper.storage import JobStorage
 
 PUBLIC_JSON_BASE_URL = "https://doomersareretardedcommunists.com/"
-PUBLIC_JSON_ID_PREFIX = "publicjson:"
 _BOOTSTRAP_RE = re.compile(
     r'<template[^>]+id=["\']media-node-static-bootstrap["\'][^>]*>(?P<payload>.*?)</template>',
     re.DOTALL | re.IGNORECASE,
@@ -57,31 +58,56 @@ class PublicJsonImportSummary:
 
 
 class PublicJsonClient:
-    def __init__(self, base_url: str = PUBLIC_JSON_BASE_URL, timeout_seconds: float = 30.0) -> None:
+    def __init__(
+        self,
+        base_url: str = PUBLIC_JSON_BASE_URL,
+        timeout_seconds: float = 90.0,
+        max_attempts: int = 3,
+        retry_backoff_seconds: float = 1.0,
+    ) -> None:
         self._base_url = base_url
         self._timeout_seconds = timeout_seconds
+        self._max_attempts = max(1, max_attempts)
+        self._retry_backoff_seconds = max(0.0, retry_backoff_seconds)
+        self._client = httpx.Client(timeout=self._timeout_seconds, follow_redirects=True)
 
     def fetch_homepage(self) -> str:
-        try:
-            response = httpx.get(self._base_url, timeout=self._timeout_seconds, follow_redirects=True)
-            response.raise_for_status()
-        except httpx.HTTPError as exc:
-            raise PublicJsonError(f"Public JSON homepage request failed: {exc}") from exc
+        url = self._base_url
+        response = self._get(url, context="Public JSON homepage request failed")
         return response.text
 
     def fetch_json(self, path_or_url: str) -> dict[str, Any]:
         url = urljoin(self._base_url, path_or_url)
+        response = self._get(url, context=f"Public JSON request failed for {url}")
         try:
-            response = httpx.get(url, timeout=self._timeout_seconds, follow_redirects=True)
-            response.raise_for_status()
             data = response.json()
-        except httpx.HTTPError as exc:
-            raise PublicJsonError(f"Public JSON request failed for {url}: {exc}") from exc
         except json.JSONDecodeError as exc:
             raise PublicJsonError(f"Public JSON endpoint returned non-JSON for {url}") from exc
         if not isinstance(data, dict):
             raise PublicJsonError(f"Public JSON endpoint returned non-object JSON for {url}")
         return data
+
+    def _get(self, url: str, *, context: str) -> httpx.Response:
+        last_error: httpx.HTTPError | None = None
+        for attempt in range(1, self._max_attempts + 1):
+            try:
+                response = self._client.get(url)
+                response.raise_for_status()
+                return response
+            except httpx.HTTPError as exc:
+                last_error = exc
+                if attempt >= self._max_attempts or not _is_retryable_http_error(exc):
+                    raise PublicJsonError(f"{context}: {exc}") from exc
+                time.sleep(self._retry_backoff_seconds * attempt)
+        raise PublicJsonError(f"{context}: {last_error}")
+
+
+def _is_retryable_http_error(exc: httpx.HTTPError) -> bool:
+    if isinstance(exc, (httpx.TimeoutException, httpx.NetworkError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code in {408, 425, 429, 500, 502, 503, 504}
+    return False
 
 
 def import_public_json(source: PublicJsonSource, storage: JobStorage) -> PublicJsonImportSummary:
@@ -109,20 +135,18 @@ def import_public_json(source: PublicJsonSource, storage: JobStorage) -> PublicJ
             if not isinstance(raw_job, dict):
                 skipped += 1
                 continue
-            mapped = map_public_json_job(raw_job)
-            if mapped is None:
+            parsed = parse_public_json_job(raw_job)
+            if parsed is None:
                 skipped += 1
                 continue
-            job_id = str(mapped["id"])
-            url = mapped.get("url")
-            if job_id in seen_ids or (isinstance(url, str) and url in seen_urls):
+            if parsed.id in seen_ids or (parsed.url is not None and parsed.url in seen_urls):
                 duplicates += 1
                 skipped += 1
                 continue
-            seen_ids.add(job_id)
-            if isinstance(url, str):
-                seen_urls.add(url)
-            result = storage.upsert_job(mapped)
+            seen_ids.add(parsed.id)
+            if parsed.url is not None:
+                seen_urls.add(parsed.url)
+            result = storage.upsert_job(parsed)
             if result.status == "inserted":
                 inserted += 1
             elif result.status == "updated":
@@ -182,40 +206,6 @@ def validate_manifest(bootstrap: dict[str, Any]) -> PublicJsonManifest:
     return PublicJsonManifest(snapshot_date=snapshot_date, generated_at=generated_at, all_pages=tuple(pages))
 
 
-def map_public_json_job(raw_job: dict[str, Any]) -> dict[str, Any] | None:
-    public_job_id = raw_job.get("job_id")
-    if public_job_id in (None, ""):
-        return None
-
-    location = raw_job.get("location") if isinstance(raw_job.get("location"), dict) else {}
-    salary = raw_job.get("salary") if isinstance(raw_job.get("salary"), dict) else {}
-    discovered_at = _string_or_none(raw_job.get("created_at") or raw_job.get("last_updated"))
-    min_salary, max_salary = _annual_salary_usd(salary)
-
-    return {
-        "id": f"{PUBLIC_JSON_ID_PREFIX}{public_job_id}",
-        "job_title": _string_or_none(raw_job.get("title")),
-        "company_name": _string_or_none(raw_job.get("company")),
-        "job_country_code": _string_or_none(location.get("country")),
-        "remote": _remote_or_none(location.get("remote")),
-        "date_posted": _string_or_none(raw_job.get("date_posted") or discovered_at),
-        "discovered_at": discovered_at,
-        "url": _string_or_none(raw_job.get("link")),
-        "source_url": _string_or_none(raw_job.get("link")),
-        "final_url": _string_or_none(raw_job.get("link_final_url")),
-        "min_annual_salary_usd": min_salary,
-        "max_annual_salary_usd": max_salary,
-        "source": "public_json",
-        "public_json": {
-            "snapshot_job_id": _string_or_none(public_job_id),
-            "title_group": _string_or_none(raw_job.get("title_group")),
-            "ats": _string_or_none(raw_job.get("ats")),
-            "created_at": _string_or_none(raw_job.get("created_at")),
-            "last_updated": _string_or_none(raw_job.get("last_updated")),
-            "link_checked_at": _string_or_none(raw_job.get("link_checked_at")),
-            "raw": raw_job,
-        },
-    }
 
 
 def _required_string(value: dict[str, Any], key: str) -> str:
@@ -232,30 +222,3 @@ def _required_int(value: dict[str, Any], key: str) -> int:
     return item
 
 
-def _string_or_none(value: Any) -> str | None:
-    if value is None:
-        return None
-    return str(value)
-
-
-def _remote_or_none(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    return None
-
-
-def _annual_salary_usd(salary: dict[str, Any]) -> tuple[float | None, float | None]:
-    currency = str(salary.get("currency") or "").upper()
-    period = str(salary.get("period") or "").lower()
-    if currency != "USD" or period not in {"year", "yearly", "annual", "annually"}:
-        return None, None
-    return _cents_to_dollars(salary.get("min_cents")), _cents_to_dollars(salary.get("max_cents"))
-
-
-def _cents_to_dollars(value: Any) -> float | None:
-    if value in (None, ""):
-        return None
-    try:
-        return float(value) / 100.0
-    except (TypeError, ValueError):
-        return None

@@ -5,15 +5,17 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
 from job_scraper import cli as cli_module
 
+from job_scraper.job_parser import parse_public_json_job
 from job_scraper.public_json import (
+    PublicJsonClient,
     PublicJsonError,
     PublicJsonImportSummary,
     decode_bootstrap,
     import_public_json,
-    map_public_json_job,
     validate_manifest,
 )
 from job_scraper.storage import JobStorage
@@ -53,7 +55,30 @@ def test_validate_manifest_requires_all_pages() -> None:
         validate_manifest({"manifest": {"snapshot_date": "2026-06-23", "generated_at": "2026-06-23T08:01:03Z"}})
 
 
-def test_map_public_json_job_uses_prefixed_id_and_preserves_raw_row() -> None:
+def test_public_json_client_retries_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+
+    def fake_get(self: httpx.Client, url: str, **kwargs: object) -> httpx.Response:
+        del self, kwargs
+        calls.append(url)
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("timed out")
+        return httpx.Response(200, json={"jobs": []}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.Client, "get", fake_get)
+    monkeypatch.setattr("job_scraper.public_json.time.sleep", lambda _seconds: None)
+    client = PublicJsonClient(
+        base_url="https://example.test/",
+        timeout_seconds=1,
+        max_attempts=2,
+        retry_backoff_seconds=0,
+    )
+
+    assert client.fetch_json("/data/page.json") == {"jobs": []}
+    assert calls == ["https://example.test/data/page.json", "https://example.test/data/page.json"]
+
+
+def test_parse_public_json_job_uses_prefixed_id_and_basic_fields() -> None:
     raw = _public_job(
         "job-1",
         company=None,
@@ -62,26 +87,33 @@ def test_map_public_json_job_uses_prefixed_id_and_preserves_raw_row() -> None:
         salary={"currency": "USD", "period": "year", "min_cents": 10000000, "max_cents": 15000000},
     )
 
-    mapped = map_public_json_job(raw)
+    job = parse_public_json_job(raw)
 
-    assert mapped is not None
-    assert mapped["id"] == "publicjson:job-1"
-    assert mapped["job_title"] == "Staff Software Engineer"
-    assert mapped["company_name"] is None
-    assert mapped["job_country_code"] is None
-    assert mapped["remote"] is None
-    assert mapped["url"] == "https://jobs.example.com/job-1"
-    assert mapped["source"] == "public_json"
-    assert mapped["min_annual_salary_usd"] == 100000.0
-    assert mapped["max_annual_salary_usd"] == 150000.0
-    assert mapped["public_json"]["raw"] is raw
+    assert job is not None
+    assert job.id == "publicjson:job-1"
+    assert job.title == "Data Engineering Intern"
+    assert job.company is None
+    assert job.country_code is None
+    assert job.remote is None
+    assert job.url == "https://jobs.example.com/job-1"
+    assert job.source == "public_json"
+    assert job.min_annual_salary_usd == 100000.0
+    assert job.max_annual_salary_usd == 150000.0
+    assert job.raw["job_id"] == "job-1"
 
 
-def test_map_public_json_job_skips_missing_job_id() -> None:
+def test_parse_public_json_job_skips_missing_job_id() -> None:
     raw = _public_job("job-1")
     raw.pop("job_id")
 
-    assert map_public_json_job(raw) is None
+    assert parse_public_json_job(raw) is None
+
+
+def test_parse_public_json_job_skips_non_intern_title() -> None:
+    raw = _public_job("job-senior")
+    raw["title"] = "Senior Software Engineer"
+
+    assert parse_public_json_job(raw) is None
 
 
 def test_import_public_json_fetches_all_pages_and_dedupes_jobs(tmp_path: Path) -> None:
@@ -117,12 +149,12 @@ def test_import_public_json_fetches_all_pages_and_dedupes_jobs(tmp_path: Path) -
 
     first = storage.get_job("publicjson:job-1")
     assert first is not None
-    assert first.title == "Staff Software Engineer"
+    assert first.title == "Data Engineering Intern"
     assert first.company == "Acme"
     assert first.country_code == "US"
     assert first.remote == 1
     assert first.url == "https://jobs.example.com/job-1"
-    assert first.raw["public_json"]["raw"]["job_id"] == "job-1"
+    assert first.raw["job_id"] == "job-1"
 
 
 def test_import_public_json_reuses_storage_upsert_for_repeated_import(tmp_path: Path) -> None:
@@ -211,7 +243,7 @@ def _public_job(
     return {
         "job_id": job_id,
         "link": link or f"https://jobs.example.com/{job_id}",
-        "title": "Staff Software Engineer",
+        "title": "Data Engineering Intern",
         "title_group": "software engineer",
         "company": company,
         "location": {"country": country, "remote": remote},

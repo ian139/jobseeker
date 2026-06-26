@@ -19,6 +19,13 @@ from job_scraper.resume_uploads import (
 )
 from job_scraper.storage import JobRecord, JobStorage
 
+RECENT_JOB_LIMIT = 100
+RESULT_JOB_LIMIT = 10_000
+DISPLAY_RESULT_LIMIT = 250
+DETAIL_RESULT_LIMIT = 50
+
+
+
 
 def create_app(settings: AppSettings | None = None) -> FastAPI:
     settings = settings or AppSettings()
@@ -27,8 +34,8 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> HTMLResponse:
-        jobs = storage.list_jobs(limit=100)
-        body = _intake_page(jobs)
+        jobs = storage.list_jobs(limit=RECENT_JOB_LIMIT)
+        body = _intake_page(jobs, total_jobs=storage.count_jobs())
         return HTMLResponse(_page("Market Signal Console", body))
 
     @app.get("/matches")
@@ -41,7 +48,7 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
 
     @app.get("/api/jobs")
     def jobs_api() -> JSONResponse:
-        jobs = storage.list_jobs(limit=250)
+        jobs = storage.list_jobs(limit=RESULT_JOB_LIMIT)
         return JSONResponse({"jobs": [_job_detail_payload(job) for job in jobs]})
 
     @app.get("/api/jobs/{job_id}")
@@ -75,11 +82,12 @@ def create_app(settings: AppSettings | None = None) -> FastAPI:
         industries = _split_terms(target_industries)
         filter_terms = _split_terms(keywords)
         scored_jobs = score_jobs(
-            storage.list_jobs(limit=250),
+            storage.list_jobs(limit=RESULT_JOB_LIMIT),
             analysis,
             target_roles=roles,
             target_industries=industries,
             keywords=filter_terms,
+            detailed_limit=DETAIL_RESULT_LIMIT,
         )
         body = _matches_page(
             scored_jobs=scored_jobs,
@@ -410,11 +418,11 @@ document.addEventListener('click', async (event) => {
 </script>"""
 
 
-def _intake_page(jobs: list[JobRecord]) -> str:
-    job_count = len(jobs)
+def _intake_page(jobs: list[JobRecord], *, total_jobs: int | None = None) -> str:
+    job_count = total_jobs if total_jobs is not None else len(jobs)
     latest = html.escape(jobs[0].discovered_at or jobs[0].date_posted or "No stored jobs") if jobs else "No stored jobs"
     ready_count = sum(1 for job in jobs if _job_storage_state(job) == "Stored structured record")
-    review_count = max(job_count - ready_count, 0)
+    review_count = max(len(jobs) - ready_count, 0)
     recent_rows = "\n".join(_compact_job_row(job) for job in jobs[:8]) or '<tr><td colspan="9">No scraped jobs found. Run job-scraper run-once first.</td></tr>'
     return f"""<section id="input-strip" class="grid intake-grid">
   <form id="resume-upload" method="post" enctype="multipart/form-data" action="/matches" aria-labelledby="strategy-title">
@@ -444,8 +452,8 @@ def _intake_page(jobs: list[JobRecord]) -> str:
     <span class="eyebrow">Scrape and storage status</span>
     <div class="grid metrics">
       <div class="metric"><span class="muted">Jobs stored</span><strong>{job_count}</strong></div>
-      <div class="metric"><span class="muted">Structured records</span><strong>{ready_count}</strong></div>
-      <div class="metric"><span class="muted">Need review</span><strong>{review_count}</strong></div>
+      <div class="metric"><span class="muted">Recent structured</span><strong>{ready_count}</strong></div>
+      <div class="metric"><span class="muted">Recent need review</span><strong>{review_count}</strong></div>
       <div class="metric"><span class="muted">Latest signal</span><strong>{latest}</strong></div>
     </div>
     <p class="hint">Filters, detail cards, prompt generation, Markdown reports, and API consumers read from the same stored job records.</p>
@@ -469,24 +477,28 @@ def _matches_page(
     if not scored_jobs:
         return """<section class="panel"><h2>No scored jobs available</h2><p class="muted">Run the scraper, then upload a resume to build a market console.</p></section>"""
 
-    categories = summarize_categories(scored_jobs)
+    displayed_jobs = scored_jobs[:DISPLAY_RESULT_LIMIT]
+    detail_jobs = displayed_jobs[:DETAIL_RESULT_LIMIT]
+    detail_ids = {_job_detail_id(getattr(scored, "job")) for scored in detail_jobs}
+    categories = summarize_categories(displayed_jobs)
     top_score = int(round(float(getattr(scored_jobs[0], "score", 0.0))))
     terms = ", ".join(target_roles + target_industries + keywords) or "resume-only scoring"
+    result_summary = _result_summary(len(scored_jobs), len(displayed_jobs), len(detail_jobs))
     category_tabs = "\n".join(
         f'<a class="tab" href="#category-{_dom_id(_category_name(category))}">{html.escape(_category_name(category))} <strong>{_category_count(category)}</strong></a>'
         for category in categories
     )
     analysis_cards = "\n".join(_category_analysis_card(category) for category in categories)
     category_tables = "\n".join(
-        _category_table(_category_name(category), [job for job in scored_jobs if getattr(job, "category", "Uncategorized") == _category_name(category)])
+        _category_table(_category_name(category), [job for job in displayed_jobs if getattr(job, "category", "Uncategorized") == _category_name(category)], detail_ids=detail_ids)
         for category in categories
     )
-    detail_cards = "\n".join(_detail_card(job) for job in scored_jobs)
+    detail_cards = "\n".join(_detail_card(job) for job in detail_jobs)
     hidden_resume = _hidden_resume_fields(analysis, target_roles=target_roles, target_industries=target_industries, keywords=keywords)
     return f"""<section class="panel">
   <span class="eyebrow">Resume-to-market analysis</span>
   <h2>Top scored matches</h2>
-  <p class="muted">Scoring brief: {html.escape(terms)}. Top match score: <span class="score">{top_score}</span>. Job details and Markdown actions remain pinned beside the result list.</p>
+  <p class="muted">Scoring brief: {html.escape(terms)}. Top match score: <span class="score">{top_score}</span>. {result_summary}</p>
   <nav id="category-tabs" class="tabs tab-bar" aria-label="Industry categories">{category_tabs}</nav>
   <div class="grid analysis-grid">{analysis_cards}</div>
 </section>
@@ -505,6 +517,12 @@ def _matches_page(
   </aside>
 </section>
 <form id="resume-prompt-payload" hidden aria-hidden="true" method="post">{hidden_resume}</form>"""
+
+
+def _result_summary(scored_count: int, displayed_count: int, detail_count: int) -> str:
+    if scored_count <= displayed_count:
+        return f"Scored {scored_count} stored jobs. Showing details for the top {detail_count}."
+    return f"Scored {scored_count} stored jobs. Showing the top {displayed_count}; rich detail panes are generated for the top {detail_count} to keep the page responsive."
 
 
 def _table_value(job: JobRecord, keys: tuple[str, ...], value: object) -> str:
@@ -542,8 +560,8 @@ def _category_analysis_card(category: object) -> str:
 </article>"""
 
 
-def _category_table(category_name: str, jobs: list[object]) -> str:
-    rows = "\n".join(_result_row(scored) for scored in jobs)
+def _category_table(category_name: str, jobs: list[object], *, detail_ids: set[str]) -> str:
+    rows = "\n".join(_result_row(scored, detail_ids=detail_ids) for scored in jobs)
     if not rows:
         rows = '<tr><td colspan="4">No jobs in this category.</td></tr>'
     return f"""<section class="category-block">
@@ -555,14 +573,21 @@ def _category_table(category_name: str, jobs: list[object]) -> str:
 </section>"""
 
 
-def _result_row(scored: object) -> str:
+def _result_row(scored: object, *, detail_ids: set[str]) -> str:
     job = getattr(scored, "job")
     detail_id = _job_detail_id(job)
+    if detail_id in detail_ids:
+        role_link = f'<a href="#{detail_id}" data-detail-target="{detail_id}" aria-controls="{detail_id}">{html.escape(_table_value(job, ("job_title", "title"), job.title))}</a>'
+        action = f'<a class="button ghost-button" href="#{detail_id}" data-detail-target="{detail_id}" aria-controls="{detail_id}">Open</a>'
+    else:
+        job_path_id = quote(job.theirstack_id, safe="")
+        role_link = f'<a href="/jobs/{job_path_id}">{html.escape(_table_value(job, ("job_title", "title"), job.title))}</a>'
+        action = f'<a class="button ghost-button" href="/jobs/{job_path_id}">Details</a>'
     return f"""<tr class="job-row {_score_tier(float(getattr(scored, "score", 0.0)))}" data-job-id="{html.escape(job.theirstack_id)}">
   <td class="score">{int(round(float(getattr(scored, "score", 0.0))))}</td>
-  <td><a href="#{detail_id}" data-detail-target="{detail_id}" aria-controls="{detail_id}">{html.escape(_table_value(job, ("job_title", "title"), job.title))}</a></td>
+  <td>{role_link}</td>
   <td>{html.escape(_table_value(job, ("company_name", "company"), job.company))}</td>
-  <td><a class="button ghost-button" href="#{detail_id}" data-detail-target="{detail_id}" aria-controls="{detail_id}">Open</a></td>
+  <td>{action}</td>
 </tr>"""
 
 
@@ -709,7 +734,7 @@ def _job_detail_payload(job: JobRecord) -> dict[str, object]:
         "storage_state": _job_storage_state(job),
         "parse_quality": quality,
         "fields": fields,
-        "raw": job.raw,
+        "raw": _ui_safe_raw(job.raw),
     }
 
 
@@ -900,7 +925,6 @@ def _job_detail_body(job: JobRecord, *, scored: object | None, actions: str) -> 
     if scored is not None:
         return _scored_job_detail_body(job, scored=scored, actions=actions)
 
-    description = _job_description(job)
     title = _format_detail_text(job.title) or f"Stored job {job.theirstack_id}"
     listing_url = _job_listing_url(job)
     application_url = _job_application_url(job)
@@ -926,7 +950,6 @@ def _job_detail_body(job: JobRecord, *, scored: object | None, actions: str) -> 
     {application_link}
   </div>
   {actions}
-  {_detail_block(job, "Description", ("job_description", "description", "job_text", "summary", "overview"), value=description)}
   {_detail_block(job, "Core responsibilities", ("responsibilities", "job_responsibilities", "core_responsibilities"), value=_job_responsibilities(job))}
   {_detail_block(job, "Required qualifications / Requirements", ("requirements", "job_requirements", "required_qualifications", "minimum_qualifications", "qualifications", "candidate_requirements"), value=_job_requirements(job))}
   {_detail_block(job, "Preferred qualifications", ("preferred_qualifications", "nice_to_have", "preferred_skills", "bonus_points"), value=_job_preferred_qualifications(job))}
@@ -1274,7 +1297,6 @@ def _raw_debug_tab(job: JobRecord, scored: object) -> str:
       <h3>Raw scoring/debug summary</h3>
       {_score_metadata(scored)}
     </article>
-    {_detail_block(job, "Description", ("job_description", "description", "job_text", "summary", "overview"), value=_job_description(job))}
     {_detail_block(job, "Core responsibilities", ("responsibilities", "job_responsibilities", "core_responsibilities"), value=_job_responsibilities(job))}
     {_detail_block(job, "Required qualifications / Requirements", ("requirements", "job_requirements", "required_qualifications", "minimum_qualifications", "qualifications", "candidate_requirements"), value=_job_requirements(job))}
     {_detail_block(job, "Preferred qualifications", ("preferred_qualifications", "nice_to_have", "preferred_skills", "bonus_points"), value=_job_preferred_qualifications(job))}
@@ -1523,6 +1545,8 @@ def _job_location(job: JobRecord) -> str:
 
 
 def _job_source(job: JobRecord) -> str:
+    if job.source:
+        return job.source
     source = _job_raw_value(job, ("source", "ats", "job_source"))
     if source:
         return str(source)
@@ -1643,6 +1667,19 @@ def _job_raw_sources(job: JobRecord) -> list[dict[str, object]]:
             if isinstance(extra_fields, dict):
                 sources.append(extra_fields)
     return sources
+
+
+_UI_HIDDEN_RAW_KEYS = frozenset({"job_description", "description", "job_text", "summary", "overview"})
+
+
+def _ui_safe_raw(value: object) -> object:
+    if isinstance(value, dict):
+        return {str(key): _ui_safe_raw(item) for key, item in value.items() if str(key) not in _UI_HIDDEN_RAW_KEYS}
+    if isinstance(value, list):
+        return [_ui_safe_raw(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_ui_safe_raw(item) for item in value)
+    return value
 
 
 def _format_detail_text(value: object) -> str:

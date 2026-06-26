@@ -2,6 +2,18 @@
 
 This workspace currently centers on the `scraper/` Python app: a TheirStack job scraper with SQLite dedupe, a 24-hour daemon, a local resume-prompt web UI, application-pack helpers, and a manual LinkedIn outreach queue.
 
+## OMP and Orca agents
+
+Use `OMP_ORCA_WORKFLOW.md` for OMP, Orca, and Orca dev execution in this repo. `AGENTS.md` is mandatory project policy and is auto-loaded when agents start from the repository root, so prompts do not need to restate it.
+
+Default implementation workers use DeepSeek V4 Pro through Ollama Cloud:
+
+```bash
+omp --model "ollama/deepseek-v4-pro:cloud" --thinking medium
+```
+
+Start non-trivial work with `/plan`, write or update the focused failing test first, use sub-worktrees when isolation helps, and verify the finished change through the containerized path before marking it ready.
+
 ## Fast path
 
 Run commands from `scraper/`.
@@ -154,6 +166,8 @@ Keep API keys, databases, generated resumes, and personal filters out of git.
 
 ## More detail
 
+- `OMP_ORCA_WORKFLOW.md` has the reusable OMP + Orca development workflow.
+- `AGENTS.md` has mandatory agent policy for architecture, orchestration, workers, and verification.
 - `RUNBOOK.md` has the command-oriented operating guide.
 - `TODO.md` has the setup and usage checklist.
 - `notes/scraper-theirstack.md` contains earlier implementation notes and TheirStack-specific details.

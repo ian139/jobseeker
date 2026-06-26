@@ -2,6 +2,16 @@
 
 Use this as the setup checklist for the `scraper/` app.
 
+## OMP and Orca workflow
+
+- [ ] Start OMP from the repository root so `AGENTS.md` is auto-loaded.
+- [ ] Use `OMP_ORCA_WORKFLOW.md` for coordinator, Orca worker, and Orca dev workflow.
+- [ ] Begin non-trivial work with `/plan`.
+- [ ] Add or update the focused failing test before implementation.
+- [ ] Use DeepSeek V4 Pro through Ollama Cloud for implementation workers: `omp --model "ollama/deepseek-v4-pro:cloud" --thinking medium`.
+- [ ] Use sub-worktrees when isolation, competing patches, or verification workers improve safety.
+- [ ] Verify completed feature work through the containerized path before marking it ready.
+
 ## Environment
 
 - [ ] `cd scraper`

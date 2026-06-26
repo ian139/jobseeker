@@ -7,6 +7,19 @@ cd scraper
 source .venv/bin/activate
 ```
 
+## OMP and Orca development workflow
+
+For agent-driven development, start from the repository root and follow `OMP_ORCA_WORKFLOW.md`. `AGENTS.md` is auto-loaded for OMP sessions launched in this workspace; do not ask users to restate it in every prompt.
+
+Default implementation worker:
+
+```bash
+omp --model "ollama/deepseek-v4-pro:cloud" --thinking medium
+```
+
+Use `orca-dev` instead of `orca` only when controlling an Orca development build. Keep the same rules: `/plan` first for non-trivial work, focused failing test first, exact file ownership for workers, sub-worktrees for isolation, and container verification before marking work ready.
+
+
 ## Install or repair dependencies
 
 ```bash

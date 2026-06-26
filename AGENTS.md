@@ -8,6 +8,18 @@ Apply that direction specifically to the job scraper frontend, including the loc
 
 - `scraper/src/job_scraper/web.py`
 
+## OMP + Orca Workflow
+
+Use `OMP_ORCA_WORKFLOW.md` as the reusable operating workflow for OMP coordinators, Orca workers, and Orca dev sessions in this repository. It exists so users do not need to restate "read AGENTS.md" in every prompt.
+
+Mandatory workflow invariants:
+
+- Launch OMP from the repository root so this `AGENTS.md` file is auto-loaded.
+- Treat this file as always-on policy for every coordinator, worker, and review prompt.
+- Use test-first development: add or update the focused failing test before implementation.
+- Use DeepSeek V4 Pro through Ollama Cloud for implementation workers by default: `omp --model "ollama/deepseek-v4-pro:cloud" --thinking medium`.
+- Use `orca-dev` instead of `orca` only when operating an Orca development build; keep the same worktree, terminal, and verification workflow.
+
 ## Architecture Bias: Microservices, Functional Core, Container First
 
 Prefer a functional, service-oriented design over object-oriented architecture.
@@ -269,20 +281,18 @@ Bad worker splits:
 
 ## Worker Launch Commands
 
-Implementation workers may use either DeepSeek V4 Pro or GPT-5.5 at medium thinking.
+Implementation workers default to DeepSeek V4 Pro through Ollama Cloud at medium thinking.
 
-DeepSeek worker:
+DeepSeek V4 Pro worker:
 
 ```bash
-orca terminal create --worktree active --title "<specific-subtask>" --command 'omp --model "openrouter/deepseek/deepseek-v4-pro" --thinking medium' --json
-
+orca terminal create --worktree active --title "<specific-subtask>" --command 'omp --model "ollama/deepseek-v4-pro:cloud" --thinking medium' --json
 ```
 
-GPT-5.5 worker:
+GPT-5.5 fallback worker:
 
 ```bash
 orca terminal create --worktree active --title "<specific-subtask>" --command 'omp --model "openai-codex/gpt-5.5" --thinking medium' --json
-
 ```
 
 Then wait for the worker and send a narrow assignment:
@@ -300,8 +310,8 @@ Use sub-worktree workers when isolation is beneficial.
 Default pattern:
 
 ```bash
-orca worktree create --name "<parent-feature>-<specific-subtask>" --json
-orca terminal create --worktree "<parent-feature>-<specific-subtask>" --title "<specific-subtask>" --command 'omp --model "openrouter/deepseek/deepseek-v4-pro" --thinking medium' --json
+orca worktree create --name "<parent-feature>-<specific-subtask>" --parent-worktree active --json
+orca terminal create --worktree "<parent-feature>-<specific-subtask>" --title "<specific-subtask>" --command 'omp --model "ollama/deepseek-v4-pro:cloud" --thinking medium' --json
 orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
 orca terminal send --terminal <handle> --text '<narrow task prompt>' --enter --json
 
@@ -348,6 +358,9 @@ Workers must:
 ## Worker Prompt Template
 
 ```text
+Context:
+AGENTS.md is mandatory project policy and is already available in this workspace. Follow it without asking the user to restate it. Use OMP_ORCA_WORKFLOW.md for OMP + Orca execution details.
+
 Target: <exact files/symbols>.
 
 Change:
@@ -356,23 +369,27 @@ Change:
 Non-goals:
 Do not edit <files/subsystems>.
 Do not do broad cleanup.
-Do not create a new worktree.
+Do not create a new worktree unless explicitly assigned one.
 
 Ownership:
 You own only <files>.
 Do not touch anything else.
 
+Development rule:
+Add or update the focused failing test first, then implement the smallest passing patch.
+
 Acceptance:
 <focused checks or observable behavior>.
 
 Verification:
-Run <specific command or focused test>.
+Run <specific command or focused test>. Do not run project-wide gates unless assigned.
 
 Report:
 1. Files changed
-2. Verification run
-3. Result
-4. Unresolved risks
+2. Test-first evidence
+3. Verification run
+4. Result
+5. Unresolved risks
 
 ```
 

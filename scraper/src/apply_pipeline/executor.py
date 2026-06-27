@@ -52,7 +52,7 @@ def execute_actions(
     *,
     resume_path: str | None = None,
 ) -> list[ExecutorAction]:
-    if decision.status not in {StepStatus.CONTINUE, StepStatus.DRY_RUN_READY}:
+    if decision.status not in {StepStatus.CONTINUE, StepStatus.DRY_RUN_READY, StepStatus.NEEDS_REVIEW}:
         return []
     if decision.status != StepStatus.CONTINUE and any(action.kind == "click" for action in decision.actions):
         raise ValueError("Refusing to click on a terminal application decision")

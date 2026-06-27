@@ -86,7 +86,7 @@ Hard rules:
 
 Soft preference:
 
-- Use minimal Playwright R&D, not brittle per-board automations.
+- Use minimal Playwright R&amp;D, not brittle per-board automations.
 - Prefer deterministic observation and guarded generic execution.
 - When a board fails, collect samples and reasons, then add targeted policies/fixtures.
 

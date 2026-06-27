@@ -200,7 +200,7 @@ cd scraper
 .venv/bin/playwright install chromium
 ```
 
-Then run. If `--profile-json` and `--resume` are omitted, the live dry run uses `AGENTS.md` applicant reference defaults: `Main_Resume.pdf`, LinkedIn, and personal site. If `OLLAMA_CLOUD_API_KEY` or `OLLAMA_API_KEY` is set, live mode also uses the optional Ollama Cloud DeepSeek resolver after deterministic fact matching; configure it with `OLLAMA_CLOUD_BASE_URL` and `OLLAMA_CLOUD_MODEL` (`deepseek-v4-pro` by default). Login/sign-in pages, password/code fields, CAPTCHA, and assessment blockers stop as `blocked` before filling or LLM resolution. The LLM receives only eligible unresolved non-sensitive field metadata, profile facts, and job description text; it does not read or upload the resume PDF as prompt context, so put resume-derived facts such as skills or summaries in `--profile-json` when you want them available for answer mapping.
+Then run. If `--profile-json` and `--resume` are omitted, the live dry run uses `AGENTS.md` applicant reference defaults: `Main_Resume.pdf`, LinkedIn, and personal site. If `OLLAMA_CLOUD_API_KEY` or `OLLAMA_API_KEY` is set, live mode also uses the optional Ollama Cloud DeepSeek resolver after deterministic fact matching; configure it with `OLLAMA_CLOUD_BASE_URL` and `OLLAMA_CLOUD_MODEL` (`deepseek-v4-pro` by default). Login/sign-in pages, password/code fields, CAPTCHA, and assessment blockers stop as `blocked` before filling or LLM resolution. The LLM receives eligible unresolved non-sensitive field metadata, profile facts, extracted `resume_summary` / `skills`, and job description text.
 
 ```bash
 cd scraper
@@ -213,6 +213,12 @@ Explicit profile/resume arguments override those defaults:
 .venv/bin/job-sync apply-dry-run --live --limit 1 --max-pages 6 \
   --profile-json path/to/profile.json \
   --resume path/to/resume.pdf
+```
+
+To materialize resume context into a profile JSON first:
+
+```bash
+.venv/bin/job-sync profile-from-resume --resume ../Main_Resume.pdf --output data/profile.json
 ```
 
 Add `--headed` to show the browser, and add `--manual-handoff` to keep it open after `dry_run_ready`, `needs_review`, `blocked`, or `failed` so you can inspect/edit the page. Pressing Enter does not resume automation or submit anything; it ends inspection and closes the Playwright browser context. Use `--no-llm` to force deterministic-only resolution even when Ollama Cloud credentials are present:
@@ -233,7 +239,9 @@ Profile JSON is a flat object of known facts, for example:
   "location": "Toronto, ON",
   "linkedin": "https://www.linkedin.com/in/ada",
   "github": "https://github.com/ada",
-  "portfolio": "https://ada.example.com"
+  "portfolio": "https://ada.example.com",
+  "resume_summary": "Extracted resume text used by the LLM for non-sensitive fields.",
+  "skills": "Python, Playwright, SQLite"
 }
 ```
 

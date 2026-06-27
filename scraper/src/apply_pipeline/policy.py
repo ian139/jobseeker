@@ -38,8 +38,6 @@ def plan_guarded_actions(snapshot: PageSnapshot, resolved: ResolverOutput) -> Ru
     blockers = page_blockers(snapshot)
     if blockers:
         return RunDecision(StepStatus.BLOCKED, blockers[0])
-    if resolved.needs_review:
-        return RunDecision(StepStatus.NEEDS_REVIEW, resolved.needs_review[0])
 
     field_ids = {field.id: field for field in snapshot.fields}
     actions: list[ExecutorAction] = []
@@ -59,6 +57,9 @@ def plan_guarded_actions(snapshot: PageSnapshot, resolved: ResolverOutput) -> Ru
             actions.append(ExecutorAction("fill", field.id, answer.value))
         else:
             return RunDecision(StepStatus.NEEDS_REVIEW, f"unsupported field kind: {field.kind}")
+
+    if resolved.needs_review:
+        return RunDecision(StepStatus.NEEDS_REVIEW, resolved.needs_review[0], tuple(actions))
 
     buttons = {button.id: button for button in snapshot.buttons}
     if resolved.submit_button_id:

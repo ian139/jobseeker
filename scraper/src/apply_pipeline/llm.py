@@ -42,8 +42,8 @@ class OllamaCloudAnswerClient:
                         "role": "system",
                         "content": (
                             "You map job application form fields to answers. Return only JSON. "
-                            "Use only the supplied applicant facts and job description. "
-                            "Do not infer sensitive/legal/identity answers. If uncertain, mark needs_review."
+                            "Use only the supplied applicant facts, resume_summary, skills, and job description. "
+                            "Answer identity/contact fields only when the value is explicitly present in supplied context. Do not guess sensitive/legal answers. If uncertain, mark needs_review."
                         ),
                     },
                     {"role": "user", "content": json.dumps(payload, sort_keys=True)},

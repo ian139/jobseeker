@@ -89,22 +89,20 @@ Goal: reliably pick jobs and record attempts.
 ### Tasks
 
 1. Add application-run storage helpers.
-   - File: `scraper/src/apply_pipeline/runs.py`
-   - Functions:
-     - `start_application_run(connection, job_id, started_at) -> int`
-     - `finish_application_run(connection, run_id, status, reason, final_url, actions) -> None`
-     - `record_application_page(connection, run_id, page_index, snapshot, resolver_output=None) -> None`
-
+  - File: `scraper/src/apply_pipeline/runs.py`
+  - Functions:
+    - `start_application_run(connection, job_id, started_at) -> int`
+    - `finish_application_run(connection, run_id, status, reason, final_url, actions) -> None`
+    - `record_application_page(connection, run_id, page_index, snapshot, resolver_output=None) -> None`
 2. Extend backlog selection.
-   - File: `scraper/src/apply_pipeline/backlog.py`
-   - Keep selecting rows from `jobs` with no terminal application run.
-   - Add filters later only if needed: company, date, status, limit.
-
+  - File: `scraper/src/apply_pipeline/backlog.py`
+  - Keep selecting rows from `jobs` with no terminal application run.
+  - Add filters later only if needed: company, date, status, limit.
 3. Add tests.
-   - File: `scraper/tests/test_apply_pipeline.py`
-   - Prove terminal statuses skip a job.
-   - Prove failed runs do not permanently skip a job unless policy says so.
-   - Prove page snapshots are persisted as JSON.
+  - File: `scraper/tests/test_apply_pipeline.py`
+  - Prove terminal statuses skip a job.
+  - Prove failed runs do not permanently skip a job unless policy says so.
+  - Prove page snapshots are persisted as JSON.
 
 ### Acceptance
 
@@ -119,32 +117,30 @@ Goal: convert a live page into a normalized page snapshot without deciding answe
 ### Tasks
 
 1. Implement observer module.
-   - File: `scraper/src/apply_pipeline/observer.py`
-   - Inputs: Playwright page/frame handle.
-   - Output: `PageSnapshot`.
-   - Capture:
-     - `input`, `textarea`, `select`, radio, checkbox, file, contenteditable/typeahead-like fields
-     - visible labels via `label[for]`, parent labels, aria-label, placeholder, nearby text
-     - required state via `required`, `aria-required`, label markers
-     - options for selects/radios/checkbox groups
-     - buttons/links that look actionable
-     - visible errors/blockers
-
+  - File: `scraper/src/apply_pipeline/observer.py`
+  - Inputs: Playwright page/frame handle.
+  - Output: `PageSnapshot`.
+  - Capture:
+    - `input`, `textarea`, `select`, radio, checkbox, file, contenteditable/typeahead-like fields
+    - visible labels via `label[for]`, parent labels, aria-label, placeholder, nearby text
+    - required state via `required`, `aria-required`, label markers
+    - options for selects/radios/checkbox groups
+    - buttons/links that look actionable
+    - visible errors/blockers
 2. Add static HTML fixture tests first.
-   - File: `scraper/tests/test_apply_pipeline.py`
-   - Current tests use inline static HTML fixtures; split to `scraper/tests/fixtures/apply_pages/` only when fixture size justifies it.
-   - Cover:
-     - simple text fields
-     - select options
-     - radio/checkbox groups
-     - file upload
-     - iframe/frame form if practical
-     - disabled buttons
-     - visible validation errors
-
+  - File: `scraper/tests/test_apply_pipeline.py`
+  - Current tests use inline static HTML fixtures; split to `scraper/tests/fixtures/apply_pages/` only when fixture size justifies it.
+  - Cover:
+    - simple text fields
+    - select options
+    - radio/checkbox groups
+    - file upload
+    - iframe/frame form if practical
+    - disabled buttons
+    - visible validation errors
 3. Add Playwright dependency only when implementing live observation.
-   - Update `scraper/pyproject.toml`.
-   - Add a smoke command or skip marker for browser-dependent tests if needed.
+  - Update `scraper/pyproject.toml`.
+  - Add a smoke command or skip marker for browser-dependent tests if needed.
 
 ### Acceptance
 
@@ -159,33 +155,30 @@ Goal: map known facts to answers using strict JSON, while refusing unknown/sensi
 ### Tasks
 
 1. Define resolver input/output JSON schemas.
-   - File: `scraper/src/apply_pipeline/resolver.py`
-   - Inputs:
-     - `PageSnapshot`
-     - profile facts
-     - resume facts
-     - job description/raw job
-     - policies
-   - Output:
-     - `answers: [{field_id, value}]`
-     - `next_button_id | null`
-     - `submit_button_id | null`
-     - `needs_review: [reason]`
-
+  - File: `scraper/src/apply_pipeline/resolver.py`
+  - Inputs:
+    - `PageSnapshot`
+    - profile facts
+    - resume facts
+    - job description/raw job
+    - policies
+  - Output:
+    - `answers: [{field_id, value}]`
+    - `next_button_id | null`
+    - `submit_button_id | null`
+    - `needs_review: [reason]`
 2. Add deterministic resolver helpers before any LLM adapter.
-   - Match common fields: name, email, phone, location, LinkedIn, GitHub, portfolio.
-   - Match resume upload field.
-   - Refuse sensitive/legal/unknown fields.
-
+  - Match common fields: name, email, phone, location, LinkedIn, GitHub, portfolio.
+  - Match resume upload field.
+  - Refuse sensitive/legal/unknown fields.
 3. Keep any future LLM adapter behind a narrow interface.
-   - The adapter may accept only normalized JSON and return strict JSON.
-   - It must not see raw browser handles.
-
+  - The adapter may accept only normalized JSON and return strict JSON.
+  - It must not see raw browser handles.
 4. Add tests.
-   - Known fields resolve.
-   - Unknown required fields produce `needs_review`.
-   - Sensitive fields produce `needs_review`.
-   - Final submit identification is preserved but not clicked.
+  - Known fields resolve.
+  - Unknown required fields produce `needs_review`.
+  - Sensitive fields produce `needs_review`.
+  - Final submit identification is preserved but not clicked.
 
 ### Acceptance
 
@@ -200,26 +193,24 @@ Goal: safely perform fills and non-final navigation only.
 ### Tasks
 
 1. Implement executor module.
-   - File: `scraper/src/apply_pipeline/executor.py`
-   - Input: Playwright page + `PageSnapshot` + `RunDecision` actions.
-   - Supported actions:
-     - fill text/textarea/typeahead
-     - select options
-     - check/uncheck checkbox/radio
-     - upload configured resume file only
-     - click safe non-final navigation
-
+  - File: `scraper/src/apply_pipeline/executor.py`
+  - Input: Playwright page + `PageSnapshot` + `RunDecision` actions.
+  - Supported actions:
+    - fill text/textarea/typeahead
+    - select options
+    - check/uncheck checkbox/radio
+    - upload configured resume file only
+    - click safe non-final navigation
 2. Enforce guards.
-   - Reject final submit candidates.
-   - Reject unknown field IDs.
-   - Reject unsupported controls.
-   - Reject file uploads except configured resume.
-   - Stop on disabled navigation.
-
+  - Reject final submit candidates.
+  - Reject unknown field IDs.
+  - Reject unsupported controls.
+  - Reject file uploads except configured resume.
+  - Stop on disabled navigation.
 3. Add tests with fake page/action adapter.
-   - Verify action sequence.
-   - Verify final submit is never clicked.
-   - Verify unknown action fails closed.
+  - Verify action sequence.
+  - Verify final submit is never clicked.
+  - Verify unknown action fails closed.
 
 ### Acceptance
 
@@ -234,33 +225,31 @@ Goal: run the full dry-run application preparation loop for selected jobs.
 ### Tasks
 
 1. Add CLI command.
-   - Existing entrypoint: `job-sync` or new script name if renamed later.
-   - Candidate command:
-     ```bash
-     .venv/bin/job-sync apply-dry-run --limit 3 --max-pages 6
-     ```
-
+  - Existing entrypoint: `job-sync` or new script name if renamed later.
+  - Candidate command:
+    ```bash
+    .venv/bin/job-sync apply-dry-run --limit 3 --max-pages 6
+    ```
 2. Loop behavior.
-   - Select next backlog jobs.
-   - Start application run.
-   - Open `canonical_url`/apply URL.
-   - For each page:
-     - observe
-     - persist snapshot
-     - resolve
-     - plan guarded actions
-     - if `continue`: execute actions and observe next page
-     - if terminal: finish run
-   - Stop at max pages with `needs_review`.
-
+  - Select next backlog jobs.
+  - Start application run.
+  - Open `canonical_url`/apply URL.
+  - For each page:
+    - observe
+    - persist snapshot
+    - resolve
+    - plan guarded actions
+    - if `continue`: execute actions and observe next page
+    - if terminal: finish run
+  - Stop at max pages with `needs_review`.
 3. Results.
-   - Print JSON summary:
-     - jobs attempted
-     - dry_run_ready
-     - needs_review
-     - blocked
-     - failed
-     - run IDs
+  - Print JSON summary:
+    - jobs attempted
+    - dry_run_ready
+    - needs_review
+    - blocked
+    - failed
+    - run IDs
 
 ### Acceptance
 
@@ -268,30 +257,27 @@ Goal: run the full dry-run application preparation loop for selected jobs.
 - `application_runs` and `application_pages` are populated.
 - A terminal run prevents immediate duplicate processing.
 
-## Phase 6 — Failure sampling and R&D loop
+## Phase 6 — Failure sampling and R&amp;D loop
 
 Goal: make failures actionable without brittle per-board automation.
 
 ### Tasks
 
 1. Add sampler command.
-   ```bash
+  ```bash
    .venv/bin/job-sync apply-sample-failures --status blocked --limit 10
-   ```
-
+  ```
 2. Group by reason and board/apply host.
-
 3. Produce review output:
-   - run ID
-   - job title/company
-   - URL
-   - blocker/reason
-   - snapshot path or DB ID
-
+  - run ID
+  - job title/company
+  - URL
+  - blocker/reason
+  - snapshot path or DB ID
 4. Add hand-annotation support later:
-   - policy notes per host
-   - field label aliases
-   - unsupported control notes
+  - policy notes per host
+  - field label aliases
+  - unsupported control notes
 
 ### Acceptance
 
@@ -307,12 +293,12 @@ Goal: optionally consume the friend’s job-source API without coupling the appl
 1. Build read client for `GET /v1/jobs` only after base URL/key are configured.
 2. Normalize `CareerSourceJob` into local `jobs` table or a staging table.
 3. Map fields:
-   - `external_id` → source external ID
-   - `title` → title
-   - `company` → company_name
-   - `listing_url/apply_url` → canonical/apply URL
-   - `date_posted` → posted_at
-   - `raw_json` → raw_json
+  - `external_id` → source external ID
+  - `title` → title
+  - `company` → company_name
+  - `listing_url/apply_url` → canonical/apply URL
+  - `date_posted` → posted_at
+  - `raw_json` → raw_json
 4. Do not implement push/ingest unless he provides a write API contract.
 
 ### Acceptance
@@ -328,7 +314,7 @@ Goal: optionally consume the friend’s job-source API without coupling the appl
 4. Build fake executor tests.
 5. Wire one-job dry-run CLI.
 6. Add live Playwright smoke.
-7. Add R&D failure sampler.
+7. Add R&amp;D failure sampler.
 
 ## Current implementation status
 

@@ -421,18 +421,20 @@ def test_sync_can_allow_multiple_jobs_per_company() -> None:
 def test_apply_dry_run_live_uses_default_profile_loader_when_args_omitted(monkeypatch, tmp_path, capsys) -> None:
     seen: dict[str, object] = {}
 
-    def fake_load_applicant_profile(path: str | None, *, resume_path: str | None = None):
+    def fake_load_applicant_profile(path: str | None, *, resume_path: str | None = None, exclude_facts=()):
         seen["profile_path"] = path
         seen["resume_path"] = resume_path
+        seen["exclude_facts"] = tuple(exclude_facts)
         return "profile"
 
-    def fake_run_backlog_with_playwright(connection, *, profile, now, limit, max_pages, headed, manual_handoff, use_llm):
+    def fake_run_backlog_with_playwright(connection, *, profile, now, limit, max_pages, headed, manual_handoff, use_llm, block_linkedin_jobs):
         seen["profile"] = profile
         seen["limit"] = limit
         seen["max_pages"] = max_pages
         seen["headed"] = headed
         seen["manual_handoff"] = manual_handoff
         seen["use_llm"] = use_llm
+        seen["block_linkedin_jobs"] = block_linkedin_jobs
         return {"attempted": 0, "dry_run_ready": 0, "needs_review": 0, "blocked": 0, "failed": 0, "run_ids": []}
 
     monkeypatch.setenv("JOB_SYNC_DB_PATH", str(tmp_path / "jobs.sqlite3"))
@@ -444,11 +446,47 @@ def test_apply_dry_run_live_uses_default_profile_loader_when_args_omitted(monkey
     assert seen == {
         "profile_path": None,
         "resume_path": None,
+        "exclude_facts": (),
         "profile": "profile",
         "limit": 1,
         "max_pages": 6,
         "headed": False,
         "manual_handoff": False,
         "use_llm": True,
+        "block_linkedin_jobs": False,
     }
     assert json.loads(capsys.readouterr().out)["attempted"] == 0
+
+
+def test_apply_dry_run_live_forwards_linkedin_blocker_and_profile_exclusion(monkeypatch, tmp_path, capsys) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_load_applicant_profile(path: str | None, *, resume_path: str | None = None, exclude_facts=()):
+        seen["exclude_facts"] = tuple(exclude_facts)
+        return "profile"
+
+    def fake_run_backlog_with_playwright(connection, *, profile, now, limit, max_pages, headed, manual_handoff, use_llm, block_linkedin_jobs):
+        seen["block_linkedin_jobs"] = block_linkedin_jobs
+        return {"attempted": 0, "dry_run_ready": 0, "needs_review": 0, "blocked": 0, "failed": 0, "run_ids": []}
+
+    monkeypatch.setenv("JOB_SYNC_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    monkeypatch.setattr(jobs_module, "load_applicant_profile", fake_load_applicant_profile)
+    monkeypatch.setattr(jobs_module, "run_backlog_with_playwright", fake_run_backlog_with_playwright)
+
+    jobs_module.main(["apply-dry-run", "--live", "--block-linkedin-jobs", "--exclude-profile-fact", "linkedin"])
+
+    assert seen == {"exclude_facts": ("linkedin",), "block_linkedin_jobs": True}
+    assert json.loads(capsys.readouterr().out)["attempted"] == 0
+
+
+def test_profile_from_resume_command_writes_resume_profile(tmp_path, capsys) -> None:
+    resume = tmp_path / "resume.txt"
+    output = tmp_path / "profile.json"
+    resume.write_text("Ian Rapko\n\nSkills:\nPython, Playwright\n\nExperience:\nAutomation")
+
+    jobs_module.main(["profile-from-resume", "--resume", str(resume), "--output", str(output)])
+
+    payload = json.loads(output.read_text())
+    assert "Ian Rapko" in payload["resume_summary"]
+    assert payload["skills"] == "Python, Playwright"
+    assert "Wrote" in capsys.readouterr().out

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Iterable, Protocol
+from urllib.parse import urlsplit
 
 from .backlog import job_application_url, next_backlog_jobs
 from .contracts import ExecutorAction, StepStatus
@@ -20,6 +22,111 @@ DEFAULT_RESUME_LABEL = "Resume file:"
 DEFAULT_LINKEDIN_LABEL = "LinkedIn:"
 DEFAULT_PERSONAL_SITE_LABEL = "Personal site:"
 HANDOFF_STATUSES = frozenset({StepStatus.DRY_RUN_READY, StepStatus.NEEDS_REVIEW, StepStatus.BLOCKED, StepStatus.FAILED})
+RESUME_SUMMARY_MAX_CHARS = 8000
+SKILLS_MAX_CHARS = 2000
+EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+PHONE_RE = re.compile(r"(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}")
+COMMON_RESUME_SKILLS = (
+    "Python",
+    "Java",
+    "C++",
+    "JavaScript",
+    "TypeScript",
+    "React",
+    "SQL",
+    "SQLite",
+    "PostgreSQL",
+    "Playwright",
+    "Docker",
+    "Git",
+    ".NET",
+    "Razor",
+    "CI/CD",
+)
+
+
+def normalized_name(value: str) -> str:
+    return value.title() if value.isupper() else value
+
+
+
+
+def extract_name_from_resume(resume_text: str) -> tuple[str, str, str] | None:
+    for line in resume_text.splitlines()[:8]:
+        candidate = " ".join(line.split())
+        if not candidate or "@" in candidate or "http" in candidate.lower() or any(char.isdigit() for char in candidate):
+            continue
+        parts = candidate.split()
+        if len(parts) >= 2:
+            full_name = normalized_name(candidate)
+            name_parts = full_name.split()
+            return full_name, name_parts[0], name_parts[-1]
+    return None
+
+
+def extract_contact_facts(resume_text: str) -> dict[str, str]:
+    facts: dict[str, str] = {}
+    name = extract_name_from_resume(resume_text)
+    if name:
+        facts["full_name"], facts["first_name"], facts["last_name"] = name
+    email = EMAIL_RE.search(resume_text)
+    if email:
+        facts["email"] = email.group(0)
+    phone = PHONE_RE.search(resume_text)
+    if phone:
+        facts["phone"] = phone.group(0)
+    return facts
+
+
+
+
+def normalized_resume_text(value: str) -> str:
+    return "\n".join(line.strip() for line in value.replace("\x00", "").splitlines() if line.strip())
+
+
+def extract_pdf_text(path: Path) -> str:
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:
+        raise RuntimeError("Install the live dependency group to extract PDF resume text: python -m pip install -e '.[live]'") from exc
+    reader = PdfReader(str(path))
+    return "\n".join(page.extract_text() or "" for page in reader.pages)
+
+
+def extract_resume_text(path: str | Path) -> str:
+    resume_path = Path(path).expanduser()
+    if resume_path.suffix.casefold() == ".pdf":
+        return normalized_resume_text(extract_pdf_text(resume_path))
+    return normalized_resume_text(resume_path.read_text(errors="ignore"))
+
+
+def extract_skills_text(resume_text: str) -> str:
+    match = re.search(r"(?ims)^skills?\s*(?:\n|:)(.*?)(?=^\s*[A-Z][A-Za-z /&-]{2,}\s*(?:\n|:)|\Z)", resume_text)
+    if match:
+        return " ".join(match.group(1).split())[:SKILLS_MAX_CHARS]
+    found = [skill for skill in COMMON_RESUME_SKILLS if re.search(rf"(?<![A-Za-z0-9+#.]){re.escape(skill)}(?![A-Za-z0-9+#.])", resume_text, re.IGNORECASE)]
+    return ", ".join(dict.fromkeys(found))[:SKILLS_MAX_CHARS]
+
+
+def resume_facts_from_path(path: str | Path) -> dict[str, str]:
+    text = extract_resume_text(path)
+    if not text:
+        return {}
+    facts = {**extract_contact_facts(text), "resume_summary": text[:RESUME_SUMMARY_MAX_CHARS]}
+    skills = extract_skills_text(text)
+    if skills:
+        facts["skills"] = skills
+    return facts
+
+
+LINKEDIN_HOST_SUFFIX = "linkedin.com"
+
+
+def is_linkedin_url(value: str) -> bool:
+    host = urlsplit(value).netloc.lower().split("@")[-1].split(":")[0]
+    return host == LINKEDIN_HOST_SUFFIX or host.endswith(f".{LINKEDIN_HOST_SUFFIX}")
+
+
 
 
 class PageSession(Protocol):
@@ -152,21 +259,34 @@ def default_applicant_profile(*, agents_path: str | Path | None = None) -> Appli
     return parse_applicant_reference(resolved_agents_path)
 
 
+def with_resume_facts(facts: dict[str, str], resume_path: str | None) -> dict[str, str]:
+    if not resume_path or not Path(resume_path).expanduser().exists():
+        return facts
+    enriched = dict(facts)
+    for key, value in resume_facts_from_path(resume_path).items():
+        enriched.setdefault(key, value)
+    return enriched
+
 def load_applicant_profile(
     path: str | Path | None,
     *,
     resume_path: str | None = None,
     include_defaults: bool = True,
     agents_path: str | Path | None = None,
+    exclude_facts: Iterable[str] = (),
 ) -> ApplicantProfile:
     base = default_applicant_profile(agents_path=agents_path) if include_defaults else ApplicantProfile(facts={}, resume_path=None)
+    excluded = {str(key).strip().lower() for key in exclude_facts if str(key).strip()}
+    selected_resume_path = resume_path or base.resume_path
     if path is None:
-        return ApplicantProfile(facts=base.facts, resume_path=resume_path or base.resume_path)
+        facts = {key: value for key, value in base.facts.items() if key.lower() not in excluded}
+        return ApplicantProfile(facts=with_resume_facts(facts, selected_resume_path), resume_path=selected_resume_path)
     raw = json.loads(Path(path).expanduser().read_text())
     if not isinstance(raw, dict):
         raise ValueError("Applicant profile JSON must be an object")
     facts = {**base.facts, **{str(key): str(value) for key, value in raw.items() if value is not None and str(value).strip()}}
-    return ApplicantProfile(facts=facts, resume_path=resume_path or base.resume_path)
+    facts = {key: value for key, value in facts.items() if key.lower() not in excluded}
+    return ApplicantProfile(facts=with_resume_facts(facts, selected_resume_path), resume_path=selected_resume_path)
 
 
 @dataclass
@@ -225,6 +345,7 @@ def run_application_once(
     now: Any,
     max_pages: int = 6,
     llm_client: LLMAnswerClient | None = None,
+    block_linkedin_jobs: bool = False,
 ) -> tuple[int, StepStatus]:
     if max_pages < 1:
         raise ValueError("max_pages must be at least 1")
@@ -244,8 +365,25 @@ def run_application_once(
                 actions=[],
             )
             return run_id, final_status
+        if block_linkedin_jobs and is_linkedin_url(url):
+            final_status = StepStatus.BLOCKED
+            finish_application_run(
+                connection,
+                run_id=run_id,
+                status=final_status,
+                reason=f"LinkedIn job URL blocked by --block-linkedin-jobs: {url}",
+                finished_at=now(),
+                final_url=url,
+                actions=[],
+            )
+            return run_id, final_status
+
 
         page.goto(url, wait_until="domcontentloaded")
+        try:
+            page.wait_for_load_state("networkidle")
+        except Exception:
+            pass
         for page_index in range(max_pages):
             snapshot = observe_page(page)
             resolved = resolve_snapshot(
@@ -266,7 +404,7 @@ def run_application_once(
                 created_at=now(),
             )
             if decision.status != StepStatus.CONTINUE:
-                if decision.status == StepStatus.DRY_RUN_READY:
+                if decision.status in {StepStatus.DRY_RUN_READY, StepStatus.NEEDS_REVIEW}:
                     actions.extend(execute_actions(action_target, decision, resume_path=profile.resume_path))
                 finish_application_run(
                     connection,
@@ -319,26 +457,55 @@ def run_backlog_applications(
     handoff_callback: ManualHandoff | None = None,
     close_browser: bool = True,
     llm_client: LLMAnswerClient | None = None,
+    block_linkedin_jobs: bool = False,
 ) -> dict[str, int | list[int]]:
     summary = ApplicationRunSummary()
     try:
-        for job in next_backlog_jobs(connection, limit=limit):
-            summary.attempted += 1
-            page = browser.new_page()
-            run_id, status = run_application_once(
-                connection,
-                job=job,
-                page=page,
-                action_target=action_target_factory(page),
-                profile=profile,
-                now=now,
-                max_pages=max_pages,
-                llm_client=llm_client,
-            )
-            summary.run_ids.append(run_id)
-            summary.record(status)
-            if handoff_callback is not None and status in HANDOFF_STATUSES:
-                handoff_callback(run_id, status, page)
+        while summary.attempted < limit:
+            jobs = next_backlog_jobs(connection, limit=max(limit * 5, 10))
+            if not jobs:
+                break
+            saw_unattempted_job = False
+            for job in jobs:
+                url = job_application_url(job)
+                if block_linkedin_jobs and url and is_linkedin_url(url):
+                    run_id = start_application_run(connection, job_id=int(job["id"]), started_at=now())
+                    status = StepStatus.BLOCKED
+                    finish_application_run(
+                        connection,
+                        run_id=run_id,
+                        status=status,
+                        reason=f"LinkedIn job URL blocked by --block-linkedin-jobs: {url}",
+                        finished_at=now(),
+                        final_url=url,
+                        actions=[],
+                    )
+                    summary.run_ids.append(run_id)
+                    summary.record(status)
+                    saw_unattempted_job = True
+                    continue
+                if summary.attempted >= limit:
+                    break
+                summary.attempted += 1
+                saw_unattempted_job = True
+                page = browser.new_page()
+                run_id, status = run_application_once(
+                    connection,
+                    job=job,
+                    page=page,
+                    action_target=action_target_factory(page),
+                    profile=profile,
+                    now=now,
+                    max_pages=max_pages,
+                    llm_client=llm_client,
+                    block_linkedin_jobs=block_linkedin_jobs,
+                )
+                summary.run_ids.append(run_id)
+                summary.record(status)
+                if handoff_callback is not None and status in HANDOFF_STATUSES:
+                    handoff_callback(run_id, status, page)
+            if not saw_unattempted_job:
+                break
     finally:
         if close_browser:
             browser.close()
@@ -355,6 +522,7 @@ def run_backlog_with_playwright(
     headed: bool = False,
     manual_handoff: bool = False,
     use_llm: bool = True,
+    block_linkedin_jobs: bool = False,
 ) -> dict[str, int | list[int]]:
     try:
         from playwright.sync_api import sync_playwright
@@ -381,4 +549,5 @@ def run_backlog_with_playwright(
             handoff_callback=prompt_for_manual_handoff if manual_handoff else None,
             close_browser=not manual_handoff,
             llm_client=llm_client,
+            block_linkedin_jobs=block_linkedin_jobs,
         )

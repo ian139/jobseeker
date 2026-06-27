@@ -6,11 +6,11 @@ import pytest
 from apply_pipeline.backlog import job_application_url, next_backlog_jobs
 from apply_pipeline.contracts import ExecutorAction, ObservedButton, ObservedField, PageSnapshot, ResolvedAnswer, ResolverOutput, RunDecision, StepStatus
 from apply_pipeline.executor import FakeActionTarget, execute_actions
-from apply_pipeline.llm import ollama_cloud_client_from_env
+from apply_pipeline.llm import llm_payload, ollama_cloud_client_from_env
 from apply_pipeline.observer import observe_html, observe_page
 from apply_pipeline.policy import plan_guarded_actions
 from apply_pipeline.resolver import resolve_snapshot
-from apply_pipeline.runner import ApplicantProfile, default_applicant_profile, load_applicant_profile, run_application_once, run_backlog_applications
+from apply_pipeline.runner import ApplicantProfile, default_applicant_profile, load_applicant_profile, resume_facts_from_path, run_application_once, run_backlog_applications
 from apply_pipeline.runs import finish_application_run, record_application_page, start_application_run
 from sync.jobs import initialize_database, sample_application_failures, upsert_job
 
@@ -88,6 +88,24 @@ def test_guarded_actions_block_login_forms_before_llm_or_fill() -> None:
 
     assert decision.status == StepStatus.BLOCKED
     assert "login" in decision.reason.lower() or "sign-in" in decision.reason.lower()
+
+
+def test_observer_ignores_script_text_for_blockers() -> None:
+    snapshot = observe_html(
+        """
+        <script>{"description":"assessment required in backend JSON"}</script>
+        <form>
+          <label for="email">Email</label><input id="email" required>
+          <button id="next">Continue</button>
+        </form>
+        """,
+        url="https://example.com/apply",
+    )
+
+    assert snapshot.blockers == ()
+    assert snapshot.errors == ()
+    assert snapshot.fields[0].label == "Email"
+    assert snapshot.buttons[0].text == "Continue"
 
 
 def test_backlog_skips_jobs_with_terminal_application_runs() -> None:
@@ -368,11 +386,55 @@ def test_profile_json_and_resume_cli_override_defaults(tmp_path) -> None:
     assert profile_with_json_resume.resume_path.endswith("Main_Resume.pdf")
     assert profile_with_json_resume.facts["resume_path"] == "profile.pdf"
 
+    profile_without_linkedin = load_applicant_profile(
+        profile_json,
+        agents_path=agents_path,
+        exclude_facts=("linkedin",),
+    )
+    assert "linkedin" not in profile_without_linkedin.facts
+    assert profile_without_linkedin.facts["portfolio"] == "https://immemorized.com"
+
     empty_agents = tmp_path / "EMPTY_AGENTS.md"
     empty_agents.write_text("# Agent Operating Notes\n")
     empty_profile = default_applicant_profile(agents_path=empty_agents)
     assert empty_profile.facts == {}
     assert empty_profile.resume_path is None
+
+
+def test_resume_text_is_extracted_into_profile_facts_and_llm_payload(tmp_path) -> None:
+    resume = tmp_path / "resume.txt"
+    resume.write_text(
+        """
+Ian Rapko
+ian@example.com | 416-555-0100
+Software engineer building Python and Playwright automation.
+
+Skills:
+Python, Playwright, SQLite, React
+
+Experience:
+Built job application tooling.
+"""
+    )
+    facts = resume_facts_from_path(resume)
+    assert "Ian Rapko" in facts["resume_summary"]
+    assert facts["skills"] == "Python, Playwright, SQLite, React"
+    assert facts["first_name"] == "Ian"
+    assert facts["last_name"] == "Rapko"
+    assert facts["email"] == "ian@example.com"
+    assert facts["phone"] == "416-555-0100"
+
+    profile = load_applicant_profile(None, resume_path=str(resume), include_defaults=False)
+    payload = llm_payload(
+        PageSnapshot(url="https://example.com", fields=(ObservedField("first", "text", "First Name *", required=True),), buttons=()),
+        facts=profile.facts,
+        job_description="Python automation role",
+        eligible_field_ids={"first"},
+    )
+
+    assert "resume_summary" in payload["applicant_facts"]
+    assert payload["applicant_facts"]["skills"] == "Python, Playwright, SQLite, React"
+    assert payload["applicant_facts"]["first_name"] == "Ian"
 
 
 def test_default_resume_reaches_resolver_without_sensitive_inference(tmp_path) -> None:
@@ -445,6 +507,27 @@ def test_executor_runs_continue_actions_and_refuses_final_click_or_wrong_upload(
     assert execute_actions(final_target, final_decision) == [ExecutorAction("fill", "email", "me@example.com")]
     assert final_target.calls == [("fill", "email", "me@example.com")]
 
+    review_target = FakeActionTarget()
+    review_decision = plan_guarded_actions(
+        PageSnapshot(
+            url="https://example.com/apply",
+            fields=(
+                ObservedField("email", "text", "Email", required=True),
+                ObservedField("why", "textarea", "Why are you a fit?", required=True),
+            ),
+            buttons=(ObservedButton("next", "Continue"),),
+        ),
+        ResolverOutput(
+            answers=(ResolvedAnswer("email", "me@example.com"),),
+            next_button_id="next",
+            needs_review=("unknown required field: Why are you a fit?",),
+        ),
+    )
+    assert review_decision.status == StepStatus.NEEDS_REVIEW
+    assert execute_actions(review_target, review_decision) == [ExecutorAction("fill", "email", "me@example.com")]
+    assert review_target.calls == [("fill", "email", "me@example.com")]
+
+
     malformed_target = FakeActionTarget()
     malformed_final_click = RunDecision(
         StepStatus.DRY_RUN_READY,
@@ -482,6 +565,8 @@ class FakePage:
         return self.pages[self.index]
 
     def wait_for_load_state(self, state: str = "domcontentloaded") -> None:
+        if state == "networkidle":
+            return
         if self.index + 1 < len(self.pages):
             self.index += 1
             self.url = f"https://example.com/apply/page-{self.index + 1}"
@@ -496,13 +581,14 @@ class AdvancingTarget(FakeActionTarget):
         super().click(target_id)
         self.page.wait_for_load_state()
 
-
 class FakeBrowser:
     def __init__(self, pages: list[str]) -> None:
         self.pages = pages
         self.closed = False
+        self.created_pages = 0
 
     def new_page(self) -> FakePage:
+        self.created_pages += 1
         return FakePage(self.pages)
 
     def close(self) -> None:
@@ -540,6 +626,29 @@ def test_runner_loops_until_final_submit_without_clicking_it() -> None:
     run = connection.execute("SELECT status, reason FROM application_runs WHERE id = ?", (run_id,)).fetchone()
     assert dict(run) == {"status": "dry_run_ready", "reason": "ready at final submit: Submit application"}
     assert connection.execute("SELECT COUNT(*) AS count FROM application_pages WHERE run_id = ?", (run_id,)).fetchone()["count"] == 2
+
+
+def test_runner_fills_known_fields_before_needs_review_handoff() -> None:
+    connection = memory_db()
+    upsert_job(connection, {"id": "ts-1", "job_title": "Software Engineer", "url": "https://example.com/apply"})
+    job = connection.execute("SELECT * FROM jobs").fetchone()
+    page = FakePage(['<label for="email">Email</label><input id="email" required><label for="why">Why?</label><textarea id="why" required></textarea><button id="next">Continue</button>'])
+    target = AdvancingTarget(page)
+
+    run_id, status = run_application_once(
+        connection,
+        job=job,
+        page=page,
+        action_target=target,
+        profile=ApplicantProfile(facts={"email": "me@example.com"}),
+        now=fixed_now,
+        max_pages=1,
+    )
+
+    assert status == StepStatus.NEEDS_REVIEW
+    assert target.calls == [("fill", "email", "me@example.com")]
+    run = connection.execute("SELECT actions_json FROM application_runs WHERE id = ?", (run_id,)).fetchone()
+    assert json.loads(run["actions_json"]) == [{"kind": "fill", "target_id": "email", "value": "me@example.com"}]
 
 
 def test_runner_marks_max_pages_as_needs_review_and_closes_browser() -> None:
@@ -612,3 +721,56 @@ def test_runner_handoff_includes_failed_status_for_debugging() -> None:
     assert result["failed"] == 1
     assert handed_off == [StepStatus.FAILED]
     assert browser.closed is False
+
+
+def test_runner_blocks_linkedin_jobs_without_opening_browser_or_handoff() -> None:
+    connection = memory_db()
+    upsert_job(connection, {"id": "ts-1", "job_title": "Software Engineer", "url": "https://www.linkedin.com/jobs/view/123"})
+    browser = FakeBrowser(["<button id=\"submit\">Submit application</button>"])
+    handed_off: list[StepStatus] = []
+
+    result = run_backlog_applications(
+        connection,
+        browser=browser,
+        action_target_factory=AdvancingTarget,
+        profile=ApplicantProfile(facts={}),
+        now=fixed_now,
+        limit=1,
+        max_pages=1,
+        handoff_callback=lambda run_id, status, page: handed_off.append(status),
+        close_browser=False,
+        block_linkedin_jobs=True,
+    )
+
+    run = connection.execute("SELECT status, reason, final_url FROM application_runs WHERE id = ?", (result["run_ids"][0],)).fetchone()
+    assert result["attempted"] == 0
+    assert result["blocked"] == 1
+    assert browser.created_pages == 0
+    assert handed_off == []
+    assert run["status"] == "blocked"
+    assert "LinkedIn job URL blocked" in run["reason"]
+    assert run["final_url"] == "https://www.linkedin.com/jobs/view/123"
+
+
+def test_runner_skips_linkedin_jobs_until_non_linkedin_limit() -> None:
+    connection = memory_db()
+    upsert_job(connection, {"id": "ts-linkedin", "job_title": "LinkedIn Job", "url": "https://www.linkedin.com/jobs/view/123"})
+    upsert_job(connection, {"id": "ts-greenhouse", "job_title": "Greenhouse Job", "url": "https://example.com/apply"})
+    browser = FakeBrowser(["<button id=\"submit\">Submit application</button>"])
+
+    result = run_backlog_applications(
+        connection,
+        browser=browser,
+        action_target_factory=AdvancingTarget,
+        profile=ApplicantProfile(facts={}),
+        now=fixed_now,
+        limit=1,
+        max_pages=1,
+        close_browser=False,
+        block_linkedin_jobs=True,
+    )
+
+    assert result["attempted"] == 1
+    assert result["blocked"] == 1
+    assert result["dry_run_ready"] == 1
+    assert browser.created_pages == 1

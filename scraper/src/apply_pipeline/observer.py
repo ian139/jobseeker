@@ -33,10 +33,14 @@ class _ApplyFormParser(HTMLParser):
         self.current_select_id: str | None = None
         self.current_option_parts: list[str] = []
         self.text_parts: list[str] = []
+        self.ignored_depth = 0
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         attrs_dict = {key.lower(): value or "" for key, value in attrs}
         tag = tag.lower()
+        if tag in {"script", "style", "noscript", "svg"}:
+            self.ignored_depth += 1
+            return
         if tag == "label":
             self.in_label = True
             self.current_label_for = attrs_dict.get("for") or None
@@ -89,6 +93,9 @@ class _ApplyFormParser(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
+        if tag in {"script", "style", "noscript", "svg"} and self.ignored_depth:
+            self.ignored_depth -= 1
+            return
         if tag == "label":
             label = normalize_space(" ".join(self.current_label_parts))
             if self.current_label_for:
@@ -116,6 +123,8 @@ class _ApplyFormParser(HTMLParser):
             self.current_option_parts = []
 
     def handle_data(self, data: str) -> None:
+        if self.ignored_depth:
+            return
         text = normalize_space(data)
         if not text:
             return

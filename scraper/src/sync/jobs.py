@@ -15,7 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 from dotenv import load_dotenv
 from apply_pipeline.backlog import next_backlog_jobs
 from apply_pipeline.contracts import StepStatus
-from apply_pipeline.runner import load_applicant_profile, run_backlog_with_playwright
+from apply_pipeline.runner import load_applicant_profile, resume_facts_from_path, run_backlog_with_playwright
 from apply_pipeline.runs import finish_application_run, start_application_run
 from apply_pipeline.job_source import list_source_jobs, normalize_source_job, source_job_to_theirstack_like_raw
 
@@ -684,6 +684,8 @@ def main(argv: Iterable[str] | None = None) -> None:
     apply_parser.add_argument("--headed", action="store_true", help="Show browser during live apply dry runs")
     apply_parser.add_argument("--manual-handoff", action="store_true", help="Keep the live browser open on terminal statuses until Enter ends inspection; Enter does not resume or submit")
     apply_parser.add_argument("--no-llm", action="store_true", help="Disable the optional Ollama Cloud DeepSeek resolver; by default live runs use it when OLLAMA_CLOUD_API_KEY or OLLAMA_API_KEY is set")
+    apply_parser.add_argument("--exclude-profile-fact", action="append", default=[], help="Exclude a profile fact by key after AGENTS.md/profile JSON merge; repeatable, e.g. --exclude-profile-fact linkedin")
+    apply_parser.add_argument("--block-linkedin-jobs", action="store_true", help="Mark linkedin.com application URLs blocked before opening a browser page")
     sample_parser = subparsers.add_parser("apply-sample-failures", help="List application failures for review")
     sample_parser.add_argument("--status", choices=["dry_run_ready", "needs_review", "blocked", "failed"], default="blocked")
     sample_parser.add_argument("--limit", type=int, default=10)
@@ -702,6 +704,9 @@ def main(argv: Iterable[str] | None = None) -> None:
     source_parser.add_argument("--offset", type=int, default=0)
     source_parser.add_argument("--lane")
     source_parser.add_argument("--query")
+    profile_parser = subparsers.add_parser("profile-from-resume", help="Extract resume_summary and skills into a profile JSON file")
+    profile_parser.add_argument("--resume", required=True, help="Resume PDF/text path to extract")
+    profile_parser.add_argument("--output", required=True, help="Profile JSON path to create or overwrite")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.command == "dry-run":
@@ -715,6 +720,13 @@ def main(argv: Iterable[str] | None = None) -> None:
         )
         print(json.dumps([row.__dict__ for row in rows], indent=2, sort_keys=True))
         return
+    if args.command == "profile-from-resume":
+        output_path = Path(args.output).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(resume_facts_from_path(args.resume), indent=2, sort_keys=True) + "\n")
+        print(f"Wrote {output_path}")
+        return
+
 
     with connect(db_path_from_env()) as connection:
         initialize_database(connection)
@@ -723,7 +735,7 @@ def main(argv: Iterable[str] | None = None) -> None:
             return
         if args.command == "apply-dry-run":
             if args.live:
-                profile = load_applicant_profile(args.profile_json, resume_path=args.resume)
+                profile = load_applicant_profile(args.profile_json, resume_path=args.resume, exclude_facts=args.exclude_profile_fact)
                 result = run_backlog_with_playwright(
                     connection,
                     profile=profile,
@@ -733,6 +745,7 @@ def main(argv: Iterable[str] | None = None) -> None:
                     headed=args.headed,
                     manual_handoff=args.manual_handoff,
                     use_llm=not args.no_llm,
+                    block_linkedin_jobs=args.block_linkedin_jobs,
                 )
             else:
                 result = apply_dry_run_stub(connection, limit=args.limit, max_pages=args.max_pages)

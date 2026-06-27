@@ -36,6 +36,17 @@ def fact_for_label(label: str, facts: dict[str, str]) -> str | None:
     return None
 
 
+def llm_eligible_field_ids(snapshot: PageSnapshot, *, already_answered: set[str]) -> tuple[str, ...]:
+    return tuple(
+        field.id
+        for field in snapshot.fields
+        if field.required
+        and field.id not in already_answered
+        and field.kind != "file"
+        and not SENSITIVE_FIELD_RE.search(field.label)
+    )
+
+
 def resolve_snapshot(
     snapshot: PageSnapshot,
     *,
@@ -105,9 +116,14 @@ def resolve_unknowns_with_llm(
     llm_client: LLMAnswerClient,
     already_answered: set[str],
 ) -> tuple[list[ResolvedAnswer], list[str]]:
+    eligible_field_ids = set(llm_eligible_field_ids(snapshot, already_answered=already_answered))
+    if not eligible_field_ids:
+        return [], []
     fields_by_id = {field.id: field for field in snapshot.fields}
     try:
-        raw = llm_client.resolve_answers(llm_payload(snapshot, facts=facts, job_description=job_description))
+        raw = llm_client.resolve_answers(
+            llm_payload(snapshot, facts=facts, job_description=job_description, eligible_field_ids=eligible_field_ids)
+        )
     except Exception as exc:
         return [], [f"LLM resolver failed: {exc}"]
 
@@ -119,7 +135,7 @@ def resolve_unknowns_with_llm(
             continue
         field_id = str(item.get("field_id") or "")
         field = fields_by_id.get(field_id)
-        if field is None or field_id in already_answered:
+        if field is None or field_id in already_answered or field_id not in eligible_field_ids:
             continue
         if SENSITIVE_FIELD_RE.search(field.label):
             needs_review.append(f"sensitive field: {field.label}")

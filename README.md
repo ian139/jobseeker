@@ -200,7 +200,7 @@ cd scraper
 .venv/bin/playwright install chromium
 ```
 
-Then run. If `--profile-json` and `--resume` are omitted, the live dry run uses `AGENTS.md` applicant reference defaults: `Main_Resume.pdf`, LinkedIn, and personal site. If `OLLAMA_CLOUD_API_KEY` or `OLLAMA_API_KEY` is set, live mode also uses the optional Ollama Cloud DeepSeek resolver after deterministic fact matching; configure it with `OLLAMA_CLOUD_BASE_URL` and `OLLAMA_CLOUD_MODEL` (`deepseek-v4-pro` by default). The LLM receives form metadata, profile facts, and job description text; it does not read or upload the resume PDF as prompt context, so put resume-derived facts such as skills or summaries in `--profile-json` when you want them available for answer mapping.
+Then run. If `--profile-json` and `--resume` are omitted, the live dry run uses `AGENTS.md` applicant reference defaults: `Main_Resume.pdf`, LinkedIn, and personal site. If `OLLAMA_CLOUD_API_KEY` or `OLLAMA_API_KEY` is set, live mode also uses the optional Ollama Cloud DeepSeek resolver after deterministic fact matching; configure it with `OLLAMA_CLOUD_BASE_URL` and `OLLAMA_CLOUD_MODEL` (`deepseek-v4-pro` by default). Login/sign-in pages, password/code fields, CAPTCHA, and assessment blockers stop as `blocked` before filling or LLM resolution. The LLM receives only eligible unresolved non-sensitive field metadata, profile facts, and job description text; it does not read or upload the resume PDF as prompt context, so put resume-derived facts such as skills or summaries in `--profile-json` when you want them available for answer mapping.
 
 ```bash
 cd scraper

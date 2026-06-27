@@ -73,6 +73,23 @@ def test_guarded_actions_do_not_treat_plain_apply_as_safe_navigation() -> None:
     assert decision.reason == "unsafe navigation button: Apply"
 
 
+def test_guarded_actions_block_login_forms_before_llm_or_fill() -> None:
+    snapshot = observe_html(
+        """
+        <form>
+          <label for="email">Email</label><input id="email" required>
+          <label for="password">Password</label><input id="password" type="password" required>
+          <button id="login">Log in</button>
+        </form>
+        """,
+        url="https://example.com/login",
+    )
+    decision = plan_guarded_actions(snapshot, ResolverOutput())
+
+    assert decision.status == StepStatus.BLOCKED
+    assert "login" in decision.reason.lower() or "sign-in" in decision.reason.lower()
+
+
 def test_backlog_skips_jobs_with_terminal_application_runs() -> None:
     connection = memory_db()
     first = upsert_job(connection, {"id": "ts-1", "job_title": "Software Engineer", "url": "https://example.com/1"})
@@ -272,6 +289,23 @@ def test_resolver_uses_llm_for_unknown_required_fields_without_sensitive_bypass(
     assert all(answer.field_id != "dob" for answer in resolved.answers)
     assert resolved.needs_review == ("sensitive field: Date of birth",)
     assert client.payloads[0]["job_description"] == "Build data pipelines for co-op teams."
+    assert [field["id"] for field in client.payloads[0]["fields"]] == ["why"]
+
+
+def test_resolver_does_not_call_llm_for_sensitive_only_review() -> None:
+    class FailingLLMClient:
+        def resolve_answers(self, payload: dict[str, object]) -> dict[str, object]:
+            raise AssertionError("LLM should not receive sensitive-only pages")
+
+    snapshot = PageSnapshot(
+        url="https://example.com/apply",
+        fields=(ObservedField("dob", "text", "Date of birth", required=True),),
+        buttons=(ObservedButton("next", "Continue"),),
+    )
+
+    resolved = resolve_snapshot(snapshot, facts={}, llm_client=FailingLLMClient())
+
+    assert resolved.needs_review == ("sensitive field: Date of birth",)
 
 
 def test_ollama_cloud_client_uses_deepseek_v4_pro_env_defaults(monkeypatch) -> None:

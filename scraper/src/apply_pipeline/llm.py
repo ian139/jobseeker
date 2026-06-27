@@ -73,7 +73,14 @@ def ollama_cloud_client_from_env() -> OllamaCloudAnswerClient | None:
     )
 
 
-def llm_payload(snapshot: PageSnapshot, *, facts: dict[str, str], job_description: str | None) -> dict[str, Any]:
+def llm_payload(
+    snapshot: PageSnapshot,
+    *,
+    facts: dict[str, str],
+    job_description: str | None,
+    eligible_field_ids: set[str] | frozenset[str] | None = None,
+) -> dict[str, Any]:
+    fields = snapshot.fields if eligible_field_ids is None else tuple(field for field in snapshot.fields if field.id in eligible_field_ids)
     return {
         "policy": {
             "answer_only_from_supplied_context": True,
@@ -91,7 +98,7 @@ def llm_payload(snapshot: PageSnapshot, *, facts: dict[str, str], job_descriptio
                 "required": field.required,
                 "options": list(field.options),
             }
-            for field in snapshot.fields
+            for field in fields
         ],
         "buttons": [
             {

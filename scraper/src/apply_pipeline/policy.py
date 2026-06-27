@@ -10,7 +10,9 @@ SENSITIVE_FIELD_RE = re.compile(
     r"\b(ssn|social security|date of birth|dob|gender|race|ethnicity|disability|veteran|signature|captcha|attest|attestation|legal|authorization|sponsorship)\b",
     re.IGNORECASE,
 )
-BLOCKER_RE = re.compile(r"\b(sign in|login|captcha|job no longer|expired|not found|assessment)\b", re.IGNORECASE)
+BLOCKER_RE = re.compile(r"\b(sign in|sign-in|log in|login|captcha|job no longer|expired|not found|assessment)\b", re.IGNORECASE)
+LOGIN_FIELD_RE = re.compile(r"\b(password|one-time code|verification code|2fa|mfa)\b", re.IGNORECASE)
+LOGIN_BUTTON_RE = re.compile(r"\b(sign in|sign-in|log in|login)\b", re.IGNORECASE)
 
 
 def is_final_submit_text(text: str) -> bool:
@@ -25,6 +27,10 @@ def is_safe_navigation_text(text: str) -> bool:
 def page_blockers(snapshot: PageSnapshot) -> tuple[str, ...]:
     blockers = list(snapshot.blockers)
     blockers.extend(error for error in snapshot.errors if BLOCKER_RE.search(error))
+    blockers.extend(f"login/sign-in field present: {field.label}" for field in snapshot.fields if LOGIN_FIELD_RE.search(field.label))
+    blockers.extend(f"login/sign-in action present: {button.text}" for button in snapshot.buttons if LOGIN_BUTTON_RE.search(button.text))
+    if BLOCKER_RE.search(snapshot.url):
+        blockers.append(f"login/sign-in URL: {snapshot.url}")
     return tuple(dict.fromkeys(blockers))
 
 

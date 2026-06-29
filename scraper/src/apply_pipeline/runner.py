@@ -9,7 +9,7 @@ from typing import Any, Callable, Iterable, Protocol
 from urllib.parse import urlsplit
 
 from .backlog import job_application_url, next_backlog_jobs
-from .contracts import ExecutorActionRecord, StepStatus
+from .contracts import ExecutorActionRecord, StepStatus, to_jsonable
 from .executor import ActionTarget, execute_actions_with_records
 from .llm import LLMAnswerClient, ollama_cloud_client_from_env
 from .observer import observe_page
@@ -506,6 +506,10 @@ def run_application_once(
                 llm_enabled=llm_enabled,
             )
             decision = plan_guarded_actions(snapshot, resolved)
+            resolved.metadata["decision_status"] = decision.status.value
+            resolved.metadata["decision_reason"] = decision.reason
+            resolved.metadata["planned_actions"] = to_jsonable(decision.actions)
+            resolved.metadata["final_submit_detected"] = bool(resolved.submit_button_id)
             record_application_page(
                 connection,
                 run_id=run_id,

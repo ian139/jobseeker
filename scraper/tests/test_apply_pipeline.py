@@ -352,7 +352,8 @@ def test_resolver_uses_llm_for_unknown_required_fields_without_sensitive_bypass(
 
     assert ResolvedAnswer("why", "I have built relevant data systems.") in resolved.answers
     assert all(answer.field_id != "dob" for answer in resolved.answers)
-    assert resolved.needs_review == ("resolver_sensitive_field: Date of birth", "llm_invalid_field_id: dob")
+    assert resolved.needs_review == ("resolver_sensitive_field: Date of birth",)
+    assert "llm_invalid_field_id" in resolved.metadata["reason_codes"]
     assert client.payloads[0]["job_description"] == "Build data pipelines for co-op teams."
     assert [field["id"] for field in client.payloads[0]["fields"]] == ["why", "dob"]
     assert client.payloads[0]["fields"][0]["eligible_for_answer"] is True

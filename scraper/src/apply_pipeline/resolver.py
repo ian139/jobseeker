@@ -131,7 +131,11 @@ def resolve_snapshot(
                 filtered_from_llm.append({"field_id": field.id, "reason": "resolver_unknown_required_file"})
             continue
         if field.kind in {"checkbox", "radio"}:
-            if field.required:
+            value = facts.get(field.id) or fact_for_label(field.label, facts)
+            if value is not None and value_matches_field_options(field, value):
+                answers.append(ResolvedAnswer(field.id, value))
+                deterministic_answer_ids.append(field.id)
+            elif field.required:
                 needs_review.append(f"resolver_unknown_required_after_llm: {field.label}")
             continue
         value = facts.get(field.id) or fact_for_label(field.label, facts)
@@ -281,14 +285,12 @@ def resolve_unknowns_with_llm(
         field_id = str(item.get("field_id") or "")
         field = fields_by_id.get(field_id)
         if field is None:
-            needs_review.append(f"llm_invalid_field_id: {field_id}")
             reason_codes.append("llm_invalid_field_id")
             continue
         if field_id in ignored_field_ids:
             reason_codes.append("llm_ignored_non_application_field")
             continue
         if field_id in already_answered or field_id not in eligible_field_ids:
-            needs_review.append(f"llm_invalid_field_id: {field_id}")
             reason_codes.append("llm_invalid_field_id")
             continue
         if SENSITIVE_FIELD_RE.search(field.label):

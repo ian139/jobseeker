@@ -412,6 +412,12 @@ def test_runner_merges_deterministic_and_llm_answers_before_final_submit() -> No
     first_resolver = json.loads(pages[0]["resolver_json"])
     assert first_resolver["metadata"]["llm_called"] is True
     assert first_resolver["metadata"]["merged_answer_field_ids"] == ["email", "why"]
+    assert first_resolver["metadata"]["decision_status"] == "continue"
+    assert first_resolver["metadata"]["planned_actions"] == [
+        {"kind": "fill", "target_id": "email", "value": "me@example.com"},
+        {"kind": "fill", "target_id": "why", "value": "I build reliable tools."},
+        {"kind": "click", "target_id": "next", "value": None},
+    ]
 
 
 def test_executor_unknown_field_reason_is_structured() -> None:

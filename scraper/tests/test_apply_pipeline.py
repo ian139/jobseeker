@@ -4,9 +4,9 @@ import sqlite3
 import pytest
 
 from apply_pipeline.backlog import job_application_url, next_backlog_jobs
-from apply_pipeline.contracts import ExecutorAction, ObservedButton, ObservedField, PageSnapshot, ResolvedAnswer, ResolverOutput, RunDecision, StepStatus
+from apply_pipeline.contracts import ExecutorAction, ExecutorActionRecord, ObservedButton, ObservedField, PageSnapshot, ResolvedAnswer, ResolverOutput, RunDecision, StepStatus
 from apply_pipeline.executor import FakeActionTarget, execute_actions
-from apply_pipeline.llm import llm_payload, ollama_cloud_client_from_env
+from apply_pipeline.llm import OllamaCloudAnswerClient, OllamaCloudConfig, llm_payload, ollama_cloud_client_from_env
 from apply_pipeline.observer import observe_html, observe_page
 from apply_pipeline.policy import plan_guarded_actions
 from apply_pipeline.resolver import resolve_snapshot
@@ -46,7 +46,7 @@ def test_guarded_actions_review_sensitive_fields() -> None:
     resolved = ResolverOutput(answers=(ResolvedAnswer("ssn", "123"),), next_button_id="next")
     decision = plan_guarded_actions(snapshot, resolved)
     assert decision.status == StepStatus.NEEDS_REVIEW
-    assert "Social Security" in decision.reason
+    assert decision.reason == "resolver_sensitive_field"
 
 
 def test_guarded_actions_allow_safe_next_navigation() -> None:
@@ -61,16 +61,62 @@ def test_guarded_actions_allow_safe_next_navigation() -> None:
     assert [action.kind for action in decision.actions] == ["fill", "click"]
 
 
-def test_guarded_actions_do_not_treat_plain_apply_as_safe_navigation() -> None:
+def test_guarded_actions_allow_initial_apply_navigation_without_fields() -> None:
     snapshot = PageSnapshot(
-        url="https://example.com/apply",
+        url="https://example.com/job",
         fields=(),
-        buttons=(ObservedButton("apply", "Apply"),),
+        buttons=(ObservedButton("apply", "Apply here"),),
     )
     resolved = ResolverOutput(next_button_id="apply")
     decision = plan_guarded_actions(snapshot, resolved)
+    assert decision.status == StepStatus.CONTINUE
+    assert decision.actions == (ExecutorAction("click", "apply"),)
+
+
+def test_guarded_actions_do_not_click_apply_on_visible_form() -> None:
+    snapshot = PageSnapshot(
+        url="https://example.com/apply",
+        fields=(ObservedField("email", "text", "Email", required=True),),
+        buttons=(ObservedButton("apply", "Apply"),),
+    )
+    resolved = ResolverOutput(answers=(ResolvedAnswer("email", "me@example.com"),), next_button_id="apply")
+    decision = plan_guarded_actions(snapshot, resolved)
     assert decision.status == StepStatus.NEEDS_REVIEW
-    assert decision.reason == "unsafe navigation button: Apply"
+    assert decision.reason == "executor_unsafe_navigation"
+
+
+def test_job_detail_search_field_does_not_block_apply_navigation() -> None:
+    class FakeLLMClient:
+        def __init__(self) -> None:
+            self.payloads: list[dict[str, object]] = []
+
+        def resolve_answers(self, payload: dict[str, object]) -> dict[str, object]:
+            self.payloads.append(payload)
+            return {
+                "answers": [{"field_id": "q", "value": "ASP.NET", "confidence": "high"}],
+                "next_button_id": "button_0",
+                "needs_review": [{"field_id": "q", "reason": "Search field is not relevant"}],
+            }
+
+    client = FakeLLMClient()
+    snapshot = PageSnapshot(
+        url="https://jobs.bcm.edu/job/example",
+        fields=(ObservedField("q", "text", "Search by Keyword", required=False),),
+        buttons=(
+            ObservedButton("button_0", "Search Jobs"),
+            ObservedButton("a_1", "Apply now", type="link"),
+        ),
+    )
+
+    resolved = resolve_snapshot(snapshot, facts={}, llm_client=client)
+    decision = plan_guarded_actions(snapshot, resolved)
+
+    assert client.payloads[0]["fields"][0]["eligible_for_answer"] is False
+    assert resolved.answers == ()
+    assert resolved.next_button_id == "a_1"
+    assert resolved.metadata["ignored_non_application_field_ids"] == ["q"]
+    assert decision.status == StepStatus.CONTINUE
+    assert decision.actions == (ExecutorAction("click", "a_1"),)
 
 
 def test_guarded_actions_block_login_forms_before_llm_or_fill() -> None:
@@ -87,7 +133,7 @@ def test_guarded_actions_block_login_forms_before_llm_or_fill() -> None:
     decision = plan_guarded_actions(snapshot, ResolverOutput())
 
     assert decision.status == StepStatus.BLOCKED
-    assert "login" in decision.reason.lower() or "sign-in" in decision.reason.lower()
+    assert decision.reason == "blocked_sign_in"
 
 
 def test_observer_ignores_script_text_for_blockers() -> None:
@@ -234,6 +280,7 @@ def test_observer_handles_parent_labels_links_submit_inputs_and_frames() -> None
         ("submit-button", "Submit application", "submit", True),
         ("a_1", "Continue", "link", False),
     ]
+    assert snapshot.buttons[1].selector == "a[href='/apply/next']"
 
     class Frame:
         def content(self) -> str:
@@ -268,7 +315,7 @@ def test_resolver_answers_known_fields_uploads_resume_and_refuses_unknown() -> N
     resolved = resolve_snapshot(snapshot, facts={"email": "me@example.com"}, resume_path="resume.pdf")
     assert resolved.answers == (ResolvedAnswer("email", "me@example.com"), ResolvedAnswer("resume", "resume.pdf"))
     assert resolved.next_button_id == "next"
-    assert resolved.needs_review == ("unknown required field: Why are you a fit?",)
+    assert resolved.needs_review == ("resolver_unknown_required_after_llm: Why are you a fit?",)
 
 
 def test_resolver_uses_llm_for_unknown_required_fields_without_sensitive_bypass() -> None:
@@ -305,9 +352,11 @@ def test_resolver_uses_llm_for_unknown_required_fields_without_sensitive_bypass(
 
     assert ResolvedAnswer("why", "I have built relevant data systems.") in resolved.answers
     assert all(answer.field_id != "dob" for answer in resolved.answers)
-    assert resolved.needs_review == ("sensitive field: Date of birth",)
+    assert resolved.needs_review == ("resolver_sensitive_field: Date of birth", "llm_invalid_field_id: dob")
     assert client.payloads[0]["job_description"] == "Build data pipelines for co-op teams."
-    assert [field["id"] for field in client.payloads[0]["fields"]] == ["why"]
+    assert [field["id"] for field in client.payloads[0]["fields"]] == ["why", "dob"]
+    assert client.payloads[0]["fields"][0]["eligible_for_answer"] is True
+    assert client.payloads[0]["fields"][1]["eligible_for_answer"] is False
 
 
 def test_resolver_does_not_call_llm_for_sensitive_only_review() -> None:
@@ -323,7 +372,45 @@ def test_resolver_does_not_call_llm_for_sensitive_only_review() -> None:
 
     resolved = resolve_snapshot(snapshot, facts={}, llm_client=FailingLLMClient())
 
-    assert resolved.needs_review == ("sensitive field: Date of birth",)
+    assert resolved.needs_review == ("resolver_sensitive_field: Date of birth",)
+
+
+
+def test_ollama_messages_include_configured_live_proof_skill() -> None:
+    client = OllamaCloudAnswerClient(OllamaCloudConfig(api_key="x", skill_text="LIVE PROOF SKILL BODY"))
+
+    messages = client._messages({"required_output_schema": {"type": "object"}})
+
+    system_message = messages[0]["content"]
+    assert "LIVE PROOF SKILL BODY" in system_message
+    assert "Use only the supplied applicant facts" in system_message
+    assert "Answer only fields marked eligible_for_answer" in system_message
+    assert "Do not guess sensitive/legal answers" in system_message
+    assert "typeahead fields with empty options as fillable free-text controls" in system_message
+    assert "experience-year fields" in system_message
+    assert "never perform final submission" in system_message
+    assert "Return only JSON matching the payload required_output_schema" in system_message
+
+
+def test_ollama_cloud_client_loads_skill_from_env_path(monkeypatch, tmp_path) -> None:
+    skill_path = tmp_path / "SKILL.md"
+    skill_path.write_text("TEMP LIVE PROOF SKILL\n", encoding="utf-8")
+    monkeypatch.setenv("OLLAMA_CLOUD_API_KEY", "test-key")
+    monkeypatch.setenv("APPLY_LLM_SKILL_PATH", str(skill_path))
+
+    client = ollama_cloud_client_from_env()
+
+    assert client is not None
+    assert client.config.skill_text == "TEMP LIVE PROOF SKILL"
+
+
+def test_ollama_cloud_client_without_api_key_does_not_require_skill_file(monkeypatch, tmp_path) -> None:
+    missing_skill_path = tmp_path / "missing" / "SKILL.md"
+    monkeypatch.delenv("OLLAMA_CLOUD_API_KEY", raising=False)
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.setenv("APPLY_LLM_SKILL_PATH", str(missing_skill_path))
+
+    assert ollama_cloud_client_from_env() is None
 
 
 def test_ollama_cloud_client_uses_deepseek_v4_pro_env_defaults(monkeypatch) -> None:
@@ -337,6 +424,33 @@ def test_ollama_cloud_client_uses_deepseek_v4_pro_env_defaults(monkeypatch) -> N
     assert client is not None
     assert client.config.base_url == "https://ollama.com"
     assert client.config.model == "deepseek-v4-pro"
+    assert client.config.timeout_seconds == 90.0
+
+
+def test_ollama_cloud_client_uses_native_cloud_chat_endpoint(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"message": {"content": "{\"answers\": [], \"needs_review\": []}"}}
+
+    def fake_post(url: str, *, headers, json, timeout):
+        calls.append({"url": url, "headers": headers, "json": json, "timeout": timeout})
+        return FakeResponse()
+
+    monkeypatch.setattr("apply_pipeline.llm.httpx.post", fake_post)
+    client = OllamaCloudAnswerClient(OllamaCloudConfig(api_key="test-key", base_url="https://ollama.com", model="deepseek/deepseek-v4-pro", timeout_seconds=12))
+
+    parsed = client.resolve_answers({"fields": []})
+
+    assert parsed == {"answers": [], "needs_review": []}
+    assert calls[0]["url"] == "https://ollama.com/api/chat"
+    request_json = calls[0]["json"]
+    assert request_json["stream"] is False
+    assert request_json["model"] == "deepseek-v4-pro"
 
 
 def test_default_applicant_profile_reads_agents_reference(tmp_path) -> None:
@@ -394,6 +508,33 @@ def test_profile_json_and_resume_cli_override_defaults(tmp_path) -> None:
     assert "linkedin" not in profile_without_linkedin.facts
     assert profile_without_linkedin.facts["portfolio"] == "https://immemorized.com"
 
+
+def test_profile_json_loads_sensitive_profile_answers_only_when_marked_always(tmp_path) -> None:
+    profile_json = tmp_path / "profile.json"
+    profile_json.write_text(
+        json.dumps(
+            {
+                "email": "ian@example.com",
+                "race": "White",
+                "sponsorship": "No",
+                "sensitive_profile": {
+                    "answers": {
+                        "gender": {"value": "Male", "persistence": "always"},
+                        "hispanic_ethnicity": {"value": "No", "persistence": "once"},
+                    }
+                },
+            }
+        )
+    )
+
+    profile = load_applicant_profile(profile_json, include_defaults=False)
+
+    assert profile.facts["email"] == "ian@example.com"
+    assert profile.facts["gender"] == "Male"
+    assert "hispanic_ethnicity" not in profile.facts
+    assert "race" not in profile.facts
+    assert "sponsorship" not in profile.facts
+    assert "sensitive_profile" not in profile.facts
     empty_agents = tmp_path / "EMPTY_AGENTS.md"
     empty_agents.write_text("# Agent Operating Notes\n")
     empty_profile = default_applicant_profile(agents_path=empty_agents)
@@ -406,7 +547,8 @@ def test_resume_text_is_extracted_into_profile_facts_and_llm_payload(tmp_path) -
     resume.write_text(
         """
 Ian Rapko
-ian@example.com | 416-555-0100
+ian@example.com | 416-555-0100 | github.com/ian139
+Amherst, MA
 Software engineer building Python and Playwright automation.
 
 Skills:
@@ -423,6 +565,8 @@ Built job application tooling.
     assert facts["last_name"] == "Rapko"
     assert facts["email"] == "ian@example.com"
     assert facts["phone"] == "416-555-0100"
+    assert facts["github"] == "https://github.com/ian139"
+    assert facts["country"] == "United States"
 
     profile = load_applicant_profile(None, resume_path=str(resume), include_defaults=False)
     payload = llm_payload(
@@ -467,7 +611,7 @@ def test_default_resume_reaches_resolver_without_sensitive_inference(tmp_path) -
     assert ResolvedAnswer("linkedin", "https://www.linkedin.com/in/ianrapko") in resolved.answers
     assert ResolvedAnswer("portfolio", "https://immemorized.com") in resolved.answers
     assert any(answer.field_id == "resume" and str(answer.value).endswith("Main_Resume.pdf") for answer in resolved.answers)
-    assert resolved.needs_review == ("sensitive field: Date of birth",)
+    assert resolved.needs_review == ("resolver_sensitive_field: Date of birth",)
 
 
 def test_executor_runs_continue_actions_and_refuses_final_click_or_wrong_upload() -> None:
@@ -550,6 +694,34 @@ def test_executor_runs_continue_actions_and_refuses_final_click_or_wrong_upload(
         execute_actions(target, decision, resume_path="resume.pdf")
 
 
+def test_executor_records_attempted_succeeded_and_failed_actions() -> None:
+    target = FakeActionTarget()
+    decision = plan_guarded_actions(
+        PageSnapshot(
+            url="https://example.com/apply",
+            fields=(ObservedField("email", "text", "Email"), ObservedField("resume", "file", "Resume")),
+            buttons=(ObservedButton("next", "Continue"),),
+        ),
+        ResolverOutput(
+            answers=(ResolvedAnswer("email", "me@example.com"), ResolvedAnswer("resume", "other.pdf")),
+            next_button_id="next",
+        ),
+    )
+
+    from apply_pipeline.executor import execute_actions_with_records
+
+    executed, records = execute_actions_with_records(target, decision, resume_path="resume.pdf")
+
+    assert executed == [ExecutorAction("fill", "email", "me@example.com")]
+    assert records == [
+        ExecutorActionRecord(ExecutorAction("fill", "email", "me@example.com"), "attempted"),
+        ExecutorActionRecord(ExecutorAction("fill", "email", "me@example.com"), "succeeded"),
+        ExecutorActionRecord(ExecutorAction("upload", "resume", "other.pdf"), "attempted"),
+        ExecutorActionRecord(ExecutorAction("upload", "resume", "other.pdf"), "failed", "Refusing to upload a file other than the configured resume"),
+    ]
+
+
+
 class FakePage:
     def __init__(self, pages: list[str]) -> None:
         self.pages = pages
@@ -624,7 +796,7 @@ def test_runner_loops_until_final_submit_without_clicking_it() -> None:
     assert status == StepStatus.DRY_RUN_READY
     assert target.calls == [("fill", "email", "me@example.com"), ("click", "next", None), ("fill", "full_name", "Ada Lovelace")]
     run = connection.execute("SELECT status, reason FROM application_runs WHERE id = ?", (run_id,)).fetchone()
-    assert dict(run) == {"status": "dry_run_ready", "reason": "ready at final submit: Submit application"}
+    assert dict(run) == {"status": "dry_run_ready", "reason": "dry_run_final_submit_boundary"}
     assert connection.execute("SELECT COUNT(*) AS count FROM application_pages WHERE run_id = ?", (run_id,)).fetchone()["count"] == 2
 
 
@@ -648,7 +820,10 @@ def test_runner_fills_known_fields_before_needs_review_handoff() -> None:
     assert status == StepStatus.NEEDS_REVIEW
     assert target.calls == [("fill", "email", "me@example.com")]
     run = connection.execute("SELECT actions_json FROM application_runs WHERE id = ?", (run_id,)).fetchone()
-    assert json.loads(run["actions_json"]) == [{"kind": "fill", "target_id": "email", "value": "me@example.com"}]
+    assert json.loads(run["actions_json"]) == [
+        {"action": {"kind": "fill", "target_id": "email", "value": "me@example.com"}, "status": "attempted", "reason": None},
+        {"action": {"kind": "fill", "target_id": "email", "value": "me@example.com"}, "status": "succeeded", "reason": None},
+    ]
 
 
 def test_runner_marks_max_pages_as_needs_review_and_closes_browser() -> None:

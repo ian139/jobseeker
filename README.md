@@ -9,7 +9,7 @@ Use `OMP_ORCA_WORKFLOW.md` for OMP, Orca, and Orca dev execution in this repo. `
 Default implementation workers use DeepSeek V4 Pro through Ollama Cloud:
 
 ```bash
-omp --model "ollama-cloud/deepseek-v4-pro" --thinking medium
+omp --model "ollama-cloud/deepseek-v4-pro" --thinking high
 ```
 
 Start non-trivial work with `/plan`, write or update the focused failing test first, use sub-worktrees when isolation helps, and verify the finished change through the containerized path before marking it ready.
@@ -20,10 +20,10 @@ The active product direction is a local job-application assistant:
 
 1. Store a SQLite backlog of jobs.
 2. Open an application URL for a queued job.
-3. Observe the page into a normalized snapshot: fields, buttons, visible errors, and blockers.
-4. Resolve only known, allowed answers from profile/resume facts.
-5. Execute guarded non-final actions, such as filling fields, selecting options, uploading the configured resume, and clicking safe Next/Continue navigation.
-6. Stop at final submit or any unsafe/unknown condition.
+3. Observe the page into a normalized DOM snapshot: fields, buttons, options, visible errors, and blockers.
+4. Let the LLM-first resolver interpret that snapshot with profile/resume/job context and `skills/SKILL.md` live-proof-routing guidance, producing allowed answers plus non-final navigation choices.
+5. Execute a small guarded Playwright action set: fill/select/check/upload configured resume, and click safe non-final navigation such as Apply/Next/Continue.
+6. Stop at final submit, blocked auth/CAPTCHA/identity/payment flows, sensitive fields, or truly unresolved required input.
 7. Persist run status and page snapshots for review.
 
 Current status: the ingestion, database schema, pure observer/resolver/executor helpers, run storage, failure sampler, external read-feed import, and dry-run runner are present. The default `apply-dry-run` command stays safe and records scaffold failures unless `--live` is supplied; live browser runs use Playwright when installed with the `live` extra and still stop before final submit.
@@ -59,11 +59,11 @@ Terminal application statuses are:
 
 ### Application pipeline core
 
-- `observer`: deterministic HTML/page observation into `PageSnapshot`.
-- `resolver`: deterministic mapping from known facts to answers; refuses unknown required and sensitive fields.
-- `executor`: guarded actions only; refuses final-submit clicks and unapproved file uploads.
-- `runner`: records application runs and page snapshots, loops until terminal status or `max_pages`.
-- `policy`: central safety checks for final submit, sensitive fields, blockers, and safe navigation.
+- `observer`: deterministic DOM/page observation into `PageSnapshot`; not board-specific templates.
+- `resolver`: LLM-first interpretation over the normalized snapshot; uses DeepSeek/Ollama when configured, injects `skills/SKILL.md` into the prompt, then validates strict JSON against deterministic known-fact guardrails.
+- `executor`: minimal guarded Playwright actions only; refuses final-submit clicks and unapproved file uploads.
+- `runner`: records application runs, page snapshots, resolver metadata, and action attempts; loops until terminal status or `max_pages`.
+- `policy`: central safety checks for final submit, sensitive fields, blockers, apply/start navigation, and safe continuation.
 
 ### Persistence
 
@@ -139,6 +139,7 @@ JOB_SOURCE_API_KEY=
 OLLAMA_CLOUD_API_KEY=
 OLLAMA_CLOUD_BASE_URL=https://ollama.com
 OLLAMA_CLOUD_MODEL=deepseek-v4-pro
+APPLY_LLM_SKILL_PATH=
 ```
 
 Host/local settings:
@@ -148,9 +149,10 @@ Host/local settings:
 - `JOB_SYNC_DB_PATH`: set to `data/jobs.sqlite3` for host runs, or leave it unset to use that same host default. Keep `/app/data/jobs.sqlite3` for Docker/compose only.
 - `THEIRSTACK_BASE_URL`: defaults to `https://api.theirstack.com`.
 - `JOB_SOURCE_BASE_URL` and `JOB_SOURCE_API_KEY`: required only for `import-job-source`, which reads `GET /v1/jobs` and imports normalized jobs into the local backlog.
-- `OLLAMA_CLOUD_API_KEY` or `OLLAMA_API_KEY`: optional; when present, live apply dry runs call the Ollama Cloud OpenAI-compatible chat API after deterministic fact matching.
-- `OLLAMA_CLOUD_BASE_URL`: defaults to `https://ollama.com`; the client posts to `/v1/chat/completions`.
+- `OLLAMA_CLOUD_API_KEY` or `OLLAMA_API_KEY`: optional; when present, live apply dry runs call the Ollama Cloud DeepSeek resolver with the normalized page snapshot and applicant/job context.
+- `OLLAMA_CLOUD_BASE_URL`: defaults to `https://ollama.com`; the native Ollama Cloud path posts to `/api/chat`, and non-native/OpenAI-compatible bases post to `/v1/chat/completions`.
 - `OLLAMA_CLOUD_MODEL` or `DEEPSEEK_MODEL`: defaults to `deepseek-v4-pro`.
+- `APPLY_LLM_SKILL_PATH`: optional path to the live-proof-routing skill file injected into the resolver prompt; defaults to repo-root `skills/SKILL.md` locally and `/app/skills/SKILL.md` in Docker.
 
 ## TheirStack commands
 
@@ -200,7 +202,7 @@ cd scraper
 .venv/bin/playwright install chromium
 ```
 
-Then run. If `--profile-json` and `--resume` are omitted, the live dry run uses `AGENTS.md` applicant reference defaults: `Main_Resume.pdf`, LinkedIn, and personal site. If `OLLAMA_CLOUD_API_KEY` or `OLLAMA_API_KEY` is set, live mode also uses the optional Ollama Cloud DeepSeek resolver after deterministic fact matching; configure it with `OLLAMA_CLOUD_BASE_URL` and `OLLAMA_CLOUD_MODEL` (`deepseek-v4-pro` by default). Login/sign-in pages, password/code fields, CAPTCHA, and assessment blockers stop as `blocked` before filling or LLM resolution. The LLM receives eligible unresolved non-sensitive field metadata, profile facts, extracted `resume_summary` / `skills`, and job description text.
+Then run. If `--profile-json` and `--resume` are omitted, the live dry run uses `AGENTS.md` applicant reference defaults: `Main_Resume.pdf`, LinkedIn, and personal site. If `OLLAMA_CLOUD_API_KEY` or `OLLAMA_API_KEY` is set, live mode sends normalized fields, buttons, options, disabled/final-submit state, visible errors, profile facts, extracted `resume_summary` / `skills`, job description text, and the `skills/SKILL.md` live-proof-routing instructions to DeepSeek/Ollama. Login/sign-in pages, password/code fields, CAPTCHA, and assessment blockers stop as `blocked` before filling or LLM resolution. The guarded executor still validates every answer/button and never clicks final submit.
 
 ```bash
 cd scraper
@@ -318,4 +320,5 @@ docker compose run --rm -e JOB_SYNC_DB_PATH=/app/data/pipeline_smoke.sqlite3 app
 
 - `OMP_ORCA_WORKFLOW.md` has the reusable OMP + Orca development workflow.
 - `AGENTS.md` has mandatory agent policy for architecture, orchestration, workers, and verification.
+- `skills/SKILL.md` has the live-proof-routing instructions injected into the DeepSeek/Ollama resolver prompt.
 - `TODO.md` has the setup and usage checklist.

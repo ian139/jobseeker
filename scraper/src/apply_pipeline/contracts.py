@@ -22,7 +22,10 @@ class ObservedField:
     required: bool = False
     options: tuple[str, ...] = ()
     value: str | bool | None = None
-
+    disabled: bool = False
+    visible: bool = True
+    frame: str | None = None
+    selector: str | None = None
 
 @dataclass(frozen=True)
 class ObservedButton:
@@ -31,7 +34,9 @@ class ObservedButton:
     type: str | None = None
     disabled: bool = False
     final_submit_candidate: bool = False
-
+    visible: bool = True
+    frame: str | None = None
+    selector: str | None = None
 
 @dataclass(frozen=True)
 class PageSnapshot:
@@ -40,6 +45,7 @@ class PageSnapshot:
     buttons: tuple[ObservedButton, ...] = ()
     errors: tuple[str, ...] = ()
     blockers: tuple[str, ...] = ()
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -54,13 +60,20 @@ class ResolverOutput:
     next_button_id: str | None = None
     submit_button_id: str | None = None
     needs_review: tuple[str, ...] = ()
-
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 @dataclass(frozen=True)
 class ExecutorAction:
     kind: Literal["fill", "select", "check", "upload", "click"]
     target_id: str
     value: str | bool | list[str] | None = None
+
+
+@dataclass(frozen=True)
+class ExecutorActionRecord:
+    action: ExecutorAction
+    status: Literal["attempted", "succeeded", "failed"]
+    reason: str | None = None
 
 
 @dataclass(frozen=True)

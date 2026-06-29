@@ -9,8 +9,8 @@ from typing import Any, Callable, Iterable, Protocol
 from urllib.parse import urlsplit
 
 from .backlog import job_application_url, next_backlog_jobs
-from .contracts import ExecutorAction, StepStatus
-from .executor import ActionTarget, execute_actions
+from .contracts import ExecutorActionRecord, StepStatus
+from .executor import ActionTarget, execute_actions_with_records
 from .llm import LLMAnswerClient, ollama_cloud_client_from_env
 from .observer import observe_page
 from .policy import plan_guarded_actions
@@ -26,6 +26,8 @@ RESUME_SUMMARY_MAX_CHARS = 8000
 SKILLS_MAX_CHARS = 2000
 EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
 PHONE_RE = re.compile(r"(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}")
+GITHUB_RE = re.compile(r"(?:https?://)?(?:www\.)?github\.com/[A-Za-z0-9_.-]+", re.IGNORECASE)
+US_STATE_RE = re.compile(r"\b(A[LKZR]|C[AOT]|D[CE]|FL|GA|HI|I[ADLN]|K[SY]|LA|M[ADEHINOPST]|N[CDEHJMVY]|O[HKR]|PA|RI|S[CD]|T[NX]|UT|V[AIT]|W[AIVY])\b")
 COMMON_RESUME_SKILLS = (
     "Python",
     "Java",
@@ -75,6 +77,13 @@ def extract_contact_facts(resume_text: str) -> dict[str, str]:
     phone = PHONE_RE.search(resume_text)
     if phone:
         facts["phone"] = phone.group(0)
+        facts.setdefault("country", "United States")
+    github = GITHUB_RE.search(resume_text)
+    if github:
+        handle = github.group(0)
+        facts["github"] = handle if handle.startswith("http") else f"https://{handle}"
+    if "country" not in facts and US_STATE_RE.search(resume_text):
+        facts["country"] = "United States"
     return facts
 
 
@@ -160,12 +169,49 @@ def _target_selectors(target_id: str) -> tuple[str, ...]:
 class PlaywrightActionTarget:
     def __init__(self, page: PageSession) -> None:
         self.page = page
+        self._field_selectors: dict[str, str] = {}
+        self._button_selectors: dict[str, str] = {}
+        self._field_frames: dict[str, str] = {}
+        self._button_frames: dict[str, str] = {}
+
+    def set_selectors(
+        self,
+        field_selectors: dict[str, str],
+        button_selectors: dict[str, str],
+        field_frames: dict[str, str] | None = None,
+        button_frames: dict[str, str] | None = None,
+    ) -> None:
+        self._field_selectors = dict(field_selectors)
+        self._button_selectors = dict(button_selectors)
+        self._field_frames = dict(field_frames or {})
+        self._button_frames = dict(button_frames or {})
+
+    def _scope_for_target(self, target_id: str) -> Any:
+        frame_name = self._field_frames.get(target_id) or self._button_frames.get(target_id)
+        if not frame_name or not frame_name.startswith("frame_"):
+            return self.page
+        try:
+            frame_index = int(frame_name.removeprefix("frame_"))
+        except ValueError:
+            return self.page
+        frames = list(getattr(self.page, "frames", []) or [])
+        if 0 <= frame_index < len(frames):
+            return frames[frame_index]
+        return self.page
 
     def _locator(self, target_id: str) -> Any:
         last_error: Exception | None = None
-        for selector in _target_selectors(target_id):
+        observer_selector = self._field_selectors.get(target_id) or self._button_selectors.get(target_id)
+        selectors_to_try: list[str] = []
+        if observer_selector:
+            selectors_to_try.append(observer_selector)
+        selectors_to_try.extend(_target_selectors(target_id))
+        scope = self._scope_for_target(target_id)
+        for selector in selectors_to_try:
             try:
-                locator = self.page.locator(selector).first()  # type: ignore[attr-defined]
+                base = scope.locator(selector)  # type: ignore[attr-defined]
+                first = getattr(base, "first", None)
+                locator = first() if callable(first) else (first or base)
                 if locator.count():
                     return locator
             except Exception as exc:
@@ -175,7 +221,12 @@ class PlaywrightActionTarget:
         raise ValueError(f"Unable to find page target: {target_id}")
 
     def fill(self, target_id: str, value: str) -> None:
-        self._locator(target_id).fill(value)
+        locator = self._locator(target_id)
+        locator.fill(value)
+        role = locator.get_attribute("role")
+        autocomplete = locator.get_attribute("aria-autocomplete")
+        if role == "combobox" or autocomplete == "list":
+            locator.press("Enter")
 
     def select(self, target_id: str, value: str | list[str]) -> None:
         self._locator(target_id).select_option(value)
@@ -191,7 +242,17 @@ class PlaywrightActionTarget:
         self._locator(target_id).set_input_files(str(Path(path).expanduser()))
 
     def click(self, target_id: str) -> None:
-        self._locator(target_id).click()
+        locator = self._locator(target_id)
+        expect_navigation = getattr(self.page, "expect_navigation", None)
+        if not callable(expect_navigation):
+            locator.click()
+            return
+        try:
+            with expect_navigation(wait_until="domcontentloaded", timeout=10000):
+                locator.click()
+        except Exception as exc:
+            if "timeout" not in str(exc).lower():
+                raise
 
 
 @dataclass(frozen=True)
@@ -267,6 +328,49 @@ def with_resume_facts(facts: dict[str, str], resume_path: str | None) -> dict[st
         enriched.setdefault(key, value)
     return enriched
 
+
+def sensitive_profile_facts(raw: dict[str, object]) -> dict[str, str]:
+    sensitive_profile = raw.get("sensitive_profile")
+    if not isinstance(sensitive_profile, dict):
+        return {}
+    answers = sensitive_profile.get("answers")
+    if not isinstance(answers, dict):
+        return {}
+    facts: dict[str, str] = {}
+    for key, item in answers.items():
+        if not isinstance(item, dict) or item.get("persistence") != "always":
+            continue
+        value = item.get("value")
+        if value is not None and str(value).strip():
+            facts[str(key)] = str(value)
+    return facts
+
+
+PROTECTED_PROFILE_FACT_KEYS = {
+    "application_attestation",
+    "disability_status",
+    "gender",
+    "hispanic_ethnicity",
+    "hispanic_latino",
+    "race",
+    "sponsorship",
+    "work_authorization",
+    "veteran_status",
+}
+
+
+def plain_profile_facts(raw: dict[str, object]) -> dict[str, str]:
+    return {
+        str(key): str(value)
+        for key, value in raw.items()
+        if key != "sensitive_profile"
+        and str(key).lower() not in PROTECTED_PROFILE_FACT_KEYS
+        and value is not None
+        and str(value).strip()
+    }
+
+
+
 def load_applicant_profile(
     path: str | Path | None,
     *,
@@ -284,7 +388,7 @@ def load_applicant_profile(
     raw = json.loads(Path(path).expanduser().read_text())
     if not isinstance(raw, dict):
         raise ValueError("Applicant profile JSON must be an object")
-    facts = {**base.facts, **{str(key): str(value) for key, value in raw.items() if value is not None and str(value).strip()}}
+    facts = {**base.facts, **plain_profile_facts(raw), **sensitive_profile_facts(raw)}
     facts = {key: value for key, value in facts.items() if key.lower() not in excluded}
     return ApplicantProfile(facts=with_resume_facts(facts, selected_resume_path), resume_path=selected_resume_path)
 
@@ -346,12 +450,13 @@ def run_application_once(
     max_pages: int = 6,
     llm_client: LLMAnswerClient | None = None,
     block_linkedin_jobs: bool = False,
+    llm_enabled: bool = True,
 ) -> tuple[int, StepStatus]:
     if max_pages < 1:
         raise ValueError("max_pages must be at least 1")
     run_id = start_application_run(connection, job_id=int(job["id"]), started_at=now())
     final_status = StepStatus.FAILED
-    actions: list[ExecutorAction] = []
+    action_records: list[ExecutorActionRecord] = []
     try:
         url = job_application_url(job)
         if not url:
@@ -386,12 +491,19 @@ def run_application_once(
             pass
         for page_index in range(max_pages):
             snapshot = observe_page(page)
+            if hasattr(action_target, "set_selectors"):
+                field_selectors = {field.id: field.selector for field in snapshot.fields if field.selector}
+                button_selectors = {button.id: button.selector for button in snapshot.buttons if button.selector}
+                field_frames = {field.id: field.frame for field in snapshot.fields if field.frame}
+                button_frames = {button.id: button.frame for button in snapshot.buttons if button.frame}
+                action_target.set_selectors(field_selectors, button_selectors, field_frames=field_frames, button_frames=button_frames)
             resolved = resolve_snapshot(
                 snapshot,
                 facts=profile.facts,
                 resume_path=profile.resume_path,
                 job_description=job_description_from_row(job),
                 llm_client=llm_client,
+                llm_enabled=llm_enabled,
             )
             decision = plan_guarded_actions(snapshot, resolved)
             record_application_page(
@@ -405,7 +517,20 @@ def run_application_once(
             )
             if decision.status != StepStatus.CONTINUE:
                 if decision.status in {StepStatus.DRY_RUN_READY, StepStatus.NEEDS_REVIEW}:
-                    actions.extend(execute_actions(action_target, decision, resume_path=profile.resume_path))
+                    _executed, records = execute_actions_with_records(action_target, decision, resume_path=profile.resume_path)
+                    action_records.extend(records)
+                    failed_record = next((record for record in records if record.status == "failed"), None)
+                    if failed_record is not None:
+                        finish_application_run(
+                            connection,
+                            run_id=run_id,
+                            status=StepStatus.FAILED,
+                            reason=failed_record.reason or "executor_action_failed",
+                            finished_at=now(),
+                            final_url=snapshot.url,
+                            actions=action_records,
+                        )
+                        return run_id, StepStatus.FAILED
                 finish_application_run(
                     connection,
                     run_id=run_id,
@@ -413,12 +538,24 @@ def run_application_once(
                     reason=decision.reason,
                     finished_at=now(),
                     final_url=snapshot.url,
-                    actions=actions,
+                    actions=action_records,
                 )
                 return run_id, decision.status
 
-            executed = execute_actions(action_target, decision, resume_path=profile.resume_path)
-            actions.extend(executed)
+            _executed, records = execute_actions_with_records(action_target, decision, resume_path=profile.resume_path)
+            action_records.extend(records)
+            failed_record = next((record for record in records if record.status == "failed"), None)
+            if failed_record is not None:
+                finish_application_run(
+                    connection,
+                    run_id=run_id,
+                    status=StepStatus.FAILED,
+                    reason=failed_record.reason or "executor_action_failed",
+                    finished_at=now(),
+                    final_url=snapshot.url,
+                    actions=action_records,
+                )
+                return run_id, StepStatus.FAILED
             page.wait_for_load_state("domcontentloaded")
 
         final_status = StepStatus.NEEDS_REVIEW
@@ -429,7 +566,7 @@ def run_application_once(
             reason=f"max pages reached without final submit boundary: {max_pages}",
             finished_at=now(),
             final_url=str(getattr(page, "url", None) or ""),
-            actions=actions,
+            actions=action_records,
         )
         return run_id, final_status
     except Exception as exc:
@@ -440,7 +577,7 @@ def run_application_once(
             reason=str(exc),
             finished_at=now(),
             final_url=str(getattr(page, "url", None) or ""),
-            actions=actions,
+            actions=action_records,
         )
         return run_id, StepStatus.FAILED
 
@@ -458,6 +595,7 @@ def run_backlog_applications(
     close_browser: bool = True,
     llm_client: LLMAnswerClient | None = None,
     block_linkedin_jobs: bool = False,
+    llm_enabled: bool = True,
 ) -> dict[str, int | list[int]]:
     summary = ApplicationRunSummary()
     try:
@@ -499,6 +637,7 @@ def run_backlog_applications(
                     max_pages=max_pages,
                     llm_client=llm_client,
                     block_linkedin_jobs=block_linkedin_jobs,
+                    llm_enabled=llm_enabled,
                 )
                 summary.run_ids.append(run_id)
                 summary.record(status)
@@ -549,5 +688,6 @@ def run_backlog_with_playwright(
             handoff_callback=prompt_for_manual_handoff if manual_handoff else None,
             close_browser=not manual_handoff,
             llm_client=llm_client,
+            llm_enabled=use_llm,
             block_linkedin_jobs=block_linkedin_jobs,
         )

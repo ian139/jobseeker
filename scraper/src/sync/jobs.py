@@ -14,8 +14,11 @@ from urllib.parse import urlsplit, urlunsplit
 
 from dotenv import load_dotenv
 from apply_pipeline.backlog import next_backlog_jobs
+from apply_pipeline.policy import SENSITIVE_FIELD_RE
+from apply_pipeline.resolver import fact_key_for_label
 from apply_pipeline.contracts import StepStatus
-from apply_pipeline.runner import load_applicant_profile, resume_facts_from_path, run_backlog_with_playwright
+from apply_pipeline.llm import ollama_cloud_client_from_env
+from apply_pipeline.runner import ApplicantProfile, PlaywrightActionTarget, load_applicant_profile, resume_facts_from_path, run_application_once, run_backlog_with_playwright
 from apply_pipeline.runs import finish_application_run, start_application_run
 from apply_pipeline.job_source import list_source_jobs, normalize_source_job, source_job_to_theirstack_like_raw
 
@@ -147,7 +150,7 @@ def matches_profile_filter(profile: ProfileName, raw: dict[str, Any]) -> bool:
 
 def parse_job(raw: dict[str, Any]) -> dict[str, Any]:
     job_id = first_string(raw, "id", "job_id", "theirStackId", "theirstack_id")
-    url = first_string(raw, "final_url", "url", "source_url", "apply_url")
+    url = first_string(raw, "apply_url", "final_url", "url", "source_url")
     canonical_url = canonicalize_url(url)
     if not job_id and not canonical_url:
         raise ValueError("TheirStack job must include id or URL for dedupe")
@@ -667,6 +670,299 @@ def sample_application_failures(
     return samples
 
 
+def _json_or_none(value: str | None) -> Any:
+    if value is None:
+        return None
+    return json.loads(value)
+
+
+def _latest_application_page(connection: sqlite3.Connection, run_id: int) -> sqlite3.Row | None:
+    return connection.execute(
+        """
+        SELECT page_index, url, snapshot_json, resolver_json, created_at
+        FROM application_pages
+        WHERE run_id = ?
+        ORDER BY page_index DESC
+        LIMIT 1
+        """,
+        (run_id,),
+    ).fetchone()
+
+
+def _annotation_template(snapshot: dict[str, Any] | None) -> list[dict[str, str]]:
+    if not snapshot:
+        return []
+    decisions: list[dict[str, str]] = []
+    for field in snapshot.get("fields", ()):
+        field_id = str(field.get("id") or "").strip()
+        if field_id:
+            decisions.append({"field_id": field_id, "answer": "", "persistence": "once", "note": ""})
+    return decisions
+
+
+def application_review_packets(
+    connection: sqlite3.Connection, *, status: str = "needs_review", limit: int = 10
+) -> list[dict[str, Any]]:
+    initialize_database(connection)
+    rows = connection.execute(
+        """
+        SELECT application_runs.id AS run_id, application_runs.status, application_runs.reason,
+               application_runs.final_url, application_runs.actions_json,
+               jobs.title, jobs.company_name, jobs.canonical_url
+        FROM application_runs
+        JOIN jobs ON jobs.id = application_runs.job_id
+        WHERE application_runs.status = ?
+        ORDER BY application_runs.id DESC
+        LIMIT ?
+        """,
+        (status, limit),
+    ).fetchall()
+    packets: list[dict[str, Any]] = []
+    for row in rows:
+        latest_page = _latest_application_page(connection, int(row["run_id"]))
+        snapshot = _json_or_none(latest_page["snapshot_json"]) if latest_page is not None else None
+        resolver = _json_or_none(latest_page["resolver_json"]) if latest_page is not None else None
+        actions = json.loads(row["actions_json"] or "[]")
+        failed_actions = [action for action in actions if action.get("status") == "failed"]
+        packet = {
+            "run_id": int(row["run_id"]),
+            "status": row["status"],
+            "reason": row["reason"],
+            "final_url": row["final_url"],
+            "apply_host": url_host(row["final_url"] or row["canonical_url"]),
+            "job": {
+                "title": row["title"],
+                "company_name": row["company_name"],
+                "canonical_url": row["canonical_url"],
+            },
+            "latest_page": None
+            if latest_page is None
+            else {
+                "page_index": latest_page["page_index"],
+                "url": latest_page["url"],
+                "created_at": latest_page["created_at"],
+                "snapshot": snapshot,
+                "resolver": resolver,
+            },
+            "failed_actions": failed_actions,
+            "annotation_template": {
+                "run_id": int(row["run_id"]),
+                "decisions": _annotation_template(snapshot),
+            },
+        }
+        packets.append(packet)
+    return packets
+
+
+def _field_labels_by_id(connection: sqlite3.Connection, run_id: int) -> dict[str, str]:
+    latest_page = _latest_application_page(connection, run_id)
+    snapshot = _json_or_none(latest_page["snapshot_json"]) if latest_page is not None else None
+    if not snapshot:
+        return {}
+    return {str(field.get("id")): str(field.get("label") or "") for field in snapshot.get("fields", ()) if field.get("id")}
+
+
+def _is_sensitive_annotation(field_id: str, labels_by_id: dict[str, str]) -> bool:
+    label = labels_by_id.get(field_id, field_id)
+    return bool(SENSITIVE_FIELD_RE.search(label))
+
+
+def _load_annotation_payload(path: str | Path) -> dict[str, Any]:
+    payload = json.loads(Path(path).expanduser().read_text())
+    if not isinstance(payload, dict):
+        raise ValueError("Review annotation JSON must be an object")
+    return payload
+
+
+def _profile_key_for_annotation(field_id: str, labels_by_id: dict[str, str]) -> str:
+    label = labels_by_id.get(field_id, "")
+    return fact_key_for_label(label) or fact_key_for_label(field_id) or field_id
+
+
+def _upsert_profile_value(profile: dict[str, Any], *, profile_key: str, answer: Any, sensitive: bool) -> str:
+    if sensitive:
+        sensitive_profile = profile.setdefault("sensitive_profile", {})
+        if not isinstance(sensitive_profile, dict):
+            raise ValueError("profile sensitive_profile must be an object")
+        answers = sensitive_profile.setdefault("answers", {})
+        if not isinstance(answers, dict):
+            raise ValueError("profile sensitive_profile.answers must be an object")
+        answers[profile_key] = {"value": str(answer), "persistence": "always"}
+        return f"sensitive_profile.{profile_key}"
+    profile[profile_key] = str(answer)
+    return profile_key
+
+
+def apply_review_annotations(
+    connection: sqlite3.Connection,
+    annotation_path: str | Path,
+    *,
+    profile_path: str | Path | None = None,
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    initialize_database(connection)
+    payload = _load_annotation_payload(annotation_path)
+    run_id = int(payload.get("run_id") or 0)
+    if run_id < 1:
+        raise ValueError("Review annotations require a positive run_id")
+    if connection.execute("SELECT 1 FROM application_runs WHERE id = ?", (run_id,)).fetchone() is None:
+        raise ValueError(f"Unknown application run_id: {run_id}")
+    decisions = payload.get("decisions")
+    if not isinstance(decisions, list):
+        raise ValueError("Review annotations require a decisions list")
+    labels_by_id = _field_labels_by_id(connection, run_id)
+    timestamp = created_at or utc_now()
+    stored = 0
+    profile_updates: list[str] = []
+    profile: dict[str, Any] | None = None
+    resolved_profile_path: Path | None = None
+    if profile_path is not None:
+        resolved_profile_path = Path(profile_path).expanduser()
+        profile = json.loads(resolved_profile_path.read_text()) if resolved_profile_path.exists() else {}
+        if not isinstance(profile, dict):
+            raise ValueError("Applicant profile JSON must be an object")
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            raise ValueError("Each review annotation decision must be an object")
+        field_id = str(decision.get("field_id") or "").strip()
+        if not field_id:
+            raise ValueError("Review annotation decision missing field_id")
+        persistence = str(decision.get("persistence") or "").strip().lower()
+        if persistence not in {"once", "always", "never"}:
+            raise ValueError(f"Invalid review annotation persistence for {field_id}: {persistence}")
+        note = str(decision.get("note")).strip() if decision.get("note") is not None else None
+        has_answer = "answer" in decision and decision.get("answer") not in (None, "")
+        answer_json = json.dumps(decision.get("answer"), sort_keys=True) if has_answer else None
+        if persistence != "never" and not has_answer:
+            raise ValueError(f"Review annotation decision requires answer unless persistence is never: {field_id}")
+        connection.execute(
+            """
+            INSERT INTO application_review_annotations (run_id, field_id, answer_json, persistence, note, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id, field_id) DO UPDATE SET
+                answer_json = excluded.answer_json,
+                persistence = excluded.persistence,
+                note = excluded.note,
+                created_at = excluded.created_at
+            """,
+            (run_id, field_id, answer_json, persistence, note, timestamp),
+        )
+        stored += 1
+        if persistence == "always" and has_answer and profile is not None:
+            profile_key = _profile_key_for_annotation(field_id, labels_by_id)
+            profile_updates.append(_upsert_profile_value(profile, profile_key=profile_key, answer=decision["answer"], sensitive=_is_sensitive_annotation(field_id, labels_by_id)))
+    if profile is not None and resolved_profile_path is not None:
+        resolved_profile_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_profile_path.write_text(json.dumps(profile, indent=2, sort_keys=True) + "\n")
+    return {"run_id": run_id, "stored": stored, "profile_updates": sorted(profile_updates)}
+
+
+def _annotation_answer_facts(payload: dict[str, Any]) -> dict[str, str]:
+    decisions = payload.get("decisions")
+    if not isinstance(decisions, list):
+        raise ValueError("Review annotations require a decisions list")
+    facts: dict[str, str] = {}
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            raise ValueError("Each review annotation decision must be an object")
+        persistence = str(decision.get("persistence") or "").strip().lower()
+        if persistence in {"once", "always"} and "answer" in decision and decision.get("answer") not in (None, ""):
+            field_id = str(decision.get("field_id") or "").strip()
+            if field_id:
+                facts[field_id] = str(decision["answer"])
+    return facts
+
+
+def _job_id_for_review_run(connection: sqlite3.Connection, run_id: int) -> int:
+    row = connection.execute("SELECT job_id FROM application_runs WHERE id = ?", (run_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"Unknown application run_id: {run_id}")
+    return int(row["job_id"])
+
+
+def run_review_job_with_playwright(
+    connection: sqlite3.Connection,
+    *,
+    job_id: int,
+    profile: ApplicantProfile,
+    now: Any,
+    max_pages: int = 6,
+    headed: bool = False,
+    manual_handoff: bool = False,
+    use_llm: bool = True,
+    block_linkedin_jobs: bool = False,
+) -> dict[str, int | list[int]]:
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        raise RuntimeError("Install Playwright to use live apply review reruns") from exc
+    job = connection.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    if job is None:
+        raise ValueError(f"Unknown job_id: {job_id}")
+    llm_client = ollama_cloud_client_from_env() if use_llm else None
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=not (headed or manual_handoff))
+        page = browser.new_page()
+        try:
+            run_id, status = run_application_once(
+                connection,
+                job=job,
+                page=page,
+                action_target=PlaywrightActionTarget(page),
+                profile=profile,
+                now=now,
+                max_pages=max_pages,
+                llm_client=llm_client,
+                block_linkedin_jobs=block_linkedin_jobs,
+                llm_enabled=use_llm,
+            )
+            if manual_handoff and status in {StepStatus.DRY_RUN_READY, StepStatus.NEEDS_REVIEW, StepStatus.BLOCKED, StepStatus.FAILED}:
+                print(f"Manual handoff for run {run_id}: {status.value} at {getattr(page, 'url', 'about:blank')}")
+                print("Review/edit the browser page now. Press Enter only to end inspection; it will not resume automation or submit.")
+                input()
+            return {
+                "attempted": 1,
+                "dry_run_ready": 1 if status == StepStatus.DRY_RUN_READY else 0,
+                "needs_review": 1 if status == StepStatus.NEEDS_REVIEW else 0,
+                "blocked": 1 if status == StepStatus.BLOCKED else 0,
+                "failed": 1 if status == StepStatus.FAILED else 0,
+                "run_ids": [run_id],
+            }
+        finally:
+            if not manual_handoff:
+                browser.close()
+
+
+def rerun_from_review_annotations(
+    connection: sqlite3.Connection,
+    annotation_path: str | Path,
+    *,
+    profile_path: str | Path | None = None,
+    resume_path: str | None = None,
+    now: Any = utc_now,
+    max_pages: int = 6,
+    headed: bool = False,
+    manual_handoff: bool = False,
+    use_llm: bool = True,
+    block_linkedin_jobs: bool = False,
+) -> dict[str, int | list[int]]:
+    payload = _load_annotation_payload(annotation_path)
+    result = apply_review_annotations(connection, annotation_path, profile_path=profile_path)
+    profile = load_applicant_profile(profile_path, resume_path=resume_path)
+    profile = ApplicantProfile(facts={**profile.facts, **_annotation_answer_facts(payload)}, resume_path=profile.resume_path)
+    return run_review_job_with_playwright(
+        connection,
+        job_id=_job_id_for_review_run(connection, int(result["run_id"])),
+        profile=profile,
+        now=now,
+        max_pages=max_pages,
+        headed=headed,
+        manual_handoff=manual_handoff,
+        use_llm=use_llm,
+        block_linkedin_jobs=block_linkedin_jobs,
+    )
+
+
 def main(argv: Iterable[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Credit-safe TheirStack job sync prototype")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -689,6 +985,21 @@ def main(argv: Iterable[str] | None = None) -> None:
     sample_parser = subparsers.add_parser("apply-sample-failures", help="List application failures for review")
     sample_parser.add_argument("--status", choices=["dry_run_ready", "needs_review", "blocked", "failed"], default="blocked")
     sample_parser.add_argument("--limit", type=int, default=10)
+    packet_parser = subparsers.add_parser("apply-review-packets", help="Emit rich review packets for application handoff/failure annotation")
+    packet_parser.add_argument("--status", choices=["dry_run_ready", "needs_review", "blocked", "failed"], default="needs_review")
+    packet_parser.add_argument("--limit", type=int, default=10)
+    annotation_parser = subparsers.add_parser("apply-review-annotations", help="Store JSON review annotations and update always-on profile facts")
+    annotation_parser.add_argument("--input", required=True, help="Review annotation JSON file")
+    annotation_parser.add_argument("--profile-json", help="Profile JSON to update for persistence=always decisions")
+    rerun_parser = subparsers.add_parser("apply-rerun-from-review", help="Apply JSON review annotations and rerun the annotated job")
+    rerun_parser.add_argument("--input", required=True, help="Review annotation JSON file")
+    rerun_parser.add_argument("--profile-json", help="Applicant profile JSON file")
+    rerun_parser.add_argument("--resume", help="Resume path allowed for upload fields")
+    rerun_parser.add_argument("--max-pages", type=int, default=6)
+    rerun_parser.add_argument("--headed", action="store_true", help="Show browser during live apply review reruns")
+    rerun_parser.add_argument("--manual-handoff", action="store_true", help="Keep browser open on terminal status until Enter ends inspection")
+    rerun_parser.add_argument("--no-llm", action="store_true", help="Disable the optional Ollama Cloud DeepSeek resolver")
+    rerun_parser.add_argument("--block-linkedin-jobs", action="store_true", help="Mark linkedin.com application URLs blocked before opening a browser page")
     sync_parser = subparsers.add_parser("sync-once", help="Run paid sync if ENABLE_PAID_FETCH=true")
     sync_parser.add_argument("--profile", choices=PROFILE_NAMES, default="fall_coop_swe_data")
     sync_parser.add_argument("--limit", type=int, default=25)
@@ -754,6 +1065,29 @@ def main(argv: Iterable[str] | None = None) -> None:
         if args.command == "apply-sample-failures":
             rows = sample_application_failures(connection, status=args.status, limit=args.limit)
             print(json.dumps(rows, indent=2, sort_keys=True))
+            return
+        if args.command == "apply-review-packets":
+            rows = application_review_packets(connection, status=args.status, limit=args.limit)
+            print(json.dumps(rows, indent=2, sort_keys=True))
+            return
+        if args.command == "apply-review-annotations":
+            result = apply_review_annotations(connection, args.input, profile_path=args.profile_json)
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return
+        if args.command == "apply-rerun-from-review":
+            result = rerun_from_review_annotations(
+                connection,
+                args.input,
+                profile_path=args.profile_json,
+                resume_path=args.resume,
+                now=utc_now,
+                max_pages=args.max_pages,
+                headed=args.headed,
+                manual_handoff=args.manual_handoff,
+                use_llm=not args.no_llm,
+                block_linkedin_jobs=args.block_linkedin_jobs,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
             return
         if args.command == "import-job-source":
             base_url, api_key = job_source_settings_from_env()

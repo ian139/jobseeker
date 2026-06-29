@@ -26,20 +26,23 @@ SQLite job backlog
 Playwright opens apply URL
  ↓
 Deterministic observer scans DOM/frames
+  no board-specific templates
  ↓
 Normalized page snapshot
-  fields: id, kind, label, required, options
-  buttons: id, text, type, disabled
-  errors
+  fields: id, kind, label, required, options, value, visible, frame, selector
+  buttons: id, text, type, disabled, finalSubmitCandidate, visible, frame, selector
+  errors/blockers
  ↓
-LLM resolver
-  input: page snapshot + profile + resume + facts + job description + policies
-  output: JSON answers + nextButton + submitButton
+LLM-first resolver
+  input: normalized snapshot + profile + resume + facts + job description + policies + skills/SKILL.md live-proof-routing guidance
+  output: strict JSON answers + nextButton + submitButton + needsReview
+  may choose safe initial Apply/Start navigation from observed buttons
+  may not answer sensitive/legal fields or choose final submit
  ↓
-Guarded executor
-  fills text/select/radio/checkbox/typeahead/file fields
-  uploads resume only
-  clicks only safe non-final navigation
+Guarded generic executor
+  reusable Playwright fill/select/check/upload/click only
+  uploads configured resume only
+  clicks only policy-approved non-final navigation
   never clicks final submit
  ↓
 Loop up to configured page limit
@@ -150,7 +153,7 @@ Goal: convert a live page into a normalized page snapshot without deciding answe
 
 ## Phase 3 — Resolver contract
 
-Goal: map known facts to answers using strict JSON, while refusing unknown/sensitive fields.
+Goal: use an LLM-first resolver over normalized page JSON and applicant/job context, while deterministic facts, schema checks, and policy guardrails refuse unknown/sensitive fields.
 
 ### Tasks
 
@@ -167,12 +170,12 @@ Goal: map known facts to answers using strict JSON, while refusing unknown/sensi
     - `next_button_id | null`
     - `submit_button_id | null`
     - `needs_review: [reason]`
-2. Add deterministic resolver helpers before any LLM adapter.
+2. Keep deterministic resolver helpers as fallback/guardrails.
   - Match common fields: name, email, phone, location, LinkedIn, GitHub, portfolio.
   - Match resume upload field.
   - Refuse sensitive/legal/unknown fields.
-3. Keep any future LLM adapter behind a narrow interface.
-  - The adapter may accept only normalized JSON and return strict JSON.
+3. Keep the LLM adapter behind a narrow interface.
+  - The adapter accepts only normalized JSON plus profile/resume/job context and `skills/SKILL.md` live-proof-routing guidance, then returns strict JSON.
   - It must not see raw browser handles.
 4. Add tests.
   - Known fields resolve.

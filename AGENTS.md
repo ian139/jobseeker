@@ -13,19 +13,22 @@ Playwright opens apply URL
   ↓
 Deterministic observer scans DOM/frames
   ↓
-Normalized page snapshot
-  fields: id, kind, label, required, options
-  buttons: id, text, type, disabled
-  errors
+Normalized DOM snapshot
+  fields: id, kind, label, required, options, value, visible, frame, selector
+  buttons: id, text, type, disabled, finalSubmitCandidate, visible, frame, selector
+  errors/blockers
+  no board-specific Playwright templates
   ↓
-LLM resolver
-  input: page snapshot + profile + resume + facts + job description + policies
-  output: JSON answers + nextButton + submitButton
+LLM-first resolver
+  input: normalized snapshot + profile + resume + facts + job description + policies
+  output: strict JSON answers + nextButton + submitButton + needsReview
+  may choose safe initial Apply/Start navigation from observed buttons
+  must refuse unknown/sensitive/legal answers instead of guessing
   ↓
-Guarded executor
-  fills text/select/radio/checkbox/typeahead/file fields
+Guarded generic executor
+  reusable Playwright fill/select/check/upload/click only
   uploads resume only
-  clicks non-final Next/Continue/Apply navigation
+  clicks policy-approved non-final Apply/Next/Continue navigation
   never clicks final submit
   ↓
 Loop observe → resolve → fill → advance
@@ -57,6 +60,7 @@ Keep these responsibilities separate. Do not blur them for convenience.
 - Output: strict JSON answers, next button, submit button, and uncertainty flags.
 - Must refuse unknown/sensitive fields instead of guessing.
 - Never performs browser actions.
+- The in-program DeepSeek/Ollama resolver loads `skills/SKILL.md` as operational guidance for live proof/navigation while still returning strict JSON for guarded execution.
 
 ### Executor: allowed actions only
 
@@ -141,7 +145,7 @@ Mandatory workflow invariants:
 - Launch OMP from the repository root so this `AGENTS.md` file is auto-loaded.
 - Treat this file as always-on policy for every coordinator, worker, and review prompt.
 - Use test-first development: add or update the focused failing test before implementation.
-- Use DeepSeek V4 Pro through Ollama Cloud for implementation workers by default: `omp --model "ollama-cloud/deepseek-v4-pro" --thinking medium`.
+- Use DeepSeek V4 Pro through Ollama Cloud for implementation workers by default: `omp --model "ollama-cloud/deepseek-v4-pro" --thinking high`.
 - Use `orca-dev` instead of `orca` only when operating an Orca development build; keep the same worktree, terminal, and verification workflow.
 
 ## Architecture Bias: Microservices, Functional Core, Container First
@@ -215,295 +219,7 @@ Do not ask for vague “looks good” reviews. The coordinator owns scope review
 
 ## Orchestration policy
 
-For non-trivial work:
-
-1. Understand the goal and affected files.
-2. Decide whether workers reduce risk or latency.
-3. Assign explicit ownership if workers are used.
-4. Integrate results.
-5. Run the focused verification gate.
-
-Use workers when:
-
-- independent file ownership groups exist
-- one worker can verify while another implements
-- research can proceed independently
-- risky refactors need independent checking
-
-Avoid workers when:
-
-- the change is a small one-file edit
-- file ownership would overlap heavily
-- coordination costs exceed implementation costs
-
-Ask confirmation before:
-
-- deleting branches, worktrees, files, or databases
-- irreversible deployments
-- publishing externally
-- operations outside the project workspace
-- actions requiring credentials or billing
-
-## Worker Decision Heuristic
-
-Do not optimize for the number of agents.
-
-Spawn workers only when at least one of the following is true:
-
-- Two or more independent file ownership groups exist.
-- Estimated implementation time exceeds 15–20 minutes.
-- One worker can write or run verification while another implements.
-- Research can proceed independently of implementation.
-- A risky refactor benefits from an independent verification pass.
-
-Prefer 2–4 workers.
-
-Avoid more than 6 workers unless the task naturally decomposes into many independent slices.
-
-## Default Coordinator Model
-
-Every new feature worktree should have exactly one advisor-enabled parent agent.
-
-The parent agent is the coordinator. It owns:
-
-- planning
-- task splitting
-- file ownership
-- worker assignment
-- worker review
-- conflict resolution
-- final verification
-
-Launch the parent agent with:
-
-```bash
-omp --advisor --model "openai-codex/gpt-5.5" --thinking xhigh
-
-```
-
-The advisor is a guardrail for the parent. It helps keep plans, assignments, and final merges in scope.
-
-Do not assume the advisor controls child terminals. The parent must inspect worker output and enforce boundaries.
-
-
-
-## Planning Workflow
-
-For every new feature, bug fix, refactor, or research task, begin with `/plan` unless the request is a clearly trivial one-file change.
-
-The parent/coordinator agent owns planning.
-
-The planning phase should:
-
-1. Understand the user's goal.
-2. Identify affected files, modules, and repositories.
-3. Determine whether worker agents are beneficial.
-4. Define file ownership before any implementation begins.
-5. Identify risks, dependencies, and verification steps.
-6. Decide whether the work should be completed by:
-  - the coordinator alone, or
-  - one or more worker agents.
-
-After `/plan` completes:
-
-- If the work is small, the coordinator may implement it directly.
-- If the work naturally decomposes into independent slices, spawn worker agents only after ownership has been established.
-- Do not spawn workers before completing the planning phase.
-
-Do not repeatedly re-plan unless the task scope changes substantially.
-
-The planning phase is expected for nearly all non-trivial work and should be treated as the default starting point.
-
-## Worker Allocation
-
-The coordinator may use either same-worktree worker terminals or sub-worktree workers.
-
-Use same-worktree workers when:
-
-- the task is small
-- file ownership is completely disjoint
-- workers only need read-only review
-- edits are unlikely to conflict
-- speed matters more than isolation
-
-Use sub-worktree workers when:
-
-- two or more implementation paths should be explored in parallel
-- the task is risky or broad
-- workers may need to run tests or modify overlapping project state
-- independent patches should be reviewed before integration
-- competing approaches should be compared
-- isolation is more valuable than speed
-
-Do not create sub-worktrees casually. Create them when they improve isolation, parallelism, or review quality.
-
-For non-trivial tasks, the coordinator should explicitly decide during `/plan`:
-
-- coordinator-only
-- same-worktree workers
-- sub-worktree workers
-- mixed approach
-
-Good worker splits:
-
-- one file or tightly related file pair
-- one CLI command family
-- one storage/schema area
-- one focused test file
-- one read-only verification or contract-audit pass
-- one isolated experimental implementation
-- one competing patch approach
-
-Bad worker splits:
-
-- “clean up everything”
-- “make it better”
-- overlapping edits without sub-worktree isolation
-- broad architectural decisions delegated to workers
-- tasks that require another worker’s unfinished output
-
-## Worker Launch Commands
-
-Implementation workers default to DeepSeek V4 Pro through Ollama Cloud at medium thinking.
-
-DeepSeek V4 Pro worker:
-
-```bash
-orca terminal create --worktree active --title "<specific-subtask>" --command 'omp --model "ollama-cloud/deepseek-v4-pro" --thinking medium' --json
-```
-
-GPT-5.5 fallback worker:
-
-```bash
-orca terminal create --worktree active --title "<specific-subtask>" --command 'omp --model "openai-codex/gpt-5.5" --thinking medium' --json
-```
-
-Then wait for the worker and send a narrow assignment:
-
-```bash
-orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
-orca terminal send --terminal <handle> --text '<narrow task prompt>' --enter --json
-
-```
-
-## Sub-Worktree Worker Launch Commands
-
-Use sub-worktree workers when isolation is beneficial.
-
-Default pattern:
-
-```bash
-orca worktree create --name "<parent-feature>-<specific-subtask>" --parent-worktree active --json
-orca terminal create --worktree "<parent-feature>-<specific-subtask>" --title "<specific-subtask>" --command 'omp --model "ollama-cloud/deepseek-v4-pro" --thinking medium' --json
-orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
-orca terminal send --terminal <handle> --text '<narrow task prompt>' --enter --json
-
-```
-
-The coordinator must treat sub-worktree output as a patch proposal, not automatically accepted work.
-
-For every sub-worktree worker, the coordinator must:
-
-1. inspect the worker diff
-2. compare it against the assignment
-3. reject unrelated edits
-4. integrate the useful patch into the parent feature worktree
-5. rerun focused verification in the parent worktree
-6. only then continue to final verification
-
-Workers in sub-worktrees must not merge their own work into the parent.
-
-## Coordinator Rules
-
-The parent/coordinator must:
-
-1. Keep one parent per feature worktree.
-2. Write down file ownership before spawning workers.
-3. Spawn one worker per disjoint file, subsystem, or verification slice.
-4. Give each worker exact target files, symbols, non-goals, and acceptance checks.
-5. Prefer verification workers before risky merges or broad refactors.
-6. Review worker diffs before accepting them.
-7. Stop using worker output if the worker drifts out of scope.
-8. Resolve conflicts and duplicate implementations itself.
-9. Run final verification after worker output is integrated.
-10. Confirm final behavior from the user’s perspective.
-
-Workers must:
-
-1. Stay in the active worktree.
-2. Not create new worktrees.
-3. Only edit assigned files.
-4. Avoid broad cleanup.
-5. Avoid project-wide gates unless explicitly assigned.
-6. Ask the parent for blocking decisions instead of guessing.
-7. Report changed files, verification run, and unresolved risks.
-
-## Worker Prompt Template
-
-```text
-Context:
-AGENTS.md is mandatory project policy and is already available in this workspace. Follow it without asking the user to restate it. Use OMP_ORCA_WORKFLOW.md for OMP + Orca execution details.
-
-Target: <exact files/symbols>.
-
-Change:
-<specific behavior to add/fix>.
-
-Non-goals:
-Do not edit <files/subsystems>.
-Do not do broad cleanup.
-Do not create a new worktree unless explicitly assigned one.
-
-Ownership:
-You own only <files>.
-Do not touch anything else.
-
-Development rule:
-Add or update the focused failing test first, then implement the smallest passing patch.
-
-Acceptance:
-<focused checks or observable behavior>.
-
-Verification:
-Run <specific command or focused test>. Do not run project-wide gates unless assigned.
-
-Report:
-1. Files changed
-2. Test-first evidence
-3. Verification run
-4. Result
-5. Unresolved risks
-
-```
-
-
-
-## Default New Worktree Workflow
-
-For every new feature or risky fix, create one feature worktree first. Do not create nested worktrees for normal subtasks.
-
-Default flow:
-
-```bash
-orca worktree create --name "<short-feature-name>" --json
-
-orca terminal create --worktree "<short-feature-name>" --title "coordinator" --command 'omp --advisor --model "openai-codex/gpt-5.5" --thinking xhigh' --json
-
-orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
-```
-
-## Parent Handoff Checklist
-
-Before merging worker output, the parent must confirm:
-
-- worker stayed inside assigned ownership
-- no unrelated files changed
-- focused checks match the assignment
-- tests or verification were actually run
-- duplicate/conflicting implementations were reconciled
-- final behavior works from the user’s perspective
-- final diff is reviewed by the parent
-- remaining risks are documented
+Use `OMP_ORCA_WORKFLOW.md` as the canonical workflow for planning, worker allocation, Orca worktrees, launch commands, task dispatch, handoff review, and parent/coordinator checklists. Keep this file focused on product, safety, architecture, containerization, and review policy.
 
 ## Verification Contract
 

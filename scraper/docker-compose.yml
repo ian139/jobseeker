@@ -21,6 +21,8 @@ services:
       JOB_SOURCE_BASE_URL: ${JOB_SOURCE_BASE_URL:-}
       JOB_SOURCE_API_KEY: ${JOB_SOURCE_API_KEY:-}
       JOB_SYNC_DB_PATH: /app/data/jobs.sqlite3
+      APPLY_LLM_SKILL_PATH: ${APPLY_LLM_SKILL_PATH:-/app/skills/SKILL.md}
     volumes:
       - ./data:/app/data
+      - ../skills:/app/skills:ro
     command: ["job-sync", "dry-run"]

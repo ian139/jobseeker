@@ -42,10 +42,10 @@ During `/plan`, the coordinator must record:
 
 ## Worker model default
 
-Use ck V4 Pro through Ollama Cloud for implementation workers by default:
+Use DeepSeek V4 Pro through Ollama Cloud for implementation workers by default:
 
 ```bash
-omp --model "ollama-cloud/deepseek-v4-pro" --thinking medium
+omp --model "ollama-cloud/deepseek-v4-pro" --thinking high
 ```
 
 Use GPT-5.5 only when the task needs advisor-level coordination, unusually deep architecture work, or the DeepSeek/Ollama Cloud path is unavailable.
@@ -58,7 +58,7 @@ Use same-worktree workers only when file ownership is disjoint and conflicts are
 orca terminal create \
   --worktree active \
   --title "<specific-subtask>" \
-  --command 'omp --model "ollama-cloud/deepseek-v4-pro" --thinking medium' \
+  --command 'omp --model "ollama-cloud/deepseek-v4-pro" --thinking high' \
   --json
 orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
 orca terminal send --terminal <handle> --text '<narrow task prompt>' --enter --json
@@ -73,7 +73,7 @@ orca worktree create --name "<parent-feature>-<specific-subtask>" --parent-workt
 orca terminal create \
   --worktree "<parent-feature>-<specific-subtask>" \
   --title "<specific-subtask>" \
-  --command 'omp --model "ollama-cloud/deepseek-v4-pro" --thinking medium' \
+  --command 'omp --model "ollama-cloud/deepseek-v4-pro" --thinking high' \
   --json
 orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
 orca terminal send --terminal <handle> --text '<narrow task prompt>' --enter --json

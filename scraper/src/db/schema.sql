@@ -58,3 +58,16 @@ CREATE TABLE IF NOT EXISTS application_pages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_application_pages_run_id ON application_pages(run_id);
+
+CREATE TABLE IF NOT EXISTS application_review_annotations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id INTEGER NOT NULL REFERENCES application_runs(id) ON DELETE CASCADE,
+    field_id TEXT NOT NULL,
+    answer_json TEXT,
+    persistence TEXT NOT NULL CHECK (persistence IN ('once', 'always', 'never')),
+    note TEXT,
+    created_at TEXT NOT NULL,
+    UNIQUE(run_id, field_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_application_review_annotations_run_id ON application_review_annotations(run_id);

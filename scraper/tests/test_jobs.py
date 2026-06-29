@@ -71,6 +71,23 @@ def test_upsert_dedupes_by_canonical_url_without_id() -> None:
     assert row["title"] == "Software Engineer II"
 
 
+def test_upsert_prefers_apply_url_over_listing_url_fields() -> None:
+    connection = memory_db()
+    upsert_job(
+        connection,
+        {
+            "id": "ts-apply-url",
+            "job_title": "Software Engineer",
+            "url": "https://jobs.example.com/listing/1",
+            "source_url": "https://jobs.example.com/source/1",
+            "apply_url": "https://boards.example.com/apply/1",
+        },
+    )
+
+    row = connection.execute("SELECT canonical_url FROM jobs WHERE theirstack_job_id = 'ts-apply-url'").fetchone()
+    assert row["canonical_url"] == "https://boards.example.com/apply/1"
+
+
 def test_dry_run_does_not_call_api_by_default() -> None:
     rows = dry_run_profiles(BlockingClient(), call_api=False)
     assert len(rows) == 1
@@ -479,6 +496,26 @@ def test_apply_dry_run_live_forwards_linkedin_blocker_and_profile_exclusion(monk
     assert json.loads(capsys.readouterr().out)["attempted"] == 0
 
 
+
+def test_apply_dry_run_live_no_llm_forwards_disabled_flag(monkeypatch, tmp_path, capsys) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_load_applicant_profile(path: str | None, *, resume_path: str | None = None, exclude_facts=()):
+        return "profile"
+
+    def fake_run_backlog_with_playwright(connection, *, profile, now, limit, max_pages, headed, manual_handoff, use_llm, block_linkedin_jobs):
+        seen["use_llm"] = use_llm
+        return {"attempted": 0, "dry_run_ready": 0, "needs_review": 0, "blocked": 0, "failed": 0, "run_ids": []}
+
+    monkeypatch.setenv("JOB_SYNC_DB_PATH", str(tmp_path / "jobs.sqlite3"))
+    monkeypatch.setattr(jobs_module, "load_applicant_profile", fake_load_applicant_profile)
+    monkeypatch.setattr(jobs_module, "run_backlog_with_playwright", fake_run_backlog_with_playwright)
+
+    jobs_module.main(["apply-dry-run", "--live", "--no-llm"])
+
+    assert seen == {"use_llm": False}
+    assert json.loads(capsys.readouterr().out)["attempted"] == 0
+
 def test_profile_from_resume_command_writes_resume_profile(tmp_path, capsys) -> None:
     resume = tmp_path / "resume.txt"
     output = tmp_path / "profile.json"
@@ -490,3 +527,269 @@ def test_profile_from_resume_command_writes_resume_profile(tmp_path, capsys) -> 
     assert "Ian Rapko" in payload["resume_summary"]
     assert payload["skills"] == "Python, Playwright"
     assert "Wrote" in capsys.readouterr().out
+
+
+def test_apply_review_packets_include_latest_snapshot_resolver_and_failed_actions() -> None:
+    connection = memory_db()
+    upsert_job(connection, {"id": "ts-1", "job_title": "Software Engineer", "company_name": "Acme", "url": "https://example.com/apply"})
+    job_id = connection.execute("SELECT id FROM jobs WHERE theirstack_job_id = 'ts-1'").fetchone()["id"]
+    run_id = connection.execute(
+        """
+        INSERT INTO application_runs (job_id, status, reason, started_at, finished_at, final_url, actions_json)
+        VALUES (?, 'failed', 'executor_action_failed', '2026-01-01T00:00:00+00:00', '2026-01-01T00:01:00+00:00', 'https://example.com/apply', ?)
+        """,
+        (
+            job_id,
+            json.dumps(
+                [
+                    {"action": {"kind": "fill", "target_id": "email", "value": "ian@example.com"}, "status": "succeeded", "reason": None},
+                    {"action": {"kind": "fill", "target_id": "why", "value": "x"}, "status": "failed", "reason": "field detached"},
+                ]
+            ),
+        ),
+    ).lastrowid
+    connection.execute(
+        """
+        INSERT INTO application_pages (run_id, page_index, url, snapshot_json, resolver_json, created_at)
+        VALUES (?, 0, 'https://example.com/apply', ?, ?, '2026-01-01T00:00:30+00:00')
+        """,
+        (
+            run_id,
+            json.dumps(
+                {
+                    "url": "https://example.com/apply",
+                    "fields": [{"id": "why", "kind": "textarea", "label": "Why are you interested?", "required": True, "options": [], "value": None, "disabled": False, "visible": True, "frame": None, "selector": "#why"}],
+                    "buttons": [{"id": "next", "text": "Continue", "type": None, "disabled": False, "final_submit_candidate": False, "visible": True, "frame": None, "selector": "#next"}],
+                    "errors": [],
+                    "blockers": [],
+                    "metadata": {"observed_field_count": 1},
+                }
+            ),
+            json.dumps(
+                {
+                    "answers": [],
+                    "next_button_id": None,
+                    "submit_button_id": None,
+                    "needs_review": ["resolver_unknown_required_after_llm: Why are you interested?"],
+                    "metadata": {"reason_codes": ["resolver_unknown_required_after_llm"]},
+                }
+            ),
+        ),
+    )
+
+    packets = jobs_module.application_review_packets(connection, status="failed", limit=1)
+
+    assert packets[0]["run_id"] == run_id
+    assert packets[0]["job"] == {"title": "Software Engineer", "company_name": "Acme", "canonical_url": "https://example.com/apply"}
+    assert packets[0]["latest_page"]["snapshot"]["fields"][0]["id"] == "why"
+    assert packets[0]["latest_page"]["resolver"]["needs_review"] == ["resolver_unknown_required_after_llm: Why are you interested?"]
+    assert packets[0]["failed_actions"] == [{"action": {"kind": "fill", "target_id": "why", "value": "x"}, "status": "failed", "reason": "field detached"}]
+    assert packets[0]["annotation_template"]["run_id"] == run_id
+    assert packets[0]["annotation_template"]["decisions"][0] == {"field_id": "why", "answer": "", "persistence": "once", "note": ""}
+
+
+def test_apply_review_annotations_store_once_always_never_without_plain_sensitive_facts(tmp_path) -> None:
+    connection = memory_db()
+    upsert_job(connection, {"id": "ts-1", "job_title": "Software Engineer", "url": "https://example.com/apply"})
+    job_id = connection.execute("SELECT id FROM jobs WHERE theirstack_job_id = 'ts-1'").fetchone()["id"]
+    run_id = connection.execute(
+        """
+        INSERT INTO application_runs (job_id, status, reason, started_at, actions_json)
+        VALUES (?, 'needs_review', 'resolver_sensitive_field', '2026-01-01T00:00:00+00:00', '[]')
+        """,
+        (job_id,),
+    ).lastrowid
+    connection.execute(
+        """
+        INSERT INTO application_pages (run_id, page_index, url, snapshot_json, resolver_json, created_at)
+        VALUES (?, 0, 'https://example.com/apply', ?, NULL, '2026-01-01T00:00:30+00:00')
+        """,
+        (
+            run_id,
+            json.dumps(
+                {
+                    "url": "https://example.com/apply",
+                    "fields": [
+                        {"id": "gender", "kind": "typeahead", "label": "Gender", "required": False, "options": [], "value": None, "disabled": False, "visible": True, "frame": None, "selector": "#gender"},
+                        {"id": "hispanic_ethnicity", "kind": "typeahead", "label": "Are you Hispanic/Latino?", "required": False, "options": [], "value": None, "disabled": False, "visible": True, "frame": None, "selector": "#hispanic_ethnicity"},
+                        {"id": "country", "kind": "typeahead", "label": "Country", "required": True, "options": [], "value": None, "disabled": False, "visible": True, "frame": None, "selector": "#country"},
+                        {"id": "custom", "kind": "textarea", "label": "Explain manually", "required": True, "options": [], "value": None, "disabled": False, "visible": True, "frame": None, "selector": "#custom"},
+                    ],
+                    "buttons": [],
+                    "errors": [],
+                    "blockers": [],
+                    "metadata": {},
+                }
+            ),
+        ),
+    )
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps({"email": "ian@example.com"}) + "\n")
+    annotation_path = tmp_path / "annotations.json"
+    annotation_path.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "decisions": [
+                    {"field_id": "gender", "answer": "Male", "persistence": "always"},
+                    {"field_id": "hispanic_ethnicity", "answer": "No", "persistence": "once"},
+                    {"field_id": "country", "answer": "United States", "persistence": "always"},
+                    {"field_id": "custom", "persistence": "never", "note": "Manual only"},
+                ],
+            }
+        )
+    )
+
+    result = jobs_module.apply_review_annotations(connection, annotation_path, profile_path=profile_path, created_at="2026-01-01T00:02:00+00:00")
+
+    assert result == {"run_id": run_id, "stored": 4, "profile_updates": ["country", "sensitive_profile.gender"]}
+    rows = connection.execute("SELECT field_id, answer_json, persistence, note FROM application_review_annotations ORDER BY field_id").fetchall()
+    assert [dict(row) for row in rows] == [
+        {"field_id": "country", "answer_json": '"United States"', "persistence": "always", "note": None},
+        {"field_id": "custom", "answer_json": None, "persistence": "never", "note": "Manual only"},
+        {"field_id": "gender", "answer_json": '"Male"', "persistence": "always", "note": None},
+        {"field_id": "hispanic_ethnicity", "answer_json": '"No"', "persistence": "once", "note": None},
+    ]
+    profile = json.loads(profile_path.read_text())
+    assert profile["country"] == "United States"
+    assert "gender" not in profile
+    assert "hispanic_ethnicity" not in profile
+    assert profile["sensitive_profile"]["answers"]["gender"] == {"value": "Male", "persistence": "always"}
+
+
+
+def test_apply_review_annotations_save_always_answers_under_canonical_profile_keys(tmp_path) -> None:
+    connection = memory_db()
+    upsert_job(connection, {"id": "ts-1", "job_title": "Software Engineer", "url": "https://example.com/apply"})
+    job_id = connection.execute("SELECT id FROM jobs WHERE theirstack_job_id = 'ts-1'").fetchone()["id"]
+    run_id = connection.execute(
+        """
+        INSERT INTO application_runs (job_id, status, reason, started_at, actions_json)
+        VALUES (?, 'needs_review', 'resolver_sensitive_field', '2026-01-01T00:00:00+00:00', '[]')
+        """,
+        (job_id,),
+    ).lastrowid
+    connection.execute(
+        """
+        INSERT INTO application_pages (run_id, page_index, url, snapshot_json, resolver_json, created_at)
+        VALUES (?, 0, 'https://example.com/apply', ?, NULL, '2026-01-01T00:00:30+00:00')
+        """,
+        (
+            run_id,
+            json.dumps(
+                {
+                    "url": "https://example.com/apply",
+                    "fields": [
+                        {"id": "demographic_race_select", "kind": "typeahead", "label": "Please identify your race", "required": False, "options": [], "value": None, "disabled": False, "visible": True, "frame": None, "selector": "#race"},
+                        {"id": "country_dropdown_proxy", "kind": "typeahead", "label": "Country", "required": True, "options": [], "value": None, "disabled": False, "visible": True, "frame": None, "selector": "#country"},
+                    ],
+                    "buttons": [],
+                    "errors": [],
+                    "blockers": [],
+                    "metadata": {},
+                }
+            ),
+        ),
+    )
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text("{}\n")
+    annotation_path = tmp_path / "annotations.json"
+    annotation_path.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "decisions": [
+                    {"field_id": "demographic_race_select", "answer": "White", "persistence": "always"},
+                    {"field_id": "country_dropdown_proxy", "answer": "United States", "persistence": "always"},
+                ],
+            }
+        )
+    )
+
+    result = jobs_module.apply_review_annotations(connection, annotation_path, profile_path=profile_path)
+
+    assert result["profile_updates"] == ["country", "sensitive_profile.race"]
+    profile = json.loads(profile_path.read_text())
+    assert profile["country"] == "United States"
+    assert "country_dropdown_proxy" not in profile
+    assert "demographic_race_select" not in profile
+    assert profile["sensitive_profile"]["answers"]["race"] == {"value": "White", "persistence": "always"}
+
+def test_apply_rerun_from_review_replays_once_annotations_for_same_job(monkeypatch, tmp_path, capsys) -> None:
+    db_path = tmp_path / "jobs.sqlite3"
+    connection = jobs_module.connect(db_path)
+    initialize_database(connection)
+    upsert_job(connection, {"id": "ts-1", "job_title": "Software Engineer", "url": "https://example.com/apply"})
+    job_id = connection.execute("SELECT id FROM jobs WHERE theirstack_job_id = 'ts-1'").fetchone()["id"]
+    run_id = connection.execute(
+        """
+        INSERT INTO application_runs (job_id, status, reason, started_at, actions_json)
+        VALUES (?, 'needs_review', 'resolver_sensitive_field', '2026-01-01T00:00:00+00:00', '[]')
+        """,
+        (job_id,),
+    ).lastrowid
+    connection.execute(
+        """
+        INSERT INTO application_pages (run_id, page_index, url, snapshot_json, resolver_json, created_at)
+        VALUES (?, 0, 'https://example.com/apply', ?, NULL, '2026-01-01T00:00:30+00:00')
+        """,
+        (
+            run_id,
+            json.dumps(
+                {
+                    "url": "https://example.com/apply",
+                    "fields": [
+                        {"id": "gender", "kind": "typeahead", "label": "Gender", "required": False, "options": [], "value": None, "disabled": False, "visible": True, "frame": None, "selector": "#gender"},
+                        {"id": "hispanic_ethnicity", "kind": "typeahead", "label": "Are you Hispanic/Latino?", "required": False, "options": [], "value": None, "disabled": False, "visible": True, "frame": None, "selector": "#hispanic_ethnicity"},
+                    ],
+                    "buttons": [],
+                    "errors": [],
+                    "blockers": [],
+                    "metadata": {},
+                }
+            ),
+        ),
+    )
+    connection.commit()
+    connection.close()
+    profile_path = tmp_path / "profile.json"
+    profile_path.write_text(json.dumps({"email": "ian@example.com"}) + "\n")
+    annotation_path = tmp_path / "annotations.json"
+    annotation_path.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "decisions": [
+                    {"field_id": "gender", "answer": "Male", "persistence": "always"},
+                    {"field_id": "hispanic_ethnicity", "answer": "No", "persistence": "once"},
+                ],
+            }
+        )
+    )
+    seen: dict[str, object] = {}
+
+    def fake_run_review_job_with_playwright(connection, *, job_id, profile, now, max_pages, headed, manual_handoff, use_llm, block_linkedin_jobs):
+        seen["job_id"] = job_id
+        seen["facts"] = dict(profile.facts)
+        seen["max_pages"] = max_pages
+        seen["headed"] = headed
+        seen["manual_handoff"] = manual_handoff
+        seen["use_llm"] = use_llm
+        seen["block_linkedin_jobs"] = block_linkedin_jobs
+        return {"attempted": 1, "dry_run_ready": 1, "needs_review": 0, "blocked": 0, "failed": 0, "run_ids": [99]}
+
+    monkeypatch.setenv("JOB_SYNC_DB_PATH", str(db_path))
+    monkeypatch.setattr(jobs_module, "run_review_job_with_playwright", fake_run_review_job_with_playwright)
+
+    jobs_module.main(["apply-rerun-from-review", "--input", str(annotation_path), "--profile-json", str(profile_path), "--max-pages", "4", "--no-llm"])
+
+    assert seen["job_id"] == job_id
+    assert seen["max_pages"] == 4
+    assert seen["headed"] is False
+    assert seen["manual_handoff"] is False
+    assert seen["use_llm"] is False
+    assert seen["block_linkedin_jobs"] is False
+    assert seen["facts"]["email"] == "ian@example.com"
+    assert seen["facts"]["gender"] == "Male"
+    assert seen["facts"]["hispanic_ethnicity"] == "No"
+    assert json.loads(capsys.readouterr().out)["run_ids"] == [99]

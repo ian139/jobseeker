@@ -73,7 +73,7 @@ Keep these responsibilities separate. Do not blur them for convenience.
 
 Use these as the user's default applicant facts for local dry-run preparation and resolver context. Do not infer sensitive or legal answers from them.
 
-- Resume file: `Main_Resume.pdf`
+- Resume file: `archive/old-applier/data/Main_Resume.pdf`
 - LinkedIn: `https://www.linkedin.com/in/ianrapko`
 - Personal site: `https://immemorized.com`
 
@@ -98,13 +98,12 @@ Soft preference:
 
 Active code:
 
-- `scraper/src/theirstack/`: TheirStack query/client code.
-- `scraper/src/sync/`: SQLite backlog sync and dedupe.
-- `scraper/src/db/schema.sql`: backlog and application-run schema.
-- `scraper/src/apply_pipeline/`: application assistant contracts and pure helpers.
-- `scraper/tests/`: unit tests for contracts, sync, and query behavior.
+- `src/jobs_assistant/`: all active Python source (cli, contracts, db, backlog, theirstack, job_source, observer, resolver, llm, executor, runner, review, live_smoke).
+- `tests/`: unit tests for contracts, sync, observer, resolver, executor, runner, review, backlog, TheirStack, CLI, and LLM adapter behavior.
+- `skills/SKILL.md`: live-proof-routing guidance loaded by the resolver.
+- `scripts/smoke.sh`: repository smoke check script.
 
-Archived code belongs under `old/`. Do not move active entrypoints or tests there.
+Archived code belongs under `archive/`. Do not move active entrypoints or tests there.
 
 ## Development rules
 
@@ -117,23 +116,27 @@ Archived code belongs under `old/`. Do not move active entrypoints or tests ther
 
 ## Verification
 
-For normal Python changes in `scraper/`:
+From a clean checkout with the committed `uv.lock`:
 
 ```bash
-.venv/bin/python -m pytest
+uv lock --check
+uv run --frozen --extra dev python -m pytest
+uv run --frozen jobs-assistant --help
 ```
 
-For TheirStack preview changes, also run a safe preview:
+Container verification:
 
 ```bash
-.venv/bin/job-sync dry-run --call-api --posted-at-max-age-days 2
+docker compose build
+docker compose up -d
+docker compose ps
+docker compose down
 ```
 
-For paid fetches, only run after explicit user approval because returned jobs can spend credits:
+For live-extras-dependent tests, install the `[live]` extra and Playwright browsers, then run:
 
 ```bash
-ENABLE_PAID_FETCH=true JOB_SYNC_DB_PATH=data/job_sync_test.sqlite3 \
-.venv/bin/job-sync sync-once --limit <preview_total> --max-pages 1 --posted-at-max-age-days 2
+uv run --frozen jobs-assistant live-smoke
 ```
 
 ## OMP + Orca Workflow
@@ -215,7 +218,7 @@ Useful review findings cite:
 - measurable complexity
 - diffs outside scope
 
-Do not ask for vague “looks good” reviews. The coordinator owns scope review and verification.
+Do not ask for vague "looks good" reviews. The coordinator owns scope review and verification.
 
 ## Orchestration policy
 
@@ -248,4 +251,3 @@ At the end of a feature task, the parent must report:
 3. Tests/checks run
 4. Known risks or skipped checks
 5. Suggested next patch, if any
-

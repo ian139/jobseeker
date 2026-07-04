@@ -1,0 +1,9 @@
+services:
+  jobs-assistant:
+    build: .
+    env_file:
+      - .env.example
+    volumes:
+      - ./data:/app/data
+      - ./archive/old-applier/data:/app/archive/old-applier/data:ro
+    command: ["--help"]

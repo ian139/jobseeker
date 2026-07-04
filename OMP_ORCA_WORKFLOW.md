@@ -27,7 +27,7 @@ orca terminal create \
 orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
 ```
 
-Use `orca-dev` instead of `orca` when operating an Orca development build. The OMP command stays the same unless the dev environment explicitly requires another binary.
+Use `orca-dev` instead of `orca` when operating an Orca development build.
 
 ## Planning checklist
 

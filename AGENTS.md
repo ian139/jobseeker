@@ -114,6 +114,14 @@ Archived code belongs under `archive/`. Do not move active entrypoints or tests 
 - Do not add a second convention beside an existing one.
 - Use DeepSeek through Ollama Cloud as the provider for most tasking agents unless a task specifically needs another model family.
 
+## Metrics-first goals and minimal tooling
+
+- Prefer markdown task contracts plus measurable outcomes over exploratory tool churn. Each substantial task should name the goal, metric, target threshold, measurement source, and stop condition before workers start.
+- Use Prometheus/Grafana metrics as first-class acceptance criteria when a service exposes or should expose runtime behavior. Examples: successful dry-run count, blocked/needs-review rate, final-submit safety violations at zero, queue depth, sync freshness, API credit spend, latency, error rate, and container health.
+- If Prometheus/Grafana are not wired for the touched path, define a temporary markdown metric in the task plan with the exact command, query, fixture, or log field that proves the goal.
+- Keep worker prompts specific enough that agents can proceed from the markdown contract without repeatedly reaching for broad discovery tools or extra skills.
+- Use repo skills, tools, and external research only when they materially reduce uncertainty, satisfy mandatory harness policy, or verify a stated metric. Do not use tools as a substitute for clear goals, focused files, and measurable acceptance criteria.
+
 ## Verification
 
 From a clean checkout with the committed `uv.lock`:
@@ -139,14 +147,17 @@ For live-extras-dependent tests, install the `[live]` extra and Playwright brows
 uv run --frozen jobs-assistant live-smoke
 ```
 
-## OMP + Orca Workflow
+## Ohm workflowz + Orca workflow
 
-Use `OMP_ORCA_WORKFLOW.md` as the reusable operating workflow for OMP coordinators, Orca workers, and Orca dev sessions in this repository. It exists so users do not need to restate "read AGENTS.md" in every prompt.
+Use `OMP_ORCA_WORKFLOW.md` as the reusable operating workflow for Ohm/OMP coordinators, Orca workers, and Orca dev sessions in this repository. It exists so users do not need to restate "read AGENTS.md" in every prompt.
 
 Mandatory workflow invariants:
 
-- Launch OMP from the repository root so this `AGENTS.md` file is auto-loaded.
-- Treat this file as always-on policy for every coordinator, worker, and review prompt.
+- Launch the parent from the repository root so this `AGENTS.md` file is auto-loaded.
+- Treat this file as always-on policy for every coordinator, worker, child worktree, and review prompt.
+- Use Ohm `workflowz` for subtask decomposition and worker assignment. Subtasks must be explicit units with target files, non-goals, acceptance criteria, and verification commands.
+- Use Orca for parallelization. For non-trivial implementation choices, create multiple Orca child worktrees from the parent and have them implement competing approaches in isolation.
+- The parent worktree is the integration authority: compare child worktree diffs, tests, and tradeoffs; choose the best implementation; integrate only the useful patch; reject unrelated edits.
 - Use test-first development: add or update the focused failing test before implementation.
 - Use DeepSeek V4 Pro through Ollama Cloud for implementation workers by default: `omp --model "ollama-cloud/deepseek-v4-pro" --thinking high`.
 - Use `orca-dev` instead of `orca` only when operating an Orca development build; keep the same worktree, terminal, and verification workflow.
@@ -222,7 +233,7 @@ Do not ask for vague "looks good" reviews. The coordinator owns scope review and
 
 ## Orchestration policy
 
-Use `OMP_ORCA_WORKFLOW.md` as the canonical workflow for planning, worker allocation, Orca worktrees, launch commands, task dispatch, handoff review, and parent/coordinator checklists. Keep this file focused on product, safety, architecture, containerization, and review policy.
+Use `OMP_ORCA_WORKFLOW.md` as the canonical workflow for Ohm `workflowz` planning, worker allocation, Orca child-worktree parallelization, competing implementation review, handoff review, and parent/coordinator checklists. Keep this file focused on product, safety, architecture, containerization, and review policy.
 
 ## Verification Contract
 
@@ -231,6 +242,7 @@ Every completed task must include:
 - Commands actually run
 - Container build/start commands actually run
 - Tests actually run inside containers when applicable
+- Metrics baseline and result, or why no runtime metric applied
 - Files modified
 - Files intentionally not modified
 - Services added, removed, or changed

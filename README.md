@@ -94,8 +94,8 @@ Historical snapshots live under `archive/` as behavioral evidence only — do no
 
 ## First docs to read
 
-- **AGENTS.md** — policy, architecture, safety, development rules (auto-loaded by OMP).
-- **OMP_ORCA_WORKFLOW.md** — Orca/OMP reusable operating workflow.
+- **AGENTS.md** — policy, architecture, safety, development rules, and Ohm workflowz/Orca child-worktree rules (auto-loaded by OMP).
+- **OMP_ORCA_WORKFLOW.md** — Ohm workflowz + Orca reusable operating workflow.
 
 ## What not to touch
 

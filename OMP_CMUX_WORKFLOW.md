@@ -1,15 +1,15 @@
-# Ohm workflowz + Orca development workflow
+# OMP workflowz + cmux development workflow
 
-Use this workflow for every Ohm/OMP coordinator, Orca worker, and Orca dev session in this repository. `AGENTS.md` is the source of truth and is auto-loaded for agents launched from this workspace; do not ask the user to restate it.
+Use this workflow for every OMP coordinator, workflowz subagent, and cmux-managed worktree in this repository. `AGENTS.md` is the source of truth and is auto-loaded for agents launched from this workspace; do not ask the user to restate it.
 
 ## Always-on rules
 
-- Start from the repository root so Ohm/OMP sees `AGENTS.md` automatically.
+- Start from the repository root so OMP sees `AGENTS.md` automatically.
 - Treat `AGENTS.md` as mandatory context for every prompt, worker assignment, child worktree, and review.
 - Start every non-trivial feature, bug fix, refactor, or research task with `/plan`.
-- Use Ohm `workflowz` as the subtask system: decompose the plan into explicit subtasks, assign ownership, track status, and capture acceptance criteria before launching workers.
-- Use Orca as the execution and parallelization layer: each implementation worker that edits code should run in an Orca child worktree unless the coordinator documents why same-worktree execution is safer.
-- For ambiguous or high-impact implementation work, create multiple Orca child worktrees for the same subtask and let them produce competing implementations. The parent worktree chooses the best patch after comparing behavior, diff size, tests, maintainability, and policy fit.
+- Use OMP `workflowz` as the subtask system: decompose the plan into explicit subtasks, assign ownership, track status, and capture acceptance criteria before launching workers.
+- Use cmux to view and manage worktree sessions. Use Git for worktree creation/removal, then open each worktree in cmux as its own workspace or pane.
+- For ambiguous or high-impact implementation work, create multiple child worktrees for the same subtask and let OMP workflowz subagents produce competing implementations. The parent worktree chooses the best patch after comparing behavior, diff size, tests, maintainability, and policy fit.
 - Use test-first development: write or update the focused failing test before implementation.
 - Prefer functional core, explicit service boundaries, typed data, and side effects at service edges.
 - Keep containers as the default runtime; host execution is developer convenience only.
@@ -35,16 +35,13 @@ Use skills/tools narrowly: first make the goal specific in markdown, then use to
 Create one feature worktree and one advisor-enabled parent coordinator for a new feature or risky fix:
 
 ```bash
-orca worktree create --name "<short-feature-name>" --json
-orca terminal create \
-  --worktree "<short-feature-name>" \
-  --title "coordinator" \
-  --command 'omp --advisor --model "openai-codex/gpt-5.5" --thinking xhigh' \
-  --json
-orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
+git worktree add ../<short-feature-name> -b <short-feature-name>
+cmux ../<short-feature-name>
+cmux new-surface --type agent-session --provider codex
+cmux send 'omp --advisor --model "openai-codex/gpt-5.5" --thinking xhigh'
 ```
 
-Use `orca-dev` instead of `orca` when operating an Orca development build.
+`cmux <path>` opens a directory in a new cmux workspace, launching cmux if needed. Use `cmux tree`, `cmux list-workspaces`, `cmux read-screen`, and `cmux send` to inspect and manage active worktree sessions.
 
 ## Planning checklist
 
@@ -55,8 +52,8 @@ During `/plan`, the parent coordinator must record:
 3. Target threshold/invariant, baseline if known, and stop condition.
 4. Affected files, services, commands, and container targets.
 5. The test to write or update first.
-6. The Ohm `workflowz` subtasks, each with target files, non-goals, owner, acceptance metric, and verification command.
-7. Which subtasks need Orca child worktrees, and which need multiple competing child worktrees.
+6. The OMP `workflowz` subtasks, each with target files, non-goals, owner, acceptance metric, and verification command.
+7. Which subtasks need child worktrees, and which need multiple competing child worktrees.
 8. File ownership before any worker edits.
 9. Risks, service contracts, environment variables, and verification commands.
 
@@ -70,9 +67,9 @@ omp --model "ollama-cloud/deepseek-v4-pro" --thinking high
 
 Use GPT-5.5 only when the task needs advisor-level coordination, unusually deep architecture work, or the DeepSeek/Ollama Cloud path is unavailable.
 
-## Ohm workflowz subtasks
+## OMP workflowz subtasks
 
-Every worker assignment must start as an Ohm `workflowz` subtask. A valid subtask has:
+Every worker assignment must start as an OMP `workflowz` subtask. A valid subtask has:
 
 - One clear objective.
 - Exact files or symbols owned by the worker.
@@ -84,19 +81,16 @@ Every worker assignment must start as an Ohm `workflowz` subtask. A valid subtas
 
 Do not launch an implementation worker from an informal chat note when a `workflowz` subtask can carry the same contract.
 
-## Orca child-worktree parallelization
+## cmux child-worktree parallelization
 
-Use Orca child worktrees for parallel implementation, isolation, and competing approaches:
+Use Git child worktrees plus cmux workspaces for parallel implementation, isolation, and competing approaches:
 
 ```bash
-orca worktree create --name "<parent-feature>-<specific-subtask>-a" --parent-worktree active --json
-orca terminal create \
-  --worktree "<parent-feature>-<specific-subtask>-a" \
-  --title "<specific-subtask>-a" \
-  --command 'omp --model "ollama-cloud/deepseek-v4-pro" --thinking high' \
-  --json
-orca terminal wait --terminal <handle> --for tui-idle --timeout-ms 60000 --json
-orca terminal send --terminal <handle> --text '<workflowz subtask prompt>' --enter --json
+git worktree add ../<parent-feature>-<specific-subtask>-a -b <parent-feature>-<specific-subtask>-a
+cmux ../<parent-feature>-<specific-subtask>-a
+cmux new-surface --type agent-session --provider codex
+cmux send 'omp --model "ollama-cloud/deepseek-v4-pro" --thinking high'
+cmux send '<workflowz subtask prompt>'
 ```
 
 For multiple competing implementations, repeat the child-worktree creation with suffixes such as `-a`, `-b`, and `-c`. Keep each child isolated; do not let sibling workers patch each other's worktrees.
@@ -123,7 +117,7 @@ Context:
 AGENTS.md is mandatory project policy and is already available in this workspace. Follow it without asking the user to restate it.
 
 Workflowz:
-This prompt implements Ohm `workflowz` subtask <id/title>. Do not expand scope beyond that subtask.
+This prompt implements OMP `workflowz` subtask <id/title>. Do not expand scope beyond that subtask.
 
 Metric:
 <Prometheus/Grafana query or markdown/test/CLI/log metric>.

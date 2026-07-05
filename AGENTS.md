@@ -147,20 +147,19 @@ For live-extras-dependent tests, install the `[live]` extra and Playwright brows
 uv run --frozen jobs-assistant live-smoke
 ```
 
-## Ohm workflowz + Orca workflow
+## OMP workflowz + cmux workflow
 
-Use `OMP_ORCA_WORKFLOW.md` as the reusable operating workflow for Ohm/OMP coordinators, Orca workers, and Orca dev sessions in this repository. It exists so users do not need to restate "read AGENTS.md" in every prompt.
+Use `OMP_CMUX_WORKFLOW.md` as the reusable operating workflow for OMP coordinators, workflowz subagents, and cmux-managed worktree sessions in this repository. It exists so users do not need to restate "read AGENTS.md" in every prompt.
 
 Mandatory workflow invariants:
 
 - Launch the parent from the repository root so this `AGENTS.md` file is auto-loaded.
 - Treat this file as always-on policy for every coordinator, worker, child worktree, and review prompt.
-- Use Ohm `workflowz` for subtask decomposition and worker assignment. Subtasks must be explicit units with target files, non-goals, acceptance criteria, and verification commands.
-- Use Orca for parallelization. For non-trivial implementation choices, create multiple Orca child worktrees from the parent and have them implement competing approaches in isolation.
+- Use OMP `workflowz` for subtask decomposition and worker assignment. Subtasks must be explicit units with target files, non-goals, acceptance criteria, and verification commands.
+- Use cmux to view and manage worktree sessions. Use Git for worktree creation/removal, then open each worktree in cmux for parallel work.
 - The parent worktree is the integration authority: compare child worktree diffs, tests, and tradeoffs; choose the best implementation; integrate only the useful patch; reject unrelated edits.
 - Use test-first development: add or update the focused failing test before implementation.
 - Use DeepSeek V4 Pro through Ollama Cloud for implementation workers by default: `omp --model "ollama-cloud/deepseek-v4-pro" --thinking high`.
-- Use `orca-dev` instead of `orca` only when operating an Orca development build; keep the same worktree, terminal, and verification workflow.
 
 ## Architecture Bias: Microservices, Functional Core, Container First
 
@@ -233,7 +232,7 @@ Do not ask for vague "looks good" reviews. The coordinator owns scope review and
 
 ## Orchestration policy
 
-Use `OMP_ORCA_WORKFLOW.md` as the canonical workflow for Ohm `workflowz` planning, worker allocation, Orca child-worktree parallelization, competing implementation review, handoff review, and parent/coordinator checklists. Keep this file focused on product, safety, architecture, containerization, and review policy.
+Use `OMP_CMUX_WORKFLOW.md` as the canonical workflow for OMP `workflowz` planning, worker allocation, cmux-managed child-worktree parallelization, competing implementation review, handoff review, and parent/coordinator checklists. Keep this file focused on product, safety, architecture, containerization, and review policy.
 
 ## Verification Contract
 

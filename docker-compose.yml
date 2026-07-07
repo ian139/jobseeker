@@ -5,5 +5,4 @@ services:
       - .env.example
     volumes:
       - ./data:/app/data
-      - ./archive/old-applier/data:/app/archive/old-applier/data:ro
     command: ["--help"]

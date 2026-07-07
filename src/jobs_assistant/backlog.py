@@ -74,11 +74,6 @@ def next_queued_jobs(conn: sqlite3.Connection, *, limit: int = 10) -> list[sqlit
             """
             SELECT * FROM jobs
             WHERE status = 'queued' AND canonical_url IS NOT NULL
-              AND NOT EXISTS (
-                SELECT 1 FROM application_runs
-                WHERE application_runs.job_id = jobs.id
-                  AND application_runs.status IN ('dry_run_ready', 'needs_review', 'blocked')
-              )
             ORDER BY posted_at DESC NULLS LAST, first_seen_at ASC, id ASC
             LIMIT ?
             """,
@@ -98,15 +93,5 @@ def job_application_url(row: sqlite3.Row | dict[str, object]) -> str | None:
 
 def count_backlog(conn: sqlite3.Connection) -> dict[str, int]:
     total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-    pending = conn.execute(
-        """
-        SELECT COUNT(*) FROM jobs
-        WHERE status = 'queued'
-          AND NOT EXISTS (
-            SELECT 1 FROM application_runs
-            WHERE application_runs.job_id = jobs.id
-              AND application_runs.status IN ('dry_run_ready', 'needs_review', 'blocked')
-          )
-        """
-    ).fetchone()[0]
+    pending = conn.execute("SELECT COUNT(*) FROM jobs WHERE status = 'queued'").fetchone()[0]
     return {"total": int(total), "pending": int(pending)}

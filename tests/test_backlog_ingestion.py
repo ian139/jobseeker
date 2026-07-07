@@ -33,10 +33,7 @@ def test_upsert_dedupes_by_canonical_url_without_source_id():
     assert conn.execute("SELECT COUNT(*) AS c FROM jobs").fetchone()["c"] == 1
 
 
-def test_next_queued_jobs_excludes_terminal_runs():
+def test_next_queued_jobs_returns_queued_jobs_without_applier_state():
     conn = memory_db()
-    result = upsert_job(conn, JobInput(source="feed", source_job_id="1", url="https://a.test/apply", title="Dev", company="A", posted_at="2026-01-01"))
-    assert len(next_queued_jobs(conn, limit=1)) == 1
-    conn.execute("INSERT INTO application_runs (job_id, status, reason, started_at) VALUES (?, 'dry_run_ready', 'done', 'now')", (result.job_id,))
-    conn.commit()
-    assert next_queued_jobs(conn, limit=1) == []
+    upsert_job(conn, JobInput(source="feed", source_job_id="1", url="https://a.test/apply", title="Dev", company="A", posted_at="2026-01-01"))
+    assert [row["source_job_id"] for row in next_queued_jobs(conn, limit=1)] == ["1"]

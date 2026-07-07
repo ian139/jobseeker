@@ -2,80 +2,51 @@
 
 ## Product direction
 
-This repo is now centered on a local job-application assistant, not a mass auto-apply bot.
+The active app is now a minimal local job scraping/backlog ingestion assistant.
 
-The target workflow:
+Set-in-stone active features:
+
+- scraper/backlog ingestion into SQLite;
+- filtering and quality gates for source jobs;
+- profile-shaped search/filter ideas;
+- TheirStack preview/paid-fetch concepts and helpers;
+- optional normalized JSON/API feed import for fixtures and backfills.
+
+The applier is set in stone as a future product concept, but the current implementation is archived. Do not keep building on the archived observer/resolver/executor/runner code as if it were active. Rebuild future application automation deliberately through OMP `workflowz` with fresh contracts, focused tests, and explicit safety gates.
+
+## Current active workflow
 
 ```text
-SQLite job backlog
+TheirStack / feed / scraper output
   ↓
-Playwright opens apply URL
+Normalize source job
   ↓
-Deterministic observer scans DOM/frames
+Filtering and quality gates
   ↓
-Normalized DOM snapshot
-  fields: id, kind, label, required, options, value, visible, frame, selector
-  buttons: id, text, type, disabled, finalSubmitCandidate, visible, frame, selector
-  errors/blockers
-  no board-specific Playwright templates
+SQLite jobs backlog
   ↓
-LLM-first resolver
-  input: normalized snapshot + profile + resume + facts + job description + policies
-  output: strict JSON answers + nextButton + submitButton + needsReview
-  may choose safe initial Apply/Start navigation from observed buttons
-  must refuse unknown/sensitive/legal answers instead of guessing
-  ↓
-Guarded generic executor
-  reusable Playwright fill/select/check/upload/click only
-  uploads resume only
-  clicks policy-approved non-final Apply/Next/Continue navigation
-  never clicks final submit
-  ↓
-Loop observe → resolve → fill → advance
-  ↓
-Run result
+Sync/run metadata
 ```
 
-Run results:
+Future applier concept:
 
-- `dry_run_ready`: ready at final submit; not submitted.
-- `needs_review`: unknown, sensitive, or manual field.
-- `blocked`: sign-in, CAPTCHA, no form, job gone, weird upload, unsupported workflow.
-- `failed`: browser, LLM, parser, executor, or navigation failure.
+```text
+SQLite queued job
+  ↓
+Open application URL
+  ↓
+Observe DOM/frames
+  ↓
+Resolve safe answers from profile/resume/job context
+  ↓
+Execute guarded non-final actions
+  ↓
+Persist review evidence
+  ↓
+Stop before final submit
+```
 
-## Architectural split
-
-Keep these responsibilities separate. Do not blur them for convenience.
-
-### Observer: what exists on the page
-
-- Input: browser page/frame state.
-- Output: normalized page snapshot.
-- No profile facts, no resume facts, no answer decisions.
-- Deterministic and testable from static HTML fixtures where possible.
-
-### Resolver: what answers should be used
-
-- Input: normalized snapshot + profile + resume + facts + job description + policies.
-- Output: strict JSON answers, next button, submit button, and uncertainty flags.
-- Must refuse unknown/sensitive fields instead of guessing.
-- Never performs browser actions.
-- The in-program DeepSeek/Ollama resolver loads `skills/SKILL.md` as operational guidance for live proof/navigation while still returning strict JSON for guarded execution.
-
-### Executor: allowed actions only
-
-- Input: normalized snapshot + resolver JSON.
-- Performs fills, safe uploads, and non-final navigation.
-- Never clicks final submit.
-- Must stop on final submit, CAPTCHA, sign-in, unsupported controls, or sensitive fields.
-
-## Applicant reference
-
-Use these as the user's default applicant facts for local dry-run preparation and resolver context. Do not infer sensitive or legal answers from them.
-
-- Resume file: `archive/old-applier/data/Main_Resume.pdf`
-- LinkedIn: `https://www.linkedin.com/in/ianrapko`
-- Personal site: `https://immemorized.com`
+That second workflow is concept-only until rebuilt.
 
 ## Safety policy
 
@@ -84,43 +55,96 @@ Hard rules:
 - Never mass-submit applications.
 - Never click final submit.
 - Never answer sensitive fields by inference.
-- Never bypass sign-in, CAPTCHA, assessments, or identity checks.
+- Never bypass sign-in, CAPTCHA, assessments, identity checks, or payment gates.
 - Upload only the configured resume file unless the user explicitly changes policy.
-- Treat any destructive database cleanup as requiring a clear user instruction.
+- Treat destructive database cleanup as requiring a clear user instruction.
 
-Soft preference:
+These rules apply to any future applier revival even though the current applier implementation is archived.
 
-- Use minimal Playwright R&amp;D, not brittle per-board automations.
-- Prefer deterministic observation and guarded generic execution.
-- When a board fails, collect samples and reasons, then add targeted policies/fixtures.
+## Applicant/profile reference
 
-## Code layout
+Default applicant artifacts remain reference data, not permission to infer sensitive/legal answers.
 
-Active code:
+- Resume file: `archive/old-applier/data/Main_Resume.pdf`
+- LinkedIn: `https://www.linkedin.com/in/ianrapko`
+- Personal site: `https://immemorized.com`
+- Profile JSON examples may live under `scraper/data/` or `data/`.
 
-- `src/jobs_assistant/`: all active Python source (cli, contracts, db, backlog, theirstack, job_source, observer, resolver, llm, executor, runner, review, live_smoke).
-- `tests/`: unit tests for contracts, sync, observer, resolver, executor, runner, review, backlog, TheirStack, CLI, and LLM adapter behavior.
-- `skills/SKILL.md`: live-proof-routing guidance loaded by the resolver.
+## Active code layout
+
+Active source:
+
+- `src/jobs_assistant/contracts.py`: ingestion/domain dataclasses.
+- `src/jobs_assistant/db.py`: jobs/sync SQLite schema and helpers.
+- `src/jobs_assistant/backlog.py`: queue upsert, dedupe, backlog counts.
+- `src/jobs_assistant/theirstack.py`: TheirStack payload/client/sync helpers.
+- `src/jobs_assistant/job_source.py`: JSON/API feed normalization and import.
+- `src/jobs_assistant/cli.py`: minimal CLI entrypoint.
+- `tests/`: focused scraper/ingestion/backlog/TheirStack/CLI tests.
 - `scripts/smoke.sh`: repository smoke check script.
 
-Archived code belongs under `archive/`. Do not move active entrypoints or tests there.
+Archived applier source:
+
+- `archive/minimized-20260706/applier/`: removed first-principles active applier implementation; reference only and not a runnable package snapshot.
+- `archive/old-scraper/`: older scraper/application pipeline reference.
+- `archive/old-applier/`: older monolithic applier/reference applicant data.
+
+Archived code belongs under `archive/`. Do not import archived modules from active code.
 
 ## Development rules
 
 - Keep business logic as pure functions over typed data where possible.
-- Keep side effects at boundaries: CLI, browser, filesystem, HTTP, SQLite.
-- Add tests for every new branch in observer/resolver/executor policy.
-- Prefer boring schemas and explicit JSON contracts.
+- Keep side effects at boundaries: CLI, HTTP, SQLite, filesystem.
+- Add tests for every new filtering, ingestion, dedupe, profile, or TheirStack branch.
+- Prefer boring schemas and explicit JSON/SQLite contracts.
 - Do not add a second convention beside an existing one.
-- Use DeepSeek through Ollama Cloud as the provider for most tasking agents unless a task specifically needs another model family.
+- Use DeepSeek through Ollama Cloud for OMP workers unless a task specifically needs another model family.
 
 ## Metrics-first goals and minimal tooling
 
-- Prefer markdown task contracts plus measurable outcomes over exploratory tool churn. Each substantial task should name the goal, metric, target threshold, measurement source, and stop condition before workers start.
-- Use Prometheus/Grafana metrics as first-class acceptance criteria when a service exposes or should expose runtime behavior. Examples: successful dry-run count, blocked/needs-review rate, final-submit safety violations at zero, queue depth, sync freshness, API credit spend, latency, error rate, and container health.
-- If Prometheus/Grafana are not wired for the touched path, define a temporary markdown metric in the task plan with the exact command, query, fixture, or log field that proves the goal.
-- Keep worker prompts specific enough that agents can proceed from the markdown contract without repeatedly reaching for broad discovery tools or extra skills.
-- Use repo skills, tools, and external research only when they materially reduce uncertainty, satisfy mandatory harness policy, or verify a stated metric. Do not use tools as a substitute for clear goals, focused files, and measurable acceptance criteria.
+Every substantial task should name:
+
+- goal;
+- metric;
+- target threshold or invariant;
+- measurement source;
+- stop condition.
+
+When Prometheus/Grafana are not wired for the touched path, use focused tests, CLI output, fixture counts, SQLite queries, or markdown checklists as temporary metrics.
+
+## OMP workflowz workflow
+
+Use OMP `workflowz` for non-trivial work. It is the coordination mechanism for this repo.
+
+Workflowz subtasks must include:
+
+- exact target files/symbols;
+- non-goals and forbidden files;
+- acceptance criteria;
+- focused verification command;
+- owner/subagent role;
+- report contract.
+
+Delegate by need:
+
+- Tester: high-signal tests and edge cases.
+- reviewer: safety, quality, security, and scope review.
+- task worker: implementation on explicit files.
+- designer: UI/design work only.
+- librarian: external API/library research.
+
+The parent worktree is the integration authority. Compare worker reports/diffs, integrate only useful patches, reject unrelated edits, and verify in the parent.
+
+Future applier revival must be decomposed through workflowz into at least:
+
+1. source/backlog contract;
+2. page observer contract;
+3. resolver JSON contract;
+4. executor safety contract;
+5. persistence/output contract;
+6. safety review and adversarial tests.
+
+No worker may add final-submit behavior until a separate submit policy exists and is tested.
 
 ## Verification
 
@@ -141,124 +165,40 @@ docker compose ps
 docker compose down
 ```
 
-For live-extras-dependent tests, install the `[live]` extra and Playwright browsers, then run:
-
-```bash
-uv run --frozen jobs-assistant live-smoke
-```
-
-## OMP workflowz + cmux workflow
-
-Use `OMP_CMUX_WORKFLOW.md` as the reusable operating workflow for OMP coordinators, workflowz subagents, and cmux-managed worktree sessions in this repository. It exists so users do not need to restate "read AGENTS.md" in every prompt.
-
-Mandatory workflow invariants:
-
-- Launch the parent from the repository root so this `AGENTS.md` file is auto-loaded.
-- Treat this file as always-on policy for every coordinator, worker, child worktree, and review prompt.
-- Use OMP `workflowz` for subtask decomposition and worker assignment. Subtasks must be explicit units with target files, non-goals, acceptance criteria, and verification commands.
-- Use cmux to view and manage worktree sessions. Use Git for worktree creation/removal, then open each worktree in cmux for parallel work.
-- The parent worktree is the integration authority: compare child worktree diffs, tests, and tradeoffs; choose the best implementation; integrate only the useful patch; reject unrelated edits.
-- Use test-first development: add or update the focused failing test before implementation.
-- Use DeepSeek V4 Pro through Ollama Cloud for implementation workers by default: `omp --model "ollama-cloud/deepseek-v4-pro" --thinking high`.
-
-## Architecture Bias: Microservices, Functional Core, Container First
-
-Prefer a functional, service-oriented design over object-oriented architecture.
-
-- Split responsibilities only when the boundary is independently testable and useful.
-- Prefer functions, typed data structures, schemas, and plain modules over class hierarchies.
-- Keep business logic pure or mostly pure.
-- Keep side effects at service boundaries: HTTP, CLI, browser, filesystem, network, database, queues.
-- If a class is unavoidable, keep it as a thin adapter around functional code.
-
-Candidate service boundaries:
-
-- job ingestion / TheirStack sync
-- job description normalization
-- resume/profile/facts loading
-- page observation
-- answer resolution
-- guarded execution
-- failure sampling / review queue
-- report/UI serving
-- persistence/cache/queue infrastructure
-
-Each real service boundary needs:
-
-- documented input/output contract
-- focused tests
-- container or CLI execution path
-- smoke check or health check for long-running processes
+Never claim verification unless the command was actually run.
 
 ## Containerization contract
 
 Everything should be able to run in containers by default. Host execution is a developer convenience, not the only verified path.
 
-For every service or CLI entrypoint added or changed, ensure:
+For every CLI entrypoint or service boundary added or changed, ensure:
 
-- dependencies are declared in project files
-- required environment variables have examples or safe defaults
-- tests can run from a clean checkout
-- long-running services have a health check or smoke check
-- Docker/compose wiring is updated when a service boundary needs it
-
-Default container verification before merge/push when containers are in scope:
-
-```bash
-docker compose build
-docker compose up -d
-docker compose ps
-docker compose down
-```
-
-Never claim container verification unless those commands were actually run.
+- dependencies are declared in project files;
+- required environment variables have examples or safe defaults;
+- tests run from a clean checkout;
+- Docker/compose wiring is updated when runtime behavior changes.
 
 ## Review policy
 
 Prefer executable evidence over subjective review.
 
-Useful review findings cite:
+Useful findings cite:
 
-- failing tests
-- missing tests
-- broken contracts
-- unclear ownership boundaries
-- containerization gaps
-- security-sensitive logic
-- measurable complexity
-- diffs outside scope
+- failing tests;
+- missing tests;
+- broken contracts;
+- unclear ownership boundaries;
+- containerization gaps;
+- safety-sensitive logic;
+- diffs outside scope.
 
-Do not ask for vague "looks good" reviews. The coordinator owns scope review and verification.
+## Verification contract for completed tasks
 
-## Orchestration policy
+Final reports must include:
 
-Use `OMP_CMUX_WORKFLOW.md` as the canonical workflow for OMP `workflowz` planning, worker allocation, cmux-managed child-worktree parallelization, competing implementation review, handoff review, and parent/coordinator checklists. Keep this file focused on product, safety, architecture, containerization, and review policy.
-
-## Verification Contract
-
-Every completed task must include:
-
-- Commands actually run
-- Container build/start commands actually run
-- Tests actually run inside containers when applicable
-- Metrics baseline and result, or why no runtime metric applied
-- Files modified
-- Files intentionally not modified
-- Services added, removed, or changed
-- Service contracts added or changed
-- Known risks
-- Remaining TODOs
-
-Never claim verification unless the command was executed.
-
-If containerized verification cannot be run, explain why and do not present the work as ready to push.
-
-## Final Response Requirements
-
-At the end of a feature task, the parent must report:
-
-1. Summary of behavior changed
-2. Files changed
-3. Tests/checks run
-4. Known risks or skipped checks
-5. Suggested next patch, if any
+1. Summary of behavior changed.
+2. Files changed.
+3. Tests/checks run.
+4. Container commands actually run or skipped reason.
+5. Known risks or skipped checks.
+6. Suggested next patch, if any.

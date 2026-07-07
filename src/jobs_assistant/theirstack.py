@@ -229,7 +229,7 @@ class TheirStackClient:
         client: httpx.Client | None = None,
     ) -> None:
         if not api_key.strip():
-            raise ValueError("Missing THEIRSTACK_API_KEY; set it in .env")
+            raise ValueError("Missing TheirStack API key; pass api_key explicitly")
         self._api_key = api_key
         self._enable_paid_fetch = enable_paid_fetch
         self._base_url = base_url.rstrip("/")
@@ -247,7 +247,7 @@ class TheirStackClient:
             raise PaidFetchDisabledError(
                 "TheirStack paid fetch is disabled; use a credit-safe payload "
                 "(blur_company_data=true, include_total_results=true, limit=1) "
-                "or set ENABLE_PAID_FETCH=true after explicit approval."
+                "or construct TheirStackClient with enable_paid_fetch=True after explicit approval."
             )
 
         headers = {
@@ -279,7 +279,7 @@ class TheirStackClient:
                 continue
             if response.status_code in (401, 403):
                 raise TheirStackError(
-                    f"TheirStack returned {response.status_code}; check THEIRSTACK_API_KEY"
+                    "TheirStack returned 401/403; check the explicit TheirStack API key"
                 )
             if response.status_code >= 400:
                 raise TheirStackError(

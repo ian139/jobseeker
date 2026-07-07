@@ -16,6 +16,18 @@ This directory contains full code snapshots from the earlier incarnation of the 
 
 ---
 
+## minimized-20260706/applier/
+
+| Field | Content |
+|---|---|
+| **Source** | The active first-principles applier modules removed during the 2026-07-06 minimization: observer, resolver, LLM adapter, executor, runner, review sampler, live smoke, and their tests. |
+| **Status** | Reference-only, non-runnable extracted code. The root `contracts.py` and `db.py` dependencies were minimized after extraction. |
+| **Why it mattered** | Preserves the immediate pre-minimization applier behavior: static page observation, deterministic answer resolution, guarded execution, run persistence, and review/failure sampling. |
+| **Valuable pieces preserved** | No-final-submit boundary, sensitive/manual field refusal, configured-resume-only upload, action attempt records, and the observer/resolver/executor/runner split. |
+| **Do not reuse blindly because** | The implementation was explicitly judged unsettled/bad for active development. Rebuild future applier work through OMP `workflowz` with fresh contracts and tests. |
+
+---
+
 ## old-scraper/
 
 | Field | Content |

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from .contracts import ActionAttempt, RunStatus, StoredJobInfo
+from .contracts import StoredJobInfo
 
 
 SCHEMA_SQL = """
@@ -41,6 +41,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_posted_at ON jobs(posted_at);
 CREATE TABLE IF NOT EXISTS sync_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source TEXT NOT NULL,
+    profile TEXT,
     mode TEXT NOT NULL,
     started_at TEXT NOT NULL,
     finished_at TEXT,
@@ -51,33 +52,6 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     jobs_updated INTEGER NOT NULL DEFAULT 0,
     error TEXT
 );
-
-CREATE TABLE IF NOT EXISTS application_runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-    status TEXT NOT NULL CHECK (status IN ('dry_run_ready','needs_review','blocked','failed')),
-    reason TEXT NOT NULL,
-    started_at TEXT NOT NULL,
-    finished_at TEXT,
-    final_url TEXT,
-    actions_json TEXT NOT NULL DEFAULT '[]'
-);
-
-CREATE INDEX IF NOT EXISTS idx_application_runs_job_id ON application_runs(job_id);
-CREATE INDEX IF NOT EXISTS idx_application_runs_status ON application_runs(status);
-
-CREATE TABLE IF NOT EXISTS application_pages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id INTEGER NOT NULL REFERENCES application_runs(id) ON DELETE CASCADE,
-    page_index INTEGER NOT NULL,
-    url TEXT NOT NULL,
-    snapshot_json TEXT NOT NULL,
-    resolver_json TEXT,
-    created_at TEXT NOT NULL,
-    UNIQUE(run_id, page_index)
-);
-
-CREATE INDEX IF NOT EXISTS idx_application_pages_run_id ON application_pages(run_id);
 """
 
 
@@ -201,8 +175,7 @@ def upsert_raw_job(connection: sqlite3.Connection, raw: dict[str, Any], *, sourc
 
 
 def record_sync_run(connection: sqlite3.Connection, source: str, mode: str, *, started_at: str | None = None, profile: str | None = None) -> int:
-    actual_source = profile or source
-    cur = connection.execute("INSERT INTO sync_runs (source, mode, started_at) VALUES (?, ?, ?)", (actual_source, mode, started_at or utc_now()))
+    cur = connection.execute("INSERT INTO sync_runs (source, profile, mode, started_at) VALUES (?, ?, ?, ?)", (source, profile, mode, started_at or utc_now()))
     connection.commit()
     return int(cur.lastrowid)
 
@@ -217,40 +190,14 @@ def update_sync_run(connection: sqlite3.Connection, run_id: int, **kwargs: Any) 
     connection.commit()
 
 
-def latest_sync_checkpoint(connection: sqlite3.Connection) -> str | None:
-    row = connection.execute("SELECT MAX(started_at) AS checkpoint FROM sync_runs WHERE success = 1").fetchone()
+def latest_sync_checkpoint(connection: sqlite3.Connection, *, source: str | None = None, profile: str | None = None) -> str | None:
+    clauses = ["success = 1"]
+    values: list[Any] = []
+    if source is not None:
+        clauses.append("source = ?")
+        values.append(source)
+    if profile is not None:
+        clauses.append("profile = ?")
+        values.append(profile)
+    row = connection.execute(f"SELECT MAX(started_at) AS checkpoint FROM sync_runs WHERE {' AND '.join(clauses)}", values).fetchone()
     return str(row["checkpoint"]) if row and row["checkpoint"] else None
-
-
-def start_application_run(connection: sqlite3.Connection, job_id: int, *, reason: str = "running") -> int:
-    cur = connection.execute(
-        "INSERT INTO application_runs (job_id, status, reason, started_at) VALUES (?, ?, ?, ?)",
-        (job_id, RunStatus.FAILED.value, reason, utc_now()),
-    )
-    connection.commit()
-    return int(cur.lastrowid)
-
-
-def record_application_page(connection: sqlite3.Connection, run_id: int, page_index: int, *, url: str, snapshot_json: str, resolver_json: str | None) -> None:
-    connection.execute(
-        "INSERT INTO application_pages (run_id, page_index, url, snapshot_json, resolver_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (run_id, page_index, url, snapshot_json, resolver_json, utc_now()),
-    )
-    connection.commit()
-
-
-def finish_application_run(
-    connection: sqlite3.Connection,
-    run_id: int,
-    *,
-    status: RunStatus,
-    reason: str,
-    final_url: str | None,
-    actions: list[ActionAttempt] | None = None,
-) -> None:
-    action_payload = [action.__dict__ for action in actions or []]
-    connection.execute(
-        "UPDATE application_runs SET status = ?, reason = ?, finished_at = ?, final_url = ?, actions_json = ? WHERE id = ?",
-        (status.value, reason, utc_now(), final_url, encode_json(action_payload), run_id),
-    )
-    connection.commit()

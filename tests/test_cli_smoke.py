@@ -1,14 +1,16 @@
 from pathlib import Path
 
+import jobs_assistant.cli as cli_mod
+
 from jobs_assistant.cli import main
-from jobs_assistant.backlog import upsert_job
-from jobs_assistant.contracts import JobInput
-from jobs_assistant.db import connect, init_db
 
 
 def test_cli_help_smoke(capsys):
     assert main([]) == 0
-    assert "jobs-assistant" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "jobs-assistant" in out
+    assert "import-feed" in out
+    assert "dry-run-static" not in out
 
 
 def test_cli_init_db(tmp_path: Path):
@@ -17,21 +19,26 @@ def test_cli_init_db(tmp_path: Path):
     assert db.exists()
 
 
-def test_cli_dry_run_static(tmp_path: Path, capsys):
+def test_cli_import_feed_json_fixture(tmp_path: Path, capsys):
     db = tmp_path / "jobs.sqlite3"
-    conn = connect(db)
-    init_db(conn)
-    job = upsert_job(conn, JobInput(source="feed", source_job_id="1", url="https://a.test", title="Dev", company="A"))
-    html = tmp_path / "final.html"
-    html.write_text('<button type="submit">Submit application</button>')
-    resume = tmp_path / "resume.pdf"
-    resume.write_text("pdf")
-    assert main(["--db", str(db), "dry-run-static", "--job-id", str(job.job_id), "--html", str(html), "--resume", str(resume)]) == 0
-    assert '"status": "dry_run_ready"' in capsys.readouterr().out
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text('{"jobs":[{"id":"1","title":"Software Engineer","company":"Acme","apply_url":"https://jobs.example.com/1"}]}')
+    assert main(["--db", str(db), "import-feed", "--json-file", str(fixture)]) == 0
+    assert capsys.readouterr().out.strip() == '{"inserted": 1, "seen": 1, "updated": 0}'
 
 
-def test_cli_live_smoke_reports_status(capsys, tmp_path: Path):
+def test_cli_import_feed_uses_env_base_url(tmp_path: Path, capsys, monkeypatch):
     db = tmp_path / "jobs.sqlite3"
-    assert main(["--db", str(db), "live-smoke"]) in {0, 1}
-    assert '"status":' in capsys.readouterr().out
-    assert not db.exists()
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_fetch_source_jobs(base_url: str, api_key: str | None = None):
+        calls.append((base_url, api_key))
+        return [{"id": "env-1", "title": "Backend Engineer", "company": "Acme", "apply_url": "https://jobs.example.com/env-1"}]
+
+    monkeypatch.setenv("JOB_SOURCE_BASE_URL", "https://feed.example.test")
+    monkeypatch.setenv("JOB_SOURCE_API_KEY", "secret")
+    monkeypatch.setattr(cli_mod, "fetch_source_jobs", fake_fetch_source_jobs)
+
+    assert main(["--db", str(db), "import-feed"]) == 0
+    assert calls == [("https://feed.example.test", "secret")]
+    assert capsys.readouterr().out.strip() == '{"inserted": 1, "seen": 1, "updated": 0}'

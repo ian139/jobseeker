@@ -1,38 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import StrEnum
 from typing import Any, Literal
-
-
-class RunStatus(StrEnum):
-    DRY_RUN_READY = "dry_run_ready"
-    NEEDS_REVIEW = "needs_review"
-    BLOCKED = "blocked"
-    FAILED = "failed"
-
-
-class StepStatus(StrEnum):
-    CONTINUE = "continue"
-    DRY_RUN_READY = "dry_run_ready"
-    NEEDS_REVIEW = "needs_review"
-    BLOCKED = "blocked"
-    FAILED = "failed"
-
-    def terminal(self) -> RunStatus | None:
-        if self == StepStatus.CONTINUE:
-            return None
-        return RunStatus(self.value)
-
-
-class FieldKind(StrEnum):
-    TEXT = "text"
-    TEXTAREA = "textarea"
-    SELECT = "select"
-    CHECKBOX = "checkbox"
-    RADIO = "radio"
-    FILE = "file"
-    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -80,79 +49,3 @@ class SyncRunInfo:
 class CreditEstimate:
     dry_run_credits: int = 0
     paid_mode_max_credits: int = 0
-
-
-@dataclass(frozen=True)
-class FieldSnapshot:
-    id: str
-    kind: FieldKind
-    label: str
-    required: bool
-    options: tuple[str, ...] = ()
-    value: str | bool | None = None
-    disabled: bool = False
-    visible: bool = True
-    frame: str = "main"
-    selector: str = ""
-
-
-@dataclass(frozen=True)
-class ButtonSnapshot:
-    id: str
-    text: str
-    type: str
-    disabled: bool
-    final_submit_candidate: bool
-    visible: bool = True
-    frame: str = "main"
-    selector: str = ""
-
-
-@dataclass(frozen=True)
-class PageSnapshot:
-    url: str
-    title: str = ""
-    fields: tuple[FieldSnapshot, ...] = ()
-    buttons: tuple[ButtonSnapshot, ...] = ()
-    errors: tuple[str, ...] = ()
-    blockers: tuple[str, ...] = ()
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class Answer:
-    field_id: str
-    value: str | bool
-
-
-@dataclass(frozen=True)
-class ResolverDecision:
-    status: StepStatus
-    answers: tuple[Answer, ...] = ()
-    next_button: str | None = None
-    submit_button: str | None = None
-    review_reasons: tuple[str, ...] = ()
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class ExecutorAction:
-    kind: Literal["fill", "select", "check", "upload", "click"]
-    target_id: str
-    value: str | bool | list[str] | None = None
-
-
-@dataclass(frozen=True)
-class RunDecision:
-    status: StepStatus
-    reason: str
-    actions: tuple[ExecutorAction, ...] = ()
-
-
-@dataclass(frozen=True)
-class ActionAttempt:
-    action: Literal["fill", "select", "check", "upload", "click"]
-    target_id: str
-    value: str | bool | list[str] | None
-    success: bool
-    message: str = ""

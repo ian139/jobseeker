@@ -1,76 +1,102 @@
 # jobs-assistant
 
-A local, developer-operated job backlog and application dry-run assistant built from first principles.
+Minimal local job scraper/backlog ingestion assistant.
 
-**Project package:** `jobs_assistant` (installed as the `jobs-assistant` CLI).
-**Active source:** `src/jobs_assistant/` — observer, resolver, executor, runner, backlog ingestion, TheirStack client, review sampler, and the CLI.
-**Tests:** `tests/`.
+The active app is intentionally small. The set-in-stone active surface is:
+
+- scraper/backlog ingestion into SQLite;
+- filtering and quality gates around source jobs;
+- profile-shaped search ideas for TheirStack;
+- TheirStack credit-safe preview/paid-fetch helpers;
+- optional JSON/API feed import for fixtures and backfills.
+
+The applier remains a product concept, but the current observer/resolver/executor/runner implementation was archived as unsettled code. Future application automation should be rebuilt deliberately through OMP `workflowz`, not extended from the active minimal app by accident.
+
+## Active package
+
+**Package:** `jobs_assistant`
+**CLI:** `jobs-assistant`
+**Active source:** `src/jobs_assistant/`
+**Active tests:** `tests/`
 
 ## Safety invariants
+
+These remain product rules even while the applier is archived:
 
 - Never mass-submit applications.
 - Never click final submit.
 - Never infer sensitive, legal, identity, CAPTCHA, assessment, sign-in, payment, unknown, or manual-only answers.
-- Prepare one queued job to the final-submit boundary, persist evidence, and stop for human review.
-- Observer/resolver/executor/runner split keeps each responsibility isolated.
+- Preserve human review/confirmation before any eventual submit workflow.
+- Treat archived applier code as reference-only, not production behavior.
 
-## Core modules
+## Active modules
 
 | Module | Role |
 |---|---|
-| `db` | SQLite schema, connection, run/page persistence |
-| `backlog` | Backlog ingestion and dedupe |
-| `theirstack` | Credit-safe TheirStack preview/paid-fetch boundary |
-| `job_source` | Optional read-only `GET /v1/jobs` ingestion boundary |
-| `observer` | Deterministic static-HTML normalized page snapshots |
-| `resolver` | Strict guarded answer decisions |
-| `llm` | Optional narrow LLM resolver adapter; fails closed when unconfigured |
-| `executor` | Guarded fill/select/check/upload/non-final-click actions |
-| `runner` | One-job dry-run orchestration; persists pages/actions, stops before final submit |
-| `review` | Failure/review sampling |
-| `cli` | `jobs-assistant` command-line entrypoint |
+| `contracts` | Minimal ingestion/domain dataclasses: jobs, source jobs, sync metadata, credit estimates |
+| `db` | SQLite jobs and sync-runs schema, connection helpers, canonical URL handling, raw job upsert helpers |
+| `backlog` | Backlog upsert, dedupe, queue listing, backlog counts |
+| `theirstack` | TheirStack payload builders, credit-safety checks, client, response sync helpers |
+| `job_source` | Optional normalized `GET /v1/jobs` / JSON fixture import boundary |
+| `cli` | Minimal command-line entrypoint |
 
-## Quick checks (from clean checkout, using committed `uv.lock`)
+## Active CLI commands
+
+| Command | Description |
+|---|---|
+| `init-db` | Initialize the SQLite jobs/sync database |
+| `import-feed` | Import normalized jobs from a JSON fixture or `GET /v1/jobs` feed |
+
+TheirStack remains active as library code and product direction. A minimal `sync-theirstack` CLI is still roadmap work unless present in the active branch.
+
+## Archived applier
+
+The applier concept is set in stone, but the current active implementation was intentionally removed from the active package.
+
+Archived first-principles applier files live under:
+
+```text
+archive/minimized-20260706/applier/
+```
+
+They include the prior observer/resolver/executor/runner/review/live-smoke source and tests. That archive is reference-only and not a runnable package snapshot; its source depended on the root `contracts.py` and `db.py` as they existed before minimization.
+
+Older applier/scraper attempts remain under:
+
+```text
+archive/old-scraper/
+archive/old-applier/
+```
+
+Do not revive archived applier code directly. Rebuild the applier as a workflowz-managed sequence with explicit contracts and tests:
+
+```text
+scraped job/backlog row
+  -> observe application page
+  -> resolve safe answers from profile/resume/job context
+  -> execute guarded non-final actions
+  -> write review evidence
+  -> stop before final submit
+```
+
+## OMP workflowz practice
+
+Use OMP `workflowz` for substantial work:
+
+- define the goal, metric, target threshold, measurement source, and stop condition;
+- split work into explicit subtasks with target files, non-goals, acceptance criteria, and verification commands;
+- delegate relevant work to appropriate subagents by need: Tester for tests, reviewer for safety/quality, task workers for implementation, designer only for UI/design work;
+- keep the parent worktree as integration authority;
+- archive or reject unrelated implementation drift.
+
+For future applier work, workflowz should assign separate subtasks for observation, resolver contract, executor guardrails, persistence/output, and safety review. No worker should own final-submit behavior until a submit policy exists and is tested.
+
+## Quick checks
 
 ```bash
 uv lock --check
 uv run --frozen --extra dev python -m pytest
 uv run --frozen jobs-assistant --help
-```
-
-## Without `uv`
-
-```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/python -m pytest
-.venv/bin/jobs-assistant --help
-```
-
-## Optional live Playwright smoke
-
-```bash
-# install live extras and browsers
-pip install -e '.[live]'
-python -m playwright install chromium
-jobs-assistant live-smoke
-```
-
-## CLI commands
-
-| Command | Description |
-|---|---|
-| `init-db` | Initialize the SQLite database |
-| `import-feed` | Import normalized jobs from JSON file or `GET /v1/jobs` feed |
-| `dry-run-static` | Run one queued job against static HTML files |
-| `sample-failures` | Group failed/blocked/needs-review runs |
-| `live-smoke` | Check optional Playwright live adapter availability |
-
-## Dry-run
-
-```bash
-# Prepare one job to the final-submit boundary (static HTML fixture)
-uv run --frozen jobs-assistant dry-run-static --job-id 1 --html page1.html page2.html --facts-json '{"name":"Test"}'
 ```
 
 ## Container smoke
@@ -84,21 +110,19 @@ docker compose down
 
 ## Archives
 
-Historical snapshots live under `archive/` as behavioral evidence only — do not modify:
+Historical snapshots live under `archive/` as reference only. Do not import from archived code in active modules.
 
-- `archive/old-scraper/`: last active scraper/application-assistant snapshot.
-- `archive/old-applier/`: older monolithic applier archive and applicant data.
-- `archive/old-applier/data/Main_Resume.pdf`: archived resume — **do not modify**.
+Important archive entries:
+
+- `archive/minimized-20260706/applier/`: the removed active applier implementation from minimization.
+- `archive/old-scraper/`: previous scraper/application-assistant snapshot.
+- `archive/old-applier/`: older monolithic applier and applicant data.
+- `archive/old-applier/data/Main_Resume.pdf`: preserved applicant resume data; do not modify.
 - `archive/REBUILD_PROMPT.md`: rebuild contract and archive map.
-- `archive/notes/` and `archive/prompts/`: archived research notes and handoff material.
+- `archive/notes/`, `archive/prompts/`: archived research and prompt templates.
 
-## First docs to read
+## What not to touch casually
 
-- **AGENTS.md** — policy, architecture, safety, development rules, and OMP workflowz/cmux child-worktree rules (auto-loaded by OMP).
-- **OMP_CMUX_WORKFLOW.md** — OMP workflowz + cmux reusable operating workflow.
-
-## What not to touch
-
-- `archive/` files — reference only, do not edit unless explicitly updating archive notes.
-- `archive/old-applier/data/Main_Resume.pdf` — preserved applicant data; must not be modified.
-- Active Python source under `src/jobs_assistant/` unless explicitly assigned.
+- `archive/` code and data.
+- Runtime SQLite data under `data/` or `scraper/data/` unless explicitly instructed.
+- Applicant profile/resume data except through documented profile workflows.

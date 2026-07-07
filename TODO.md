@@ -1,19 +1,59 @@
-# jobs-assistant — TODO
+# jobs-assistant minimal roadmap
 
-Active project tracker. Not for archive content.
+The active app is intentionally minimized to scraper/backlog ingestion, filtering/quality gates, profiles, and TheirStack-related work. The applier concept remains important, but the current implementation is archived and should be rebuilt later through OMP `workflowz`.
 
-## Known improvements
+## Active scope
 
-- [ ] Add live Playwright dry-run (observe + resolve + execute against a real URL).
-- [ ] Wire `import-feed` into a real TheirStack sync pipeline for tested job ingestion.
-- [ ] Add `--db` path CLI flag defaults in a settings/config module for env-free setup.
-- [ ] Publish observer/resolver/executor/runner guidance to `skills/` for agent workers.
-- [ ] Write container-aware test run target in pyproject.toml for CI and pre-push.
-- [ ] Add integration smoke: init-db + import-feed + sample-failures in one script.
-- [ ] Dedupe and merge the archived `archive/old-scraper/` README and TODO into this tracker.
+```text
+TheirStack / source feed / scraper output
+  ↓
+Normalize to JobInput
+  ↓
+Filtering and quality gates
+  ↓
+SQLite jobs backlog
+  ↓
+Sync metadata and reviewable source payloads
+```
 
-## Housekeeping
+## Set-in-stone active features
 
-- Verify all archived scripts/references are clearly marked read-only.
-- Remove any remaining stale `scraper/`-era environment variable baggage.
-- Add a disposable local HTML/browser Playwright smoke for observe → resolve → execute → stop at final submit.
+- [ ] Keep SQLite job backlog schema small and stable.
+- [ ] Preserve canonical URL and source job ID dedupe.
+- [ ] Preserve raw source payloads in `raw_json`.
+- [ ] Preserve profile-shaped TheirStack search ideas.
+- [ ] Keep TheirStack credit-safe preview before paid fetch.
+- [ ] Keep paid fetch gated by explicit code/config opt-in before any credit-consuming call.
+- [ ] Keep feed/fixture import for deterministic tests and backfills.
+- [ ] Keep filtering/quality gates explicit and testable.
+
+## Minimal next patches
+
+- [ ] Add or restore a minimal `sync-theirstack` CLI only if it uses the active TheirStack helpers and focused tests.
+- [ ] Add a first-class profile config loader only if the active scraper/filtering path consumes it directly.
+- [ ] Add scraper SQLite import only if it maps existing `scraper/data` outputs into the active backlog without applier coupling.
+- [ ] Add freshness/active-job checks only as injectable pure functions with fixtures.
+
+## Archived applier concept
+
+The prior active applier implementation was moved to:
+
+```text
+archive/minimized-20260706/applier/
+```
+
+It is reference-only and not a runnable package snapshot. It depended on root `contracts.py` and `db.py` before minimization.
+
+Future applier rebuild must use OMP `workflowz` and separate subtasks for observer, resolver, executor, persistence, and safety review. No final-submit behavior may be added until a submit policy exists and is tested.
+
+## Verification
+
+```bash
+uv lock --check
+uv run --frozen --extra dev python -m pytest
+uv run --frozen jobs-assistant --help
+docker compose build
+docker compose up -d
+docker compose ps
+docker compose down
+```

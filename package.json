@@ -1,0 +1,14 @@
+{
+  "name": "jobs-assistant-browser-adapter",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Puppeteer browser adapter for jobs-assistant guarded autofill",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "puppeteer": "^24.12.1"
+  },
+  "scripts": {
+    "install-browser": "puppeteer browsers install chrome",
+    "puppeteer-smoke": "node src/jobs_assistant/puppeteer_runner.js < /dev/null"
+  }
+}

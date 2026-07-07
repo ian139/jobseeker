@@ -25,8 +25,8 @@ class TheirStackError(RuntimeError):
 # --- Credit safety -----------------------------------------------------------
 
 # Profiles are simple string literals for typing convenience.
-ProfileName = Literal["fall_coop_swe_data", "default"]
-PROFILE_NAMES: tuple[ProfileName, ...] = ("fall_coop_swe_data",)
+ProfileName = Literal["new_grad_cs", "fall_coop_swe_data", "default"]
+PROFILE_NAMES: tuple[ProfileName, ...] = ("new_grad_cs", "fall_coop_swe_data", "default")
 
 
 def is_credit_safe_payload(payload: dict[str, Any]) -> bool:
@@ -54,26 +54,104 @@ def estimate_credits(payload: dict[str, Any]) -> CreditEstimate:
 # --- Payload builders --------------------------------------------------------
 
 
+BAD_TITLE_MATCHES = [
+    "senior",
+    "sr.",
+    "staff",
+    "principal",
+    "manager",
+    "director",
+    "lead",
+    "architect",
+    "recruiter",
+    "sales",
+    "account executive",
+]
+
+BAD_DESCRIPTION_PATTERNS = [
+    "(?i)\\b(5|6|7|8|9|10)\\+?\\s+years?\\b",
+    "(?i)\\bactive\\s+security\\s+clearance\\b",
+    "(?i)\\bcommission[- ]only\\b",
+]
+
+CS_ROLE_TITLES = [
+    "software engineer intern",
+    "software developer intern",
+    "backend engineer intern",
+    "frontend engineer intern",
+    "full stack engineer intern",
+    "data scientist intern",
+    "data engineer intern",
+    "devops engineer intern",
+    "site reliability engineer intern",
+    "platform engineer intern",
+    "machine learning engineer intern",
+    "ai engineer intern",
+    "software engineer",
+    "software developer",
+    "backend engineer",
+    "frontend engineer",
+    "full stack engineer",
+    "data scientist",
+    "data engineer",
+    "devops engineer",
+    "site reliability engineer",
+    "platform engineer",
+    "machine learning engineer",
+    "ai engineer",
+    "new grad software engineer",
+    "new grad data scientist",
+    "new grad data engineer",
+    "entry level software engineer",
+    "junior software engineer",
+    "co-op software engineer",
+    "co-op software developer",
+    "co-op data scientist",
+    "co-op data engineer",
+]
+
+EARLY_CAREER_PATTERNS = [
+    "(?i)\\bco-op\\b",
+    "(?i)\\bnew grad(uate)?s?\\b",
+    "(?i)\\buniversity grad(uate)?s?\\b",
+    "(?i)\\bearly career\\b",
+    "(?i)\\bentry[- ]level\\b",
+    "(?i)\\bintern(ship)?\\b",
+    "(?i)\\bgraduate program\\b",
+]
+
+
+def _base_payload(*, blur_company_data: bool, include_total_results: bool, limit: int) -> dict[str, Any]:
+    return {
+        "blur_company_data": blur_company_data,
+        "include_total_results": include_total_results,
+        "limit": limit,
+        "page": 0,
+        "posted_at_max_age_days": 7,
+        "order_by": [
+            {"field": "date_posted", "desc": True},
+            {"field": "discovered_at", "desc": True},
+        ],
+        "is_closed": False,
+        "company_type": "direct_employer",
+        "job_country_code_or": ["US"],
+        "job_title_not": BAD_TITLE_MATCHES,
+        "job_description_pattern_not": BAD_DESCRIPTION_PATTERNS,
+    }
+
+
+def _apply_profile(payload: dict[str, Any], profile: ProfileName) -> None:
+    if profile in {"new_grad_cs", "fall_coop_swe_data"}:
+        payload["job_title_or"] = CS_ROLE_TITLES
+        payload["job_description_pattern_or"] = EARLY_CAREER_PATTERNS
+
+
 def build_preview_payload(
     profile: ProfileName = "default",
 ) -> dict[str, Any]:
     """Build a credit-safe preview payload (free, blurry data, count only)."""
-    payload: dict[str, Any] = {
-        "blur_company_data": True,
-        "include_total_results": True,
-        "limit": 1,
-        "order_by": "date_posted",
-        "order_by_desc": True,
-        "page": 0,
-        "remote": True,
-    }
-    if profile == "fall_coop_swe_data":
-        payload["job_title"] = ["software engineer", "data scientist", "backend engineer"]
-        payload["seniority"] = ["entry_level", "mid_level"]
-        payload["employment_type"] = ["full_time"]
-    else:
-        payload["remote"] = True
-        payload["employment_type"] = ["full_time", "contract"]
+    payload = _base_payload(blur_company_data=True, include_total_results=True, limit=1)
+    _apply_profile(payload, profile)
     return payload
 
 
@@ -81,6 +159,7 @@ def build_paid_fetch_payload(
     profile: ProfileName = "default",
     *,
     limit: int = 25,
+    discovered_at_gte: str | None = None,
     discovered_at_gt: str | None = None,
 ) -> dict[str, Any]:
     """Build a paid-fetch payload that returns full job data.
@@ -90,27 +169,11 @@ def build_paid_fetch_payload(
     if limit < 1 or limit > 100:
         raise ValueError("paid-fetch limit must be between 1 and 100")
 
-    payload: dict[str, Any] = {
-        "blur_company_data": False,
-        "include_total_results": True,
-        "limit": limit,
-        "order_by": "date_posted",
-        "order_by_desc": True,
-        "page": 0,
-        "remote": True,
-    }
-
-    if discovered_at_gt is not None:
-        payload["discovered_at"] = {"$gt": discovered_at_gt}
-
-    if profile == "fall_coop_swe_data":
-        payload["job_title"] = ["software engineer", "data scientist", "backend engineer"]
-        payload["seniority"] = ["entry_level", "mid_level"]
-        payload["employment_type"] = ["full_time"]
-        payload["remote"] = True
-    else:
-        payload["employment_type"] = ["full_time", "contract"]
-
+    payload = _base_payload(blur_company_data=False, include_total_results=True, limit=limit)
+    checkpoint = discovered_at_gte or discovered_at_gt
+    if checkpoint is not None:
+        payload["discovered_at_gte"] = checkpoint
+    _apply_profile(payload, profile)
     return payload
 
 
@@ -256,13 +319,10 @@ class TheirStackClient:
             "Accept": "application/json",
         }
         url = f"{self._base_url}{SEARCH_PATH}"
-        last_error: Exception | None = None
-
         for attempt in range(self._max_retries + 1):
             try:
                 response = self._post(url, headers, payload)
             except httpx.HTTPError as exc:
-                last_error = exc
                 if attempt == self._max_retries:
                     raise TheirStackError(
                         f"TheirStack request failed before receiving a response: {exc}"
@@ -294,8 +354,6 @@ class TheirStackClient:
                 raise TheirStackError("TheirStack returned non-object JSON response")
             return data
 
-        raise TheirStackError(f"TheirStack request failed: {last_error}")
-
     def _post(
         self,
         url: str,
@@ -322,8 +380,8 @@ def raw_job_to_input(raw: dict[str, Any]) -> JobInput:
     if isinstance(company, dict):
         company_name = str(company.get("name") or "")
     company_name = company_name or str(raw.get("company_name") or raw.get("company") or "")
-    source_id = raw.get("id") or raw.get("job_id") or raw.get("theirstack_job_id")
-    apply_url = raw.get("apply_url") or raw.get("url") or raw.get("job_url")
+    source_id = raw.get("id") or raw.get("job_id") or raw.get("theirStackId") or raw.get("theirstack_job_id") or raw.get("theirstack_id")
+    apply_url = raw.get("apply_url") or raw.get("final_url") or raw.get("url") or raw.get("source_url") or raw.get("job_url")
     return JobInput(
         source="theirstack",
         source_job_id=None if source_id is None else str(source_id),

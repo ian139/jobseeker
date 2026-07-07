@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     mode TEXT NOT NULL,
     started_at TEXT NOT NULL,
     finished_at TEXT,
+    checkpoint TEXT,
     success INTEGER NOT NULL DEFAULT 0,
     jobs_seen INTEGER NOT NULL DEFAULT 0,
     jobs_returned INTEGER NOT NULL DEFAULT 0,
@@ -52,6 +53,21 @@ CREATE TABLE IF NOT EXISTS sync_runs (
     jobs_updated INTEGER NOT NULL DEFAULT 0,
     error TEXT
 );
+
+CREATE TABLE IF NOT EXISTS application_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    apply_url TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('completed', 'manual', 'blocked', 'failed')),
+    reason TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT NOT NULL,
+    observation_json TEXT NOT NULL DEFAULT '{}',
+    plan_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE INDEX IF NOT EXISTS idx_application_runs_job_id ON application_runs(job_id);
+CREATE INDEX IF NOT EXISTS idx_application_runs_status ON application_runs(status);
 """
 
 
@@ -95,6 +111,9 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
 def initialize_database(connection: sqlite3.Connection) -> None:
     connection.executescript(SCHEMA_SQL)
+    columns = {row["name"] for row in connection.execute("PRAGMA table_info(sync_runs)").fetchall()}
+    if "checkpoint" not in columns:
+        connection.execute("ALTER TABLE sync_runs ADD COLUMN checkpoint TEXT")
     connection.commit()
 
 
@@ -181,7 +200,7 @@ def record_sync_run(connection: sqlite3.Connection, source: str, mode: str, *, s
 
 
 def update_sync_run(connection: sqlite3.Connection, run_id: int, **kwargs: Any) -> None:
-    allowed = {"finished_at", "success", "jobs_seen", "jobs_returned", "jobs_inserted", "jobs_updated", "error"}
+    allowed = {"finished_at", "checkpoint", "success", "jobs_seen", "jobs_returned", "jobs_inserted", "jobs_updated", "error"}
     fields = {key: value for key, value in kwargs.items() if key in allowed}
     if not fields:
         return
@@ -199,5 +218,9 @@ def latest_sync_checkpoint(connection: sqlite3.Connection, *, source: str | None
     if profile is not None:
         clauses.append("profile = ?")
         values.append(profile)
-    row = connection.execute(f"SELECT MAX(started_at) AS checkpoint FROM sync_runs WHERE {' AND '.join(clauses)}", values).fetchone()
+    where = " AND ".join(clauses)
+    row = connection.execute(f"SELECT checkpoint FROM sync_runs WHERE {where} AND checkpoint IS NOT NULL ORDER BY finished_at DESC, started_at DESC, id DESC LIMIT 1", values).fetchone()
+    if row and row["checkpoint"]:
+        return str(row["checkpoint"])
+    row = connection.execute(f"SELECT started_at AS checkpoint FROM sync_runs WHERE {where} ORDER BY started_at DESC, id DESC LIMIT 1", values).fetchone()
     return str(row["checkpoint"]) if row and row["checkpoint"] else None

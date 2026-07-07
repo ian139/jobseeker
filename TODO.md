@@ -29,9 +29,9 @@ Sync metadata and reviewable source payloads
 
 ## Minimal next patches
 
-- [ ] Add or restore a minimal `sync-theirstack` CLI only if it uses the active TheirStack helpers and focused tests.
-- [ ] Add a first-class profile config loader only if the active scraper/filtering path consumes it directly.
-- [ ] Add scraper SQLite import only if it maps existing `scraper/data` outputs into the active backlog without applier coupling.
+- [ ] Add a first-class named application-profile config loader only when it is consumed by `autofill --application-profile-json` without overloading source filter profiles.
+- [ ] Add non-API web scrapers only behind the existing `JobInput`/`import_source_jobs` boundary; LinkedIn must not bypass sign-in, CAPTCHA, or anti-abuse gates.
+- [ ] Implement `scrape-url` for public, no-auth job pages by parsing `JobPosting` JSON-LD and common apply links into `JobInput`; block on sign-in/CAPTCHA; persist via `import_source_jobs(source="web_scraper")`; add fixtures for Greenhouse, Lever, and a generic company page.
 - [ ] Add freshness/active-job checks only as injectable pure functions with fixtures.
 
 ## Archived applier concept

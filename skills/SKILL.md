@@ -39,7 +39,7 @@ Choose the lowest level that can produce the final proof.
 |---:|---|---|---|---|
 | 0 | Static fetch | `read` URL, `web_search`, docs | static content/API answer is enough | JS/session/visual state matters |
 | 1 | Service/API gate | health endpoint, config endpoint, DB query | checking readiness/backend state | claiming UI works |
-| 2 | DOM browser automation | OMP `browser`, Playwright against local app | local web UI behavior matters | exact user browser profile matters |
+| 2 | DOM browser automation | OMP `browser`, Puppeteer against local app | local web UI behavior matters | exact user browser profile matters |
 | 3 | Embedded browser control | Orca browser CLI, cmux browser panel | target is that embedded browser/pane | target is normal Chrome/user profile |
 | 4 | Accessibility/computer-use | desktop UI tree, screenshot, click/type | no DOM/CDP path, visible desktop matters | structured DOM/API proof exists |
 | 5 | Identity-bound remote control | CDP to existing Chrome/profile | exact user browser/session/profile matters | a fresh browser can prove it |

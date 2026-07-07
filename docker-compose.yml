@@ -3,6 +3,11 @@ services:
     build: .
     env_file:
       - .env.example
+    environment:
+      # Docker Desktop blocks Chromium's setuid/user-namespace sandbox in this
+      # default compose profile. The container still runs as a non-root user;
+      # use host execution or a hardened custom Docker profile for untrusted pages.
+      PUPPETEER_NO_SANDBOX: "1"
     volumes:
       - ./data:/app/data
     command: ["--help"]

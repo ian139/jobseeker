@@ -70,6 +70,14 @@ Default applicant artifacts remain reference data, not permission to infer sensi
 - Personal site: `https://immemorized.com`
 - Profile JSON examples may live under `scraper/data/` or `data/`.
 
+## Protected files and data
+
+Do not touch casually:
+
+- `archive/` code and data.
+- Runtime SQLite data under `data/` or `scraper/data/` unless explicitly instructed.
+- Applicant profile/resume data except through documented profile workflows.
+
 ## Active code layout
 
 Active source:
@@ -98,7 +106,22 @@ Archived code belongs under `archive/`. Do not import archived modules from acti
 - Add tests for every new filtering, ingestion, dedupe, profile, or TheirStack branch.
 - Prefer boring schemas and explicit JSON/SQLite contracts.
 - Do not add a second convention beside an existing one.
-- Use DeepSeek through Ollama Cloud for OMP workers unless a task specifically needs another model family.
+- Use the `TASK` model alias (`ollama-cloud/deepseek-v4-pro`) for OMP/workflowz implementation workers unless a task specifically needs another model family.
+
+## Model aliases
+
+| Model | Role alias | Reasoning |
+|---|---|---|
+| `openai-codex/gpt-5.5` | `DEFAULT` | low |
+| `openai-codex/gpt-5.5` | `SLOW` | xhigh |
+| `openai-codex/gpt-5.5` | `PLAN` | high |
+| `openai-codex/gpt-5.5` | `ADVISOR` | xhigh |
+| `ollama-cloud/kimi-k2.7-code` | `SMOL` | high |
+| `ollama-cloud/glm-5.2` | `VISION` | xhigh |
+| `ollama-cloud/glm-5.2` | `DESIGNER` | xhigh |
+| `ollama-cloud/deepseek-v4-flash` | `COMMIT` | low |
+| `openrouter/google/gemini-3.5-flash` | `TINY` | inherit |
+| `ollama-cloud/deepseek-v4-pro` | `TASK` | high |
 
 ## Metrics-first goals and minimal tooling
 

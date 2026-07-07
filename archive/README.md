@@ -2,6 +2,17 @@
 
 This directory contains full code snapshots from the earlier incarnation of the project. The active, maintained application lives at the repository root (`src/`, `tests/`, `pyproject.toml`, etc.). Everything under `archive/` is **reference-only** — helpful for understanding design decisions and what was tried before, but not active code. Do not import from, extend, or run these files.
 
+## Quick map
+
+- `minimized-20260706/applier/`: removed first-principles applier implementation from the 2026-07-06 minimization. Reference-only and non-runnable; rebuild future applier work through OMP `workflowz`.
+- `old-scraper/`: previous scraper/application-assistant snapshot with TheirStack ingestion, SQLite backlog, and application-pipeline reference code.
+- `old-applier/`: older monolithic applier and applicant-data snapshot.
+- `old-applier/data/Main_Resume.pdf`: preserved applicant resume data; do not modify casually.
+- `REBUILD_PROMPT.md`: rebuild contract and archive map.
+- `notes/`, `prompts/`: archived research notes and prompt templates.
+
+Future application automation should not import archived modules. Start from fresh contracts, keep the no-final-submit safety boundary, and use the active `src/jobs_assistant/` package for maintained ingestion/backlog code.
+
 ---
 
 ## REBUILD_PROMPT.md

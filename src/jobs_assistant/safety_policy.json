@@ -1,0 +1,366 @@
+{
+  "version": "2026-07-10.wave-b",
+  "ascii_codepoint_ranges": [[9, 10], [13, 13], [32, 126]],
+  "caps": {
+    "max_descriptors": 32,
+    "max_descriptor_bytes": 2048,
+    "max_descriptor_aggregate_bytes": 8192,
+    "max_options": 200,
+    "max_option_bytes": 2048,
+    "max_option_aggregate_bytes": 65536
+  },
+  "greenhouse_route_policy": {
+    "version": "2026-07-10.greenhouse-routes.v1",
+    "interactive_frame_origins": [
+      "https://boards.greenhouse.io",
+      "https://job-boards.greenhouse.io"
+    ],
+    "automated_initial_get": {
+      "methods": ["GET"],
+      "routes": [
+        {
+          "class": "hosted",
+          "hosts": ["boards.greenhouse.io", "job-boards.greenhouse.io"],
+          "path_template": "/{board}/jobs/{job}",
+          "path_patterns": {"board": "ascii_slug", "job": "digits"},
+          "identity": ["board", "job"],
+          "query_keys": ["gh_src"]
+        },
+        {
+          "class": "embed",
+          "hosts": ["boards.greenhouse.io"],
+          "path": "/embed/job_app",
+          "identity": ["for", "token"],
+          "query_keys": ["for", "token", "gh_src"],
+          "required_query": ["for", "token"],
+          "query_patterns": {"for": "ascii_slug", "token": "digits"}
+        },
+        {
+          "class": "shortlink",
+          "hosts": ["grnh.se"],
+          "path_template": "/{slug}",
+          "path_patterns": {"slug": "ascii_slug"},
+          "identity": ["slug", "slug"],
+          "query_keys": []
+        }
+      ]
+    },
+    "approved_static_get_head": {
+      "methods": ["GET", "HEAD"],
+      "hosts": ["boards.greenhouse.io", "job-boards.greenhouse.io", "job-boards.cdn.greenhouse.io"],
+      "path_prefixes": {
+        "boards.greenhouse.io": ["/assets/"],
+        "job-boards.greenhouse.io": ["/assets/"],
+        "job-boards.cdn.greenhouse.io": ["/assets/"]
+      },
+      "types": ["stylesheet", "script", "image", "font", "media"],
+      "path_caps": {"max_path_bytes": 2048, "max_query_bytes": 2048}
+    },
+    "human_only_form_actions": {
+      "methods": ["GET", "POST"],
+      "routes": [
+        {
+          "class": "hosted_form",
+          "hosts": ["boards.greenhouse.io", "job-boards.greenhouse.io"],
+          "path_template": "/{board}/jobs/{job}",
+          "path_patterns": {"board": "ascii_slug", "job": "digits"},
+          "identity": ["board", "job"],
+          "query_keys": ["gh_src"]
+        },
+        {
+          "class": "embed_form",
+          "hosts": ["boards.greenhouse.io"],
+          "path": "/embed/job_app",
+          "identity": ["for", "token"],
+          "query_keys": ["for", "token", "gh_src"],
+          "required_query": ["for", "token"],
+          "query_patterns": {"for": "ascii_slug", "token": "digits"}
+        }
+      ]
+    },
+    "post_human_confirmation": {
+      "methods": ["GET"],
+      "hosts": ["boards.greenhouse.io", "job-boards.greenhouse.io"],
+      "path_template": "/{board}/jobs/{job}/confirmation",
+      "path_patterns": {"board": "ascii_slug", "job": "digits"},
+      "identity": ["board", "job"],
+      "query_keys": ["gh_src"],
+      "route": "same_board_job_confirmation",
+      "requires_human_permit": true,
+      "requires_same_board_job": true
+    },
+    "final_like_match": "ascii_word_boundary",
+    "final_like_tokens": ["submit", "complete", "confirm", "finish", "send", "final"],
+    "redirect_caps": {
+      "max_redirects": 10,
+      "max_static_requests": 200,
+      "max_static_bytes": 20971520
+    },
+    "public_host_constraints": {
+      "scheme": "https",
+      "ports": [443],
+      "reject_userinfo": true,
+      "reject_fragments": true,
+      "reject_private": true,
+      "allowed_hosts": ["boards.greenhouse.io", "job-boards.greenhouse.io", "job-boards.cdn.greenhouse.io", "grnh.se"]
+    },
+    "renderer_patterns": {
+      "hosted": {
+        "document": "https://job-boards.greenhouse.io/{board}/jobs/{job}",
+        "form_action": "https://job-boards.greenhouse.io/{board}/jobs/{job}",
+        "form_method": "GET"
+      },
+      "embed": {
+        "document": "https://boards.greenhouse.io/embed/job_app?for={board}&token={job}",
+        "form_action": "https://boards.greenhouse.io/embed/job_app?for={board}&token={job}",
+        "form_method": "POST"
+      }
+    },
+    "parity_vectors": [
+      {"name": "hosted_board", "operation": "initial", "url": "https://boards.greenhouse.io/example/jobs/123", "method": "GET", "expected": "allow:hosted"},
+      {"name": "hosted_job_board", "operation": "initial", "url": "https://job-boards.greenhouse.io/example/jobs/123?gh_src=fixture", "method": "GET", "expected": "allow:hosted"},
+      {"name": "embed_renderer", "operation": "initial", "url": "https://boards.greenhouse.io/embed/job_app?for=example&token=123", "method": "GET", "expected": "allow:embed"},
+      {"name": "shortlink_redirect", "operation": "initial", "url": "https://grnh.se/example", "method": "GET", "expected": "allow:shortlink"},
+      {"name": "finalist_boundary", "operation": "initial", "url": "https://boards.greenhouse.io/example/jobs/123?gh_src=finalist", "method": "GET", "expected": "allow:hosted"},
+      {"name": "confirmation_boundary", "operation": "initial", "url": "https://boards.greenhouse.io/example/jobs/123?gh_src=confirmation", "method": "GET", "expected": "allow:hosted"},
+      {"name": "submit_boundary", "operation": "initial", "url": "https://boards.greenhouse.io/example/jobs/123?gh_src=submit", "method": "GET", "expected": "deny:final_like_route"},
+      {"name": "complete_boundary", "operation": "initial", "url": "https://boards.greenhouse.io/example/jobs/123?gh_src=complete", "method": "GET", "expected": "deny:final_like_route"},
+      {"name": "hosted_cdn_asset", "operation": "request", "url": "https://job-boards.cdn.greenhouse.io/assets/application-f00ba4.js", "method": "GET", "request_class": "static", "resource_type": "script", "expected": "allow:static"},
+      {"name": "static_literal_dot_segment", "operation": "request", "url": "https://job-boards.cdn.greenhouse.io/assets/../tracker.js", "method": "GET", "request_class": "static", "resource_type": "script", "expected": "deny:unsafe_path"},
+      {"name": "static_encoded_dot_segment", "operation": "request", "url": "https://job-boards.cdn.greenhouse.io/assets/%2e%2e/tracker.js", "method": "GET", "request_class": "static", "resource_type": "script", "expected": "deny:unsafe_path"},
+      {"name": "static_encoded_backslash", "operation": "request", "url": "https://job-boards.cdn.greenhouse.io/assets/%5ctracker.js", "method": "GET", "request_class": "static", "resource_type": "script", "expected": "deny:unsafe_path"},
+      {"name": "static_malformed_escape", "operation": "request", "url": "https://job-boards.cdn.greenhouse.io/assets/%ZZ.js", "method": "GET", "request_class": "static", "resource_type": "script", "expected": "deny:invalid_path_encoding"},
+      {"name": "hosted_cdn_non_asset", "operation": "request", "url": "https://job-boards.cdn.greenhouse.io/tracker.js", "method": "GET", "request_class": "static", "resource_type": "script", "expected": "deny:unsupported_static_path"},
+      {"name": "shortlink_static_denied", "operation": "request", "url": "https://grnh.se/assets/application.js", "method": "GET", "request_class": "static", "resource_type": "script", "expected": "deny:unsupported_static_host"},
+      {"name": "unknown_host", "operation": "initial", "url": "https://custom.example/jobs/123", "method": "GET", "expected": "deny:unsupported_host"},
+      {"name": "duplicate_query", "operation": "initial", "url": "https://boards.greenhouse.io/example/jobs/123?gh_src=a&gh_src=b", "method": "GET", "expected": "deny:duplicate_query"},
+      {"name": "final_token", "operation": "initial", "url": "https://boards.greenhouse.io/example/jobs/123?next=confirm", "method": "GET", "expected": "deny:final_like_route"},
+      {"name": "final_token_boundary", "operation": "initial", "url": "https://boards.greenhouse.io/example/jobs/123?gh_src=finalist", "method": "GET", "expected": "allow:hosted"},
+      {"name": "human_form_ownership", "operation": "form", "url": "https://job-boards.greenhouse.io/example/jobs/123", "method": "POST", "expected": "human:field_ownership"},
+      {"name": "confirmation_same_job_permitted", "operation": "request", "url": "https://job-boards.greenhouse.io/example/jobs/123/confirmation", "method": "GET", "request_class": "post_human_confirmation", "page_url": "https://job-boards.greenhouse.io/example/jobs/123", "human_permit": true, "expected": "allow:post_human_confirmation"},
+      {"name": "confirmation_other_job", "operation": "request", "url": "https://job-boards.greenhouse.io/example/jobs/124/confirmation", "method": "GET", "request_class": "post_human_confirmation", "page_url": "https://job-boards.greenhouse.io/example/jobs/123", "human_permit": true, "expected": "deny:same_board_job_required"},
+      {"name": "method_mismatch", "operation": "initial", "url": "https://boards.greenhouse.io/example/jobs/123", "method": "POST", "expected": "deny:method_mismatch"}
+    ]
+  },
+  "lever_route_policy": {
+    "version": "2026-07-10.lever-routes.v1",
+    "interactive_frame_origins": [
+      "https://jobs.lever.co",
+      "https://jobs.eu.lever.co"
+    ],
+    "automated_initial_get": {
+      "methods": ["GET"],
+      "routes": [
+        {
+          "class": "hosted",
+          "hosts": ["jobs.lever.co", "jobs.eu.lever.co"],
+          "path_template": "/{account}/{job}",
+          "path_patterns": {"account": "ascii_slug", "job": "uuid"},
+          "identity": ["host", "account", "job"],
+          "query_keys": []
+        },
+        {
+          "class": "apply",
+          "hosts": ["jobs.lever.co", "jobs.eu.lever.co"],
+          "path_template": "/{account}/{job}/apply",
+          "path_patterns": {"account": "ascii_slug", "job": "uuid"},
+          "identity": ["host", "account", "job"],
+          "query_keys": []
+        }
+      ]
+    },
+    "approved_static_get_head": {
+      "methods": ["GET", "HEAD"],
+      "hosts": ["jobs.lever.co", "jobs.eu.lever.co"],
+      "path_prefixes": {
+        "jobs.lever.co": ["/assets/"],
+        "jobs.eu.lever.co": ["/assets/"]
+      },
+      "types": ["stylesheet", "script", "image", "font", "media"],
+      "path_caps": {"max_path_bytes": 2048, "max_query_bytes": 2048}
+    },
+    "human_only_form_actions": {
+      "methods": ["GET", "POST"],
+      "routes": [
+        {
+          "class": "apply_form",
+          "hosts": ["jobs.lever.co", "jobs.eu.lever.co"],
+          "path_template": "/{account}/{job}/apply",
+          "path_patterns": {"account": "ascii_slug", "job": "uuid"},
+          "identity": ["host", "account", "job"],
+          "query_keys": []
+        }
+      ]
+    },
+    "post_human_confirmation": {
+      "methods": ["GET"],
+      "hosts": ["jobs.lever.co", "jobs.eu.lever.co"],
+      "path_template": "/{account}/{job}/confirmation",
+      "path_patterns": {"account": "ascii_slug", "job": "uuid"},
+      "identity": ["host", "account", "job"],
+      "query_keys": [],
+      "route": "same_company_job_confirmation",
+      "requires_human_permit": true,
+      "requires_same_company_job": true
+    },
+    "final_like_match": "ascii_word_boundary",
+    "final_like_tokens": ["submit", "complete", "confirm", "finish", "send", "final"],
+    "redirect_caps": {
+      "max_redirects": 10,
+      "max_static_requests": 200,
+      "max_static_bytes": 20971520
+    },
+    "public_host_constraints": {
+      "scheme": "https",
+      "ports": [443],
+      "reject_userinfo": true,
+      "reject_fragments": true,
+      "reject_private": true,
+      "allowed_hosts": ["jobs.lever.co", "jobs.eu.lever.co"]
+    },
+    "renderer_patterns": {
+      "hosted": {
+        "document": "https://jobs.lever.co/{account}/{job}",
+        "form_action": "https://jobs.lever.co/{account}/{job}/apply",
+        "form_method": "POST"
+      },
+      "apply": {
+        "document": "https://jobs.lever.co/{account}/{job}/apply",
+        "form_action": "https://jobs.lever.co/{account}/{job}/apply",
+        "form_method": "POST"
+      }
+    },
+    "parity_vectors": [
+      {"name": "lever_hosted", "operation": "initial", "url": "https://jobs.lever.co/example/123e4567-e89b-12d3-a456-426614174000", "method": "GET", "expected": "allow:hosted"},
+      {"name": "lever_eu_hosted", "operation": "initial", "url": "https://jobs.eu.lever.co/example/123e4567-e89b-12d3-a456-426614174000", "method": "GET", "expected": "allow:hosted"},
+      {"name": "lever_apply", "operation": "initial", "url": "https://jobs.eu.lever.co/example/123e4567-e89b-12d3-a456-426614174000/apply", "method": "GET", "expected": "allow:apply"},
+      {"name": "lever_form_ownership", "operation": "form", "url": "https://jobs.eu.lever.co/example/123e4567-e89b-12d3-a456-426614174000/apply", "method": "POST", "page_url": "https://jobs.eu.lever.co/example/123e4567-e89b-12d3-a456-426614174000/apply", "expected": "human:field_ownership"},
+      {"name": "lever_other_host", "operation": "initial", "url": "https://jobs.lever.co.evil.example/example/123e4567-e89b-12d3-a456-426614174000", "method": "GET", "expected": "deny:unsupported_host"},
+      {"name": "lever_non_uuid", "operation": "initial", "url": "https://jobs.lever.co/example/job-123", "method": "GET", "expected": "deny:unsupported_route"},
+      {"name": "lever_final_query", "operation": "initial", "url": "https://jobs.eu.lever.co/example/123e4567-e89b-12d3-a456-426614174000?next=confirm", "method": "GET", "expected": "deny:final_like_route"},
+      {"name": "lever_other_job_confirmation", "operation": "request", "url": "https://jobs.eu.lever.co/example/123e4567-e89b-12d3-a456-426614174001/confirmation", "method": "GET", "request_class": "post_human_confirmation", "page_url": "https://jobs.lever.co/example/123e4567-e89b-12d3-a456-426614174000/apply", "human_permit": true, "expected": "deny:same_company_job_required"},
+      {"name": "lever_cross_host_confirmation", "operation": "request", "url": "https://jobs.eu.lever.co/example/123e4567-e89b-12d3-a456-426614174000/confirmation", "method": "GET", "request_class": "post_human_confirmation", "page_url": "https://jobs.lever.co/example/123e4567-e89b-12d3-a456-426614174000/apply", "human_permit": true, "expected": "deny:same_company_job_required"},
+      {"name": "lever_path_escape", "operation": "initial", "url": "https://jobs.lever.co/example/123e4567-e89b-12d3-a456-426614174000%2Fextra", "method": "GET", "expected": "deny:unsupported_route"},
+      {"name": "lever_static_escape", "operation": "request", "url": "https://jobs.eu.lever.co/assets/../tracker.js", "method": "GET", "request_class": "static", "resource_type": "script", "expected": "deny:unsafe_path"},
+      {"name": "lever_final_boundary", "operation": "initial", "url": "https://jobs.eu.lever.co/example/123e4567-e89b-12d3-a456-426614174000-finalist", "method": "GET", "expected": "deny:unsupported_route"}
+    ]
+  },
+  "terms": [
+    "account number",
+    "authorization",
+    "authorized to work",
+    "availability",
+    "background",
+    "background check",
+    "bank",
+    "bank account",
+    "birth date",
+    "card number",
+    "clearance",
+    "compensation",
+    "consent",
+    "credential",
+    "credit card",
+    "date of birth",
+    "decline to answer",
+    "decline to self identify",
+    "demographic",
+    "disability",
+    "dob",
+    "drug",
+    "drug test",
+    "eeo",
+    "eligible to work",
+    "ethnicity",
+    "female",
+    "financial",
+    "gender",
+    "government id",
+    "government identifier",
+    "hispanic",
+    "i do not wish to answer",
+    "i don't wish to answer",
+    "identification number",
+    "identity",
+    "identity document",
+    "legal eligibility",
+    "legal",
+    "log in",
+    "login",
+    "marital",
+    "male",
+    "national id",
+    "national identifier",
+    "passport",
+    "password",
+    "payment",
+    "pay expectation",
+    "prefer not to say",
+    "protected class",
+    "protected status",
+    "race",
+    "religion",
+    "schedule",
+    "scheduling",
+    "sign in",
+    "signin",
+    "signature",
+    "social security",
+    "social security number",
+    "ssn",
+    "start date",
+    "start-date",
+    "startdate",
+    "tax id",
+    "salary expectation",
+    "salary",
+    "sexual orientation",
+    "sponsorship",
+    "uscis",
+    "veteran",
+    "veteran status",
+    "visa sponsorship",
+    "voluntary self identification",
+    "voluntary self-identification",
+    "work eligibility",
+    "work authorization"
+  ],
+  "compact_aliases": [
+    "accountnumber",
+    "backgroundcheck",
+    "bankaccount",
+    "birthdate",
+    "cardnumber",
+    "creditcard",
+    "dateofbirth",
+    "dob",
+    "drugtest",
+    "eligibleto work",
+    "eligibletowork",
+    "governmentid",
+    "governmentidentifier",
+    "identificationnumber",
+    "identitydocument",
+    "legaleligibility",
+    "nationalid",
+    "nationalidentifier",
+    "payexpectation",
+    "protectedclass",
+    "protectedstatus",
+    "salaryexpectation",
+    "sexualorientation",
+    "signin",
+    "startdate",
+    "socialsecurity",
+    "socialsecuritynumber",
+    "taxid",
+    "veteranstatus",
+    "voluntaryselfidentification",
+    "workeligibility",
+    "visasponsorship",
+    "workauthorization"
+  ],
+  "sensitive_field_kinds": [
+    "password"
+  ]
+}

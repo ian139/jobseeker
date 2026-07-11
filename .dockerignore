@@ -8,7 +8,12 @@ build
 node_modules
 dist
 /data
-.env
+/resume
+/scraper
+*.sqlite*
+*.db*
+.env*
+!.env.example
 .DS_Store
 omp-session-*.html
 archive

@@ -1,20 +1,27 @@
-# OMP workflowz + cmux development workflow
+# OMP workflowz development workflow
 
-Use this workflow for every OMP coordinator, workflowz subagent, and cmux-managed worktree in this repository. `AGENTS.md` is the source of truth and is auto-loaded for agents launched from this workspace; do not ask the user to restate it.
+Use this workflow for every OMP coordinator and workflowz subagent in this repository. `AGENTS.md` is the source of truth and is auto-loaded for agents launched from this workspace; do not ask the user to restate it. “OMP workflowz” means OMP's in-session task/subagent orchestration runtime, not a Python runtime package or a second browser-control path.
+
+## Active product boundary
+
+The active workflow includes backlog ingestion and the rebuilt guarded Greenhouse+Lever draft loop in `src/jobs_assistant/`. Archived applier implementations are reference-only. Extend the active typed contracts and Puppeteer browser-adapter boundary; do not revive archived runners or add another browser-control path. Greenhouse was first and remains supported; Lever is the active second adapter, constrained to exact direct `jobs.lever.co`/`jobs.eu.lever.co` company/canonical-lowercase-UUID routes (optional `/apply`, no query or fragment). Automation stops after durable review evidence and before every final submission; both adapters use the same route, network, safe-action, artifact, and no-submit gates.
 
 ## Always-on rules
 
 - Start from the repository root so OMP sees `AGENTS.md` automatically.
-- Treat `AGENTS.md` as mandatory context for every prompt, worker assignment, child worktree, and review.
-- Start every non-trivial feature, bug fix, refactor, or research task with `/plan`.
-- Use OMP `workflowz` as the subtask system: decompose the plan into explicit subtasks, assign ownership, track status, and capture acceptance criteria before launching workers.
-- Use cmux to view and manage worktree sessions. Use Git for worktree creation/removal, then open each worktree in cmux as its own workspace or pane.
-- For ambiguous or high-impact implementation work, create multiple child worktrees for the same subtask and let OMP workflowz subagents produce competing implementations. The parent worktree chooses the best patch after comparing behavior, diff size, tests, maintainability, and policy fit.
+- Treat `AGENTS.md` as mandatory context for every prompt, worker assignment, and review.
+- Start every non-trivial feature, bug fix, refactor, or research task with an explicit approved plan.
+- Track every implementation, test, review, and documentation assignment in OMP workflowz before dispatching it.
+- Keep the parent worktree as integration authority. Assign disjoint file ownership to parallel workers; serialize only real API or schema dependencies.
+- The parent compares behavior, diff size, tests, maintainability, and policy fit before accepting worker output.
 - Use test-first development: write or update the focused failing test before implementation.
 - Prefer functional core, explicit service boundaries, typed data, and side effects at service edges.
 - Keep containers as the default runtime; host execution is developer convenience only.
 - Run final verification through the containerized path before marking work ready to push.
 - Never use model review as a substitute for tests, smoke checks, or container evidence.
+
+- Every browser mutation or action MUST pass a deterministic allow/deny gate against the current observed page/frame snapshot before execution. LLM output MUST be schema- and safety-validated before it can influence an action; raw model output MUST never drive browser mutations.
+- Sensitive, legal, protected-class, financial, authentication, CAPTCHA, and assessment questions MUST never be inferred or automated; they are manual stop points. Inference is limited to safe non-sensitive noncanonical fields with an explicit deterministic source of truth.
 
 ## Metrics-first task design
 
@@ -32,16 +39,19 @@ Use skills/tools narrowly: first make the goal specific in markdown, then use to
 
 ## Parent/coordinator startup
 
-Create one feature worktree and one advisor-enabled parent coordinator for a new feature or risky fix:
+Start one OMP coordinator from the repository root. Use OMP workflowz/task orchestration to create role-appropriate subagents in the current parent worktree; do not create a parallel terminal-control convention.
 
-```bash
-git worktree add ../<short-feature-name> -b <short-feature-name>
-cmux ../<short-feature-name>
-cmux new-surface --type agent-session --provider codex
-cmux send 'omp --advisor --model "openai-codex/gpt-5.5" --thinking xhigh'
-```
+The coordinator records the complete task contract before dispatch:
 
-`cmux <path>` opens a directory in a new cmux workspace, launching cmux if needed. Use `cmux tree`, `cmux list-workspaces`, `cmux read-screen`, and `cmux send` to inspect and manage active worktree sessions.
+- exact target files or symbols;
+- forbidden files and non-goals;
+- owner role;
+- metric, target invariant, and measurement source;
+- stop condition;
+- focused failing test and verification command;
+- final report requirements.
+
+The coordinator keeps the parent worktree as integration authority, dispatches independent ownership in parallel, and waits for each task's final report before accepting it.
 
 ## Planning checklist
 
@@ -57,47 +67,38 @@ During `/plan`, the parent coordinator must record:
 8. File ownership before any worker edits.
 9. Risks, service contracts, environment variables, and verification commands.
 
-## Worker model default
+## Worker model roles
 
-Use DeepSeek V4 Pro through Ollama Cloud for implementation workers by default:
+Use the current role aliases from `AGENTS.md` as the source of truth:
 
-```bash
-omp --model "ollama-cloud/deepseek-v4-pro" --thinking high
-```
+- `PLAN` for coordinator planning and decomposition.
+- `TASK` for implementation and test workers.
+- `ADVISOR` for independent read-only safety and architecture review.
+- `COMMIT` only for low-risk documentation or status synthesis after executable gates pass.
 
-Use GPT-5.5 only when the task needs advisor-level coordination, unusually deep architecture work, or the DeepSeek/Ollama Cloud path is unavailable.
+Do not hard-code stale provider model names in worker assignments. Role bindings and reasoning levels belong in `AGENTS.md`.
 
-## OMP workflowz subtasks
+## Tracked workflowz subtasks
 
-Every worker assignment must start as an OMP `workflowz` subtask. A valid subtask has:
+Every worker assignment must start as an OMP workflowz task. A valid task has:
 
 - One clear objective.
 - Exact files or symbols owned by the worker.
 - Explicit non-goals and forbidden files.
 - A goal metric, target threshold, measurement source, and stop condition.
 - A focused failing test or observable behavior to prove first.
-- A verification command the worker may run.
-- A report contract for files changed, metric movement, test-first evidence, verification, and risks.
+- A focused verification command the worker may run.
+- One final report listing files changed, metric movement, test-first evidence, verification, blockers, and risks.
 
-Do not launch an implementation worker from an informal chat note when a `workflowz` subtask can carry the same contract.
+Do not launch an implementation worker from an informal terminal prompt when an OMP task can carry the same contract.
 
-## cmux child-worktree parallelization
+## Parallel tracked workers
 
-Use Git child worktrees plus cmux workspaces for parallel implementation, isolation, and competing approaches:
-
-```bash
-git worktree add ../<parent-feature>-<specific-subtask>-a -b <parent-feature>-<specific-subtask>-a
-cmux ../<parent-feature>-<specific-subtask>-a
-cmux new-surface --type agent-session --provider codex
-cmux send 'omp --model "ollama-cloud/deepseek-v4-pro" --thinking high'
-cmux send '<workflowz subtask prompt>'
-```
-
-For multiple competing implementations, repeat the child-worktree creation with suffixes such as `-a`, `-b`, and `-c`. Keep each child isolated; do not let sibling workers patch each other's worktrees.
+Create the widest safe wave of OMP tasks with disjoint file ownership. Workers skip formatters and project-wide suites; the parent runs integration gates once. If workers share a dependency, encode it in the workflow and dispatch only when the prerequisite contract is established.
 
 ## Parent selection and integration
 
-Child-worktree output is a patch proposal, not an automatic merge. The parent coordinator must:
+Worker output is a patch proposal, not automatic acceptance. The parent coordinator must:
 
 1. Inspect every child diff.
 2. Compare verification output and failing-test evidence.
@@ -106,7 +107,7 @@ Child-worktree output is a patch proposal, not an automatic merge. The parent co
 5. Reject unrelated edits, broad cleanup, stale scaffolding, and policy violations.
 6. Rerun focused verification in the parent before final verification.
 
-Same-worktree workers are allowed only for read-only investigation, mechanical edits to disjoint files, or emergency fixes where child worktree overhead would increase risk. The parent must record that exception in the plan.
+The active parent worktree is the integration authority. Workers may edit only their explicitly disjoint ownership; coordinate any overlap before editing.
 
 ## Worker prompt contract
 
@@ -160,6 +161,7 @@ Report:
 ```
 
 ## Verification gate
+Before compose, existing host data MUST be owner-private: run `mkdir -p data`, `chmod 0700 data`, and `find data -type f -exec chmod 0600 {} +`. Do not start compose while the data directory or files are group/world accessible.
 
 For completed feature work, run the focused test and the container path that covers the changed service:
 

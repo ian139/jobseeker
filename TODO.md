@@ -1,8 +1,8 @@
-# jobs-assistant minimal roadmap
+# jobs-assistant roadmap
 
-The active app is intentionally minimized to scraper/backlog ingestion, filtering/quality gates, profiles, and TheirStack-related work. The applier concept remains important, but the current implementation is archived and should be rebuilt later through OMP `workflowz`.
+The rebuilt guarded Greenhouse+Lever drafting workflow is active alongside the local job backlog. The older applier snapshot remains reference-only; it is not the implementation used by the CLI.
 
-## Active scope
+## Active workflow
 
 ```text
 TheirStack / source feed / scraper output
@@ -13,47 +13,87 @@ Filtering and quality gates
   ↓
 SQLite jobs backlog
   ↓
-Sync metadata and reviewable source payloads
+autofill --ats auto (Greenhouse or Lever, selected by exact route)
+  ↓
+claim → observe → resolve → one safe action → persist evidence
+  ↓
+review_ready / manual / blocked / failed
+  ↓
+autofill-review list
+  ↓
+human review and (if desired) human submission
+  ↓
+autofill-review complete | retry
 ```
 
-## Set-in-stone active features
+## Rebuilt Greenhouse+Lever workflow — complete
 
-- [ ] Keep SQLite job backlog schema small and stable.
-- [ ] Preserve canonical URL and source job ID dedupe.
-- [ ] Preserve raw source payloads in `raw_json`.
-- [ ] Preserve profile-shaped TheirStack search ideas.
-- [ ] Keep TheirStack credit-safe preview before paid fetch.
-- [ ] Keep paid fetch gated by explicit code/config opt-in before any credit-consuming call.
-- [ ] Keep feed/fixture import for deterministic tests and backfills.
-- [ ] Keep filtering/quality gates explicit and testable.
+- [x] Keep the SQLite backlog schema small and stable.
+- [x] Preserve canonical URL and source job ID deduplication.
+- [x] Preserve raw source payloads in `raw_json`.
+- [x] Preserve source-search profiles and TheirStack credit-safe preview.
+- [x] Require explicit paid-fetch opt-in before credit-consuming calls.
+- [x] Keep feed/fixture import for deterministic tests and backfills.
+- [x] Keep filtering and quality gates explicit and testable.
+- [x] Rebuild the guarded application workflow around the Greenhouse-first adapter path plus the active Lever second adapter.
+- [x] Support approved public HTTPS Greenhouse hosted, embed, and `grnh.se` routes plus direct Lever `jobs.lever.co`/`jobs.eu.lever.co` company/canonical-lowercase-UUID routes with optional `/apply`; reject other ATS, private/local, auth, CAPTCHA, assessment, and unsafe routes.
+- [x] Keep source profiles (`--source-profile`/`--profile`) separate from
+      application-profile JSON, resume input, and resolver description input.
+- [x] Fill only proven safe non-final fields and stage one owned resume per run;
+      unresolved required or sensitive fields remain manual.
+- [x] Persist mode-`0700` `run-<id>` evidence with immediate SHA-256
+      verification, private screenshots, and bounded review annotations.
+- [x] Preserve `legacy-run-<id>` references when migrating older run data.
+- [x] Provide `autofill-review list`, `complete`, and explicit `retry` with
+      latest-run and window-state checks.
+- [x] Keep headed review host-only and independently alive after CLI exit;
+      user tab close is the close action, with no user-facing timer or CDP
+      attach/reconnect path.
+- [x] Keep container execution headless, non-root, UID/GID mapped, and bound
+      to existing `data` (read/write) and `resume` (read-only) directories.
 
-## Minimal next patches
+## Hard boundary
 
-- [ ] Add a first-class named application-profile config loader only when it is consumed by `autofill --application-profile-json` without overloading source filter profiles.
-- [ ] Add non-API web scrapers only behind the existing `JobInput`/`import_source_jobs` boundary; LinkedIn must not bypass sign-in, CAPTCHA, or anti-abuse gates.
-- [ ] Implement `scrape-url` for public, no-auth job pages by parsing `JobPosting` JSON-LD and common apply links into `JobInput`; block on sign-in/CAPTCHA; persist via `import_source_jobs(source="web_scraper")`; add fixtures for Greenhouse, Lever, and a generic company page.
-- [ ] Add freshness/active-job checks only as injectable pure functions with fixtures.
+No submit policy is being added: final submission is human-only. The CLI never
+targets a final-submit control. `autofill-review complete --outcome submitted`
+records a human action; it does not submit. This boundary must remain true for
+every future adapter and preference feature.
 
-## Archived applier concept
+## Delivered roadmap contracts and tests
 
-The prior active applier implementation was moved to:
+- [x] Activate Lever as the second ATS adapter behind the same route, network, safe-action, private-artifact, and no-submit gates. Direct-host, canonical-UUID, `/apply`, parity, and workflow/no-submit coverage is in `tests/test_application_contracts.py`, `tests/test_application_profile.py`, `tests/test_puppeteer_adapter.py`, and `tests/test_application_workflow.py`.
+- [x] Deliver v1 named application-profile presets with exact `schema_version`/`name`/`profile` validation, safe `field_answers`, explicit preset directory/name flags, source-profile separation, and exact-byte SHA-256 provenance. Coverage is in `tests/test_application_profile_presets.py` and `tests/test_cli_smoke.py`.
+- [x] Deliver v1 user preferences with exact safe mappings, opt-outs, and review ordering; atomic `init`, `show`, set/remove mapping, set/remove opt-out, and set/remove review-order commands; deterministic precedence; redacted output; and sensitive/opaque exclusions. Coverage is in `tests/test_application_preferences.py`, `tests/test_application_workflow.py`, and `tests/test_cli_smoke.py`.
+
+- [x] Deliver deterministic pinned TheirStack ATS ingestion filtering. Pinned
+      Greenhouse and Lever syncs re-fetch the latest requested paid raw window
+      on every invocation without an incremental checkpoint; filtering may
+      yield fewer eligible jobs than the raw limit, and repeats deduplicate
+      without pagination. Preserve the legacy `auto` checkpoint behavior.
+
+## Reference-only history
+
+The older minimized applier snapshot is retained for historical comparison:
 
 ```text
 archive/minimized-20260706/applier/
 ```
 
-It is reference-only and not a runnable package snapshot. It depended on root `contracts.py` and `db.py` before minimization.
-
-Future applier rebuild must use OMP `workflowz` and separate subtasks for observer, resolver, executor, persistence, and safety review. No final-submit behavior may be added until a submit policy exists and is tested.
+It is not a runnable package snapshot and is not the active workflow. New
+changes belong in the current guarded adapter path, not in that archive.
 
 ## Verification
 
 ```bash
+npm install
+npm run install-browser
+npm run puppeteer-smoke
 uv lock --check
-uv run --frozen --extra dev python -m pytest
-uv run --frozen jobs-assistant --help
-docker compose build
-docker compose up -d
-docker compose ps
-docker compose down
+uv run --frozen --extra dev python -m pytest tests/test_cli_smoke.py
+sh scripts/container-smoke.sh
 ```
+
+Run the complete Python suite with
+`uv run --frozen --extra dev python -m pytest` when changing executable code.
+Headed survival remains a manual host check: use a physical benign click and
+close the review tab/window.

@@ -2,7 +2,7 @@
 name: live-proof-routing
 description: >-
   Use when a task involves browser/UI/live workflow proof: local web app UI,
-  screenshots, visual verification, Orca or cmux browser panes, desktop
+  screenshots, visual verification, embedded browser panes, desktop
   computer-use, CDP/remote-debugging, logged-in Chrome profiles, companion
   services, LinkedIn/Gmail/third-party account state, queues, DB state, or any
   case where tests/API output may be proxy proof. Routes to the lowest-coupling
@@ -23,7 +23,7 @@ Core rule:
 Before acting, identify these four fields. If the answer is knowable from the prompt or repo, do not ask.
 
 ```text
-Target surface: static URL/API | local web app | Orca browser | cmux pane | logged-in Chrome/CDP | desktop UI | app-specific bridge
+Target surface: static URL/API | local web app | embedded browser pane | logged-in Chrome/CDP | desktop UI | app-specific bridge
 Identity requirement: none | test auth | real app auth | exact browser profile/session | third-party account
 Final proof: response body | DOM state | screenshot | visible UI text | DB row | queue delta | external account/app state
 Forbidden substitutes: wrong browser/profile/runtime/account/mock/API-only/test-only proof
@@ -40,7 +40,7 @@ Choose the lowest level that can produce the final proof.
 | 0 | Static fetch | `read` URL, `web_search`, docs | static content/API answer is enough | JS/session/visual state matters |
 | 1 | Service/API gate | health endpoint, config endpoint, DB query | checking readiness/backend state | claiming UI works |
 | 2 | DOM browser automation | OMP `browser`, Puppeteer against local app | local web UI behavior matters | exact user browser profile matters |
-| 3 | Embedded browser control | Orca browser CLI, cmux browser panel | target is that embedded browser/pane | target is normal Chrome/user profile |
+| 3 | Embedded browser control | supported embedded browser or pane tooling | target is that embedded browser/pane | target is normal Chrome/user profile |
 | 4 | Accessibility/computer-use | desktop UI tree, screenshot, click/type | no DOM/CDP path, visible desktop matters | structured DOM/API proof exists |
 | 5 | Identity-bound remote control | CDP to existing Chrome/profile | exact user browser/session/profile matters | a fresh browser can prove it |
 | 6 | App-specific bridge | CDP + companion + app + DB/queue | the bridge/integration itself is the product | only UI/API behavior is being checked |
@@ -83,7 +83,7 @@ Examples of cheap gates:
 - DB exists or queue count;
 - companion health;
 - CDP `/json/version`;
-- Orca/cmux/browser runtime available.
+- embedded browser runtime available.
 
 ## Routing Rules
 
@@ -93,8 +93,8 @@ Examples of cheap gates:
 | Check service alive | API/read/curl/DB | response/log row |
 | Local web UI works | OMP `browser` | `tab.observe()`, DOM state, or screenshot after real interaction |
 | Visual/component looks right | OMP `browser` screenshot | screenshot at required viewport/state |
-| Orca embedded browser | `orca`/`orca-ide` browser commands | Orca snapshot/wait/click result |
-| cmux pane/browser | `cmux_browser` | cmux tab/panel state |
+| Embedded browser pane | its supported pane/browser commands | pane snapshot/wait/click result |
+| Terminal pane/browser | its supported pane tooling | terminal tab/panel state |
 | Logged-in Chrome profile | CDP preflight, then bounded CDP attach | target tab/profile verified plus requested state changed |
 | Desktop app/browser outside CDP | computer-use/accessibility | visible UI tree/screenshot/action result |
 | App-specific external bridge | bridge preflight + app/runtime proof | app UI/DB/queue/external state changed |
@@ -107,7 +107,7 @@ CDP is an identity-bound integration path, not the default browser. Use CDP only
 The result is invalid unless it comes from an existing browser profile/session/tab.
 ```
 
-If false, use static fetch, API/DB, OMP `browser`, Orca/cmux browser control, or computer-use instead.
+If false, use static fetch, API/DB, OMP `browser`, supported embedded-browser control, or computer-use instead.
 
 ### CDP Preflight
 
@@ -166,7 +166,7 @@ Do not treat CDP or companion reachability as final proof.
 | open local browser page | 5-10s |
 | wait for known selector/text | 5-10s |
 | screenshot after loaded page | 5-15s |
-| Orca click/wait/snapshot | 3-10s |
+| embedded-browser click/wait/snapshot | 3-10s |
 | desktop accessibility snapshot | 5-15s |
 | CDP `/json/version` | 1s |
 | CDP target lookup | 2s |
@@ -184,8 +184,8 @@ Do not do these:
 - Clone cookies or mock auth without explicit approval.
 - Check host reachability when the app runs in a container and needs container reachability.
 - Count CDP/companion reachability as proof of sync/capture/send.
-- Use headless Chromium proof for Orca/cmux/desktop-window targets.
-- Use Orca/cmux proof for a required logged-in Chrome profile.
+- Use headless Chromium proof for an embedded-pane or desktop-window target.
+- Use embedded-pane proof for a required logged-in Chrome profile.
 - Continue retrying a high-coupling path after bounded preflight failed.
 
 ## Prompt Contract To Emit When Useful

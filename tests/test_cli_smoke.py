@@ -1,12 +1,75 @@
+import httpx
 import json
 
 import pytest
-
 from pathlib import Path
 
 import jobs_assistant.cli as cli_mod
 
 from jobs_assistant.cli import job_scrape_main, main
+from jobs_assistant.theirstack import TheirStackClient
+
+
+def test_application_preferences_cli_edits_atomically_and_redacts_values(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "preferences.json"
+    assert main(["application-preferences", "init", str(path)]) == 0
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert main([
+        "application-preferences", "set-mapping", str(path),
+        "--ats", "lever", "--kind", "email", "--name", "email",
+        "--value", "ada@example.test",
+    ]) == 0
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert main(["application-preferences", "show", str(path)]) == 0
+    output = capsys.readouterr().out
+    assert "ada@example.test" not in output
+    assert "value_hash" in output and "value_length" in output
+
+
+def test_application_preferences_cli_removes_review_order_atomically(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "preferences.json"
+    assert main(["application-preferences", "init", str(path)]) == 0
+    assert main([
+        "application-preferences", "set-mapping", str(path),
+        "--ats", "lever", "--kind", "email", "--name", "email",
+        "--value", "ada@example.test",
+    ]) == 0
+    assert main([
+        "application-preferences", "set-review-order", str(path),
+        "--ats", "lever", "--kind", "email", "--name", "email",
+    ]) == 0
+    assert main([
+        "application-preferences", "remove-review-order", str(path),
+        "--ats", "lever", "--kind", "email", "--name", "email",
+    ]) == 0
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert main(["application-preferences", "show", str(path)]) == 0
+    output = capsys.readouterr().out
+    shown = json.loads(output.strip().splitlines()[-1])
+    assert shown["review_order"] == []
+    assert "ada@example.test" not in output
+    assert main([
+        "application-preferences", "remove-review-order", str(path),
+        "--ats", "lever", "--kind", "email", "--name", "email",
+    ]) == 1
+
+def test_application_preferences_cli_rejects_symlink_and_conflicting_entries(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    outside = tmp_path / "outside.json"
+    outside.write_text("{}")
+    link = tmp_path / "link.json"
+    link.symlink_to(outside)
+    assert main(["application-preferences", "init", str(link)]) == 1
+    path = tmp_path / "preferences.json"
+    assert main(["application-preferences", "init", str(path)]) == 0
+    args = ["application-preferences", "set-opt-out", str(path), "--ats", "lever", "--kind", "email", "--name", "email"]
+    assert main(args) == 0
+    assert main([
+        "application-preferences", "set-mapping", str(path),
+        "--ats", "lever", "--kind", "email", "--name", "email", "--value", "ada@example.test",
+    ]) == 1
 
 
 def test_cli_help_smoke(capsys):
@@ -34,6 +97,76 @@ def test_cli_init_db(tmp_path: Path):
     assert main(["--db", str(db), "init-db"]) == 0
     assert db.exists()
 
+
+def test_cli_init_db_rejects_group_readable_parent_without_leaking_details(tmp_path: Path, capsys):
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o755)
+    db = parent / "jobs.sqlite3"
+
+    assert main(["--db", str(db), "init-db"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == '{"error": {"code": "database_privacy_error", "message": "database privacy validation failed"}}\n'
+    assert str(db) not in captured.err
+    assert "Traceback" not in captured.err
+    assert "0755" not in captured.err
+
+
+def test_cli_init_db_rejects_group_readable_database_without_leaking_details(tmp_path: Path, capsys):
+    db = tmp_path / "jobs.sqlite3"
+    db.touch()
+    db.chmod(0o644)
+
+    assert main(["--db", str(db), "init-db"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == '{"error": {"code": "database_privacy_error", "message": "database privacy validation failed"}}\n'
+    assert str(db) not in captured.err
+    assert "Traceback" not in captured.err
+    assert "0644" not in captured.err
+
+def _corrupt_database(path: Path) -> None:
+    path.write_bytes(b"not a sqlite database")
+    path.chmod(0o600)
+
+
+def test_cli_corrupt_db_init_maps_generic_database_error(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "corrupt.sqlite3"
+    _corrupt_database(db)
+
+    assert main(["--db", str(db), "init-db"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == '{"error": {"code": "database_error", "message": "database operation failed"}}\n'
+    assert str(db) not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_cli_corrupt_db_import_feed_maps_generic_database_error(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "corrupt.sqlite3"
+    fixture = tmp_path / "jobs.json"
+    _corrupt_database(db)
+    fixture.write_text('{"jobs":[]}')
+
+    assert main(["--db", str(db), "import-feed", "--json-file", str(fixture)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == '{"error": {"code": "database_error", "message": "database operation failed"}}\n'
+    assert str(db) not in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_job_scrape_corrupt_db_maps_generic_database_error(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "corrupt.sqlite3"
+    _corrupt_database(db)
+
+    assert job_scrape_main(["--db", str(db), "--paid-fetch"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == '{"error": {"code": "database_error", "message": "database operation failed"}}\n'
+    assert str(db) not in captured.err
+    assert "Traceback" not in captured.err
 
 def test_cli_import_feed_json_fixture(tmp_path: Path, capsys):
     db = tmp_path / "jobs.sqlite3"
@@ -86,6 +219,42 @@ def test_cli_theirstack_preview_prints_total_results(tmp_path: Path, capsys, mon
     assert '"credit_safe": true' in out
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["theirstack-preview"],
+        ["theirstack-sync", "--paid-fetch"],
+    ],
+)
+def test_cli_theirstack_commands_without_api_key_are_sanitized(
+    command, tmp_path: Path, capsys, monkeypatch
+):
+    monkeypatch.delenv("THEIRSTACK_API_KEY", raising=False)
+    db = tmp_path / "jobs.sqlite3"
+
+    assert main(["--db", str(db), *command]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error": {
+            "code": "invalid_input",
+            "message": "autofill input was rejected",
+        }
+    }
+
+def test_cli_accepts_non_coop_profile_choice_without_network(tmp_path: Path, capsys, monkeypatch):
+    db = tmp_path / "jobs.sqlite3"
+    monkeypatch.setenv("THEIRSTACK_API_KEY", "test-key")
+    fake = FakeTheirStackClient({"total_results": 7})
+    monkeypatch.setattr(cli_mod, "_theirstack_client", lambda *, paid_fetch: fake)
+
+    assert main(["--db", str(db), "theirstack-preview", "--source-profile", "new_grad_non_coop_cs"]) == 0
+    out = capsys.readouterr().out.strip()
+    assert '"profile": "new_grad_non_coop_cs"' in out
+    assert '"credit_safe": true' in out
+    assert fake.payloads and fake.payloads[0]["limit"] == 1
+
+
 def test_cli_theirstack_sync_persists_jobs_and_sync_run(tmp_path: Path, capsys, monkeypatch):
     """theirstack-sync --paid-fetch persists jobs and records a sync_run."""
     db = tmp_path / "jobs.sqlite3"
@@ -114,6 +283,206 @@ def test_cli_theirstack_sync_persists_jobs_and_sync_run(tmp_path: Path, capsys, 
     assert run_row["success"] == 1
     assert run_row["jobs_inserted"] == 2
 
+
+@pytest.mark.parametrize("failure", ["timeout", 429, 500])
+def test_cli_paid_sync_transport_failure_is_single_attempt_and_redacted(
+    failure, tmp_path: Path, capsys, monkeypatch
+):
+    db = tmp_path / "jobs.sqlite3"
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        if failure == "timeout":
+            raise httpx.ReadTimeout("private transport detail", request=request)
+        return httpx.Response(
+            failure,
+            json={"detail": "private response detail"},
+            request=request,
+        )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+
+    def factory(*, paid_fetch):
+        assert paid_fetch is True
+        return TheirStackClient("test-key", enable_paid_fetch=True, client=http_client)
+
+    monkeypatch.setattr(cli_mod, "_theirstack_client", factory)
+    try:
+        assert main(
+            [
+                "--db",
+                str(db),
+                "theirstack-sync",
+                "--paid-fetch",
+                "--source-profile",
+                "new_grad_cs",
+            ]
+        ) == 1
+    finally:
+        http_client.close()
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error": {
+            "code": "theirstack_error",
+            "message": "TheirStack paid sync failed; no jobs were written and the request was not replayed automatically",
+        }
+    }
+    assert "private" not in captured.err
+
+    from jobs_assistant.db import connect
+
+    conn = connect(str(db))
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+    run = conn.execute("SELECT success, checkpoint, jobs_inserted, error FROM sync_runs").fetchone()
+    assert run["success"] == 0
+    assert run["checkpoint"] is None
+    assert run["jobs_inserted"] == 0
+    assert run["error"] == "theirstack request failed"
+    assert len(requests) == 1
+
+
+
+def test_cli_pinned_sync_public_output_hides_checkpoint_namespace(tmp_path: Path, capsys, monkeypatch):
+    db = tmp_path / "jobs.sqlite3"
+    monkeypatch.setenv("THEIRSTACK_API_KEY", "test-key")
+    fake = FakeTheirStackClient(
+        {
+            "data": [
+                {
+                    "id": "gh-1",
+                    "title": "Engineer",
+                    "company_name": "Acme",
+                    "url": "https://boards.greenhouse.io/acme/jobs/123",
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(cli_mod, "_theirstack_client", lambda *, paid_fetch: fake)
+
+    assert main(
+        [
+            "--db",
+            str(db),
+            "theirstack-sync",
+            "--paid-fetch",
+            "--source-profile",
+            "new_grad_cs",
+            "--ats",
+            "greenhouse",
+        ]
+    ) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["source_profile"] == "new_grad_cs"
+    assert "::ats::" not in json.dumps(output)
+    assert "checkpoint_profile" not in output
+
+def test_cli_pinned_sync_refetches_window_without_checkpoint_and_dedupes(tmp_path: Path, capsys, monkeypatch):
+    """Pinned syncs repeat the same paid window instead of advancing a checkpoint."""
+    db = tmp_path / "jobs.sqlite3"
+    monkeypatch.setenv("THEIRSTACK_API_KEY", "test-key")
+    fake = FakeTheirStackClient(
+        {
+            "data": [
+                {
+                    "id": "gh-1",
+                    "title": "Engineer",
+                    "company_name": "Acme",
+                    "url": "https://boards.greenhouse.io/acme/jobs/123",
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(cli_mod, "_theirstack_client", lambda *, paid_fetch: fake)
+
+    args = [
+        "--db",
+        str(db),
+        "theirstack-sync",
+        "--paid-fetch",
+        "--source-profile",
+        "new_grad_cs",
+        "--ats",
+        "greenhouse",
+        "--limit",
+        "2",
+    ]
+    assert main(args) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert main(args) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert first["checkpoint_advanced"] is False
+    assert second["checkpoint_advanced"] is False
+
+    assert len(fake.payloads) == 2
+    assert fake.payloads[0] == fake.payloads[1]
+    assert all("discovered_at_gte" not in payload for payload in fake.payloads)
+    assert all(payload["limit"] == 2 and payload["page"] == 0 for payload in fake.payloads)
+    assert first["inserted"] == 1
+    assert second["inserted"] == 0
+    assert second["updated"] == 1
+
+    from jobs_assistant.db import connect
+
+    conn = connect(str(db))
+    rows = conn.execute(
+        "SELECT profile, success, checkpoint FROM sync_runs ORDER BY id"
+    ).fetchall()
+    assert [row["profile"] for row in rows] == ["new_grad_cs::ats::greenhouse"] * 2
+    assert [row["success"] for row in rows] == [1, 1]
+    assert [row["checkpoint"] for row in rows] == [None, None]
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+
+
+def test_cli_auto_sync_keeps_incremental_checkpoint(tmp_path: Path, capsys, monkeypatch):
+    """Auto mode continues to pass and advance its legacy checkpoint."""
+    db = tmp_path / "jobs.sqlite3"
+    monkeypatch.setenv("THEIRSTACK_API_KEY", "test-key")
+    fake = FakeTheirStackClient(
+        {
+            "data": [
+                {
+                    "id": "legacy-1",
+                    "title": "Engineer",
+                    "company_name": "Acme",
+                    "url": "https://arbitrary.example/apply",
+                }
+            ]
+        }
+    )
+    monkeypatch.setattr(cli_mod, "_theirstack_client", lambda *, paid_fetch: fake)
+
+    args = [
+        "--db",
+        str(db),
+        "theirstack-sync",
+        "--paid-fetch",
+        "--source-profile",
+        "new_grad_cs",
+        "--limit",
+        "2",
+    ]
+    assert main(args) == 0
+    capsys.readouterr()
+    assert main(args) == 0
+    capsys.readouterr()
+
+    assert len(fake.payloads) == 2
+    assert "discovered_at_gte" not in fake.payloads[0]
+    assert fake.payloads[1]["discovered_at_gte"]
+    assert fake.payloads[0]["limit"] == fake.payloads[1]["limit"] == 2
+
+    from jobs_assistant.db import connect
+
+    conn = connect(str(db))
+    rows = conn.execute(
+        "SELECT profile, success, checkpoint FROM sync_runs ORDER BY id"
+    ).fetchall()
+    assert [row["profile"] for row in rows] == ["new_grad_cs", "new_grad_cs"]
+    assert [row["success"] for row in rows] == [1, 1]
+    assert all(row["checkpoint"] for row in rows)
 
 def test_job_scrape_persists_source_profile_and_mode(tmp_path: Path, capsys, monkeypatch):
     db = tmp_path / "jobs.sqlite3"
@@ -158,65 +527,480 @@ def test_job_scrape_refuses_without_paid_fetch(tmp_path: Path, monkeypatch):
     assert exc.value.code != 0
 
 
-def test_cli_autofill_help_documents_no_final_submit_and_supported_flags(capsys):
-    """autofill help exposes guarded Greenhouse workflow flags and stop-before-submit safety."""
+def test_cli_autofill_help_documents_durable_no_submit_workflow(capsys):
+    """Autofill exposes the guarded workflow and supported route selector only."""
     with pytest.raises(SystemExit) as exc:
         main(["autofill", "--help"])
 
     assert exc.value.code == 0
     out = capsys.readouterr().out.lower()
-    assert "--ats" in out
-    assert "auto" in out
-    assert "greenhouse" in out
-    assert "--profile-json" in out
+    assert "--resume-file" in out
+    assert "--artifact-root" in out
     assert "--application-profile-json" in out
-    assert "--artifact-dir" in out
+    assert "--ats {auto,greenhouse,lever}" in out
     assert "--headed" in out
     assert "no-final-submit" in out
+    assert "hold-open" not in out
+    assert "autofill-review" not in out
 
 
-@pytest.mark.parametrize(
-    ("ats", "profile_flag"),
-    [
-        ("auto", "--profile-json"),
-        ("greenhouse", "--application-profile-json"),
-    ],
-)
-def test_cli_autofill_passes_guarded_workflow_kwargs_without_browser(tmp_path: Path, capsys, monkeypatch, ats: str, profile_flag: str):
-    """autofill parses workflow flags and calls the runner with those kwargs without launching Puppeteer."""
+def test_cli_autofill_defaults_are_stable():
+    args = cli_mod.build_parser().parse_args(["autofill"])
+    assert args.resume_file == "resume/Main_Resume.pdf"
+    assert args.artifact_root == "data/application-runs"
+    assert args.ats == "auto"
+    assert args.limit == 1
+
+
+
+class _FakeReviewRoot:
+    def __init__(self):
+        self.opened_refs: list[tuple[str, int]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return False
+
+    def open_artifact_ref(self, artifact_ref, *, run_id):
+        self.opened_refs.append((artifact_ref, run_id))
+        return self
+
+
+class _FakeReviewConnection:
+    def __init__(self, artifact_ref: str | None = "run-3"):
+        self.artifact_ref = artifact_ref
+
+    def execute(self, sql, params):
+        assert sql == "SELECT artifact_dir FROM application_runs WHERE id=?"
+        assert len(params) == 1
+        return self
+
+    def fetchone(self):
+        if self.artifact_ref is None:
+            return None
+        return {"artifact_dir": self.artifact_ref}
+def _review_row(*, run_id: int = 3, status: str = "failed", reason_code: str = "browser_error") -> dict[str, object]:
+    return {
+        "run_id": run_id,
+        "job_id": 7,
+        "status": status,
+        "reason_code": reason_code,
+        "title": "Software Engineer",
+        "company": "Acme",
+        "artifact_ref": f"run-{run_id}",
+        "finished_at": "2026-07-10T00:00:00Z",
+        "outcome": None,
+        "window_state": "closed",
+    }
+
+def test_cli_review_list_uses_public_api_and_exact_schema(tmp_path: Path, capsys, monkeypatch):
+    root = _FakeReviewRoot()
+    monkeypatch.setattr(cli_mod.ArtifactRoot, "open", lambda *args, **kwargs: root)
+    monkeypatch.setattr(cli_mod, "connect", lambda path: object())
+    monkeypatch.setattr(cli_mod, "initialize_database", lambda connection, migration_artifact_root: None)
+    monkeypatch.setattr(cli_mod, "list_application_reviews", lambda connection, *, limit, artifact_root: [_review_row()])
+
+    assert main([
+        "--db", str(tmp_path / "db.sqlite3"),
+        "autofill-review", "--artifact-root", str(tmp_path / "artifacts"), "list", "--limit", "1",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out) == {"runs": [_review_row()]}
+
+
+def test_cli_review_complete_projects_public_result(tmp_path: Path, capsys, monkeypatch):
+    root = _FakeReviewRoot()
+    monkeypatch.setattr(cli_mod.ArtifactRoot, "open", lambda *args, **kwargs: root)
+    monkeypatch.setattr(cli_mod, "connect", lambda path: _FakeReviewConnection())
+    monkeypatch.setattr(cli_mod, "initialize_database", lambda connection, migration_artifact_root: None)
+    monkeypatch.setattr(
+        cli_mod,
+        "complete_review",
+        lambda connection, **kwargs: {
+            "run_id": 3,
+            "job_id": 7,
+            "status": "failed",
+            "reason_code": "browser_error",
+            "outcome": "skipped",
+            "job_status": "archived",
+            "window_state": "closed",
+        },
+    )
+
+    assert main([
+        "--db", str(tmp_path / "db.sqlite3"),
+        "autofill-review", "complete", "--run-id", "3", "--outcome", "skipped",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "run_id": 3,
+        "job_id": 7,
+        "status": "failed",
+        "reason_code": "browser_error",
+        "outcome": "skipped",
+        "job_status": "archived",
+        "artifact_ref": "run-3",
+        "window_state": "closed",
+    }
+
+
+def test_cli_review_annotation_is_persisted_before_cas(tmp_path: Path, capsys, monkeypatch):
+    root = _FakeReviewRoot()
+    annotation = tmp_path / "annotation.txt"
+    annotation.write_text("human review note", encoding="utf-8")
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(cli_mod.ArtifactRoot, "open", lambda *args, **kwargs: root)
+    monkeypatch.setattr(cli_mod, "connect", lambda path: _FakeReviewConnection())
+    monkeypatch.setattr(cli_mod, "initialize_database", lambda connection, migration_artifact_root: None)
+    monkeypatch.setattr(cli_mod, "list_application_reviews", lambda **kwargs: pytest.fail("list API must not be used for annotation"))
+    monkeypatch.setattr(
+        cli_mod,
+        "persist_review_annotation",
+        lambda run, path: calls.append(("annotation", str(path))) or {"artifact_ref": "run-3/annotations/x.txt", "sha256": "a" * 64},
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "complete_review",
+        lambda connection, **kwargs: {
+            "run_id": 3,
+            "job_id": 7,
+            "status": "failed",
+            "reason_code": "browser_error",
+            "outcome": "skipped",
+            "job_status": "archived",
+            "window_state": "closed",
+        },
+    )
+
+    assert main([
+        "--db", str(tmp_path / "db.sqlite3"),
+        "autofill-review", "complete", "--run-id", "3", "--outcome", "skipped",
+        "--annotation-file", str(annotation),
+    ]) == 0
+    assert calls == [("annotation", str(annotation))]
+    assert json.loads(capsys.readouterr().out)["artifact_ref"] == "run-3"
+
+
+
+
+def test_cli_review_annotation_uses_requested_older_run_ref(tmp_path: Path, capsys, monkeypatch):
+    """Annotation lookup addresses run 101 directly instead of a recent-list window."""
+    root = _FakeReviewRoot()
+    connection = _FakeReviewConnection("legacy-run-101")
+    annotation = tmp_path / "annotation.txt"
+    annotation.write_text("older run note", encoding="utf-8")
+    monkeypatch.setattr(cli_mod.ArtifactRoot, "open", lambda *args, **kwargs: root)
+    monkeypatch.setattr(cli_mod, "connect", lambda path: connection)
+    monkeypatch.setattr(cli_mod, "initialize_database", lambda connection, migration_artifact_root: None)
+    monkeypatch.setattr(cli_mod, "list_application_reviews", lambda **kwargs: pytest.fail("list API must not be used"))
+    monkeypatch.setattr(
+        cli_mod,
+        "persist_review_annotation",
+        lambda run, path: {"artifact_ref": "legacy-run-101/annotations/x.txt", "sha256": "a" * 64},
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "complete_review",
+        lambda connection, **kwargs: {
+            "run_id": 101,
+            "job_id": 7,
+            "status": "failed",
+            "reason_code": "browser_error",
+            "outcome": "skipped",
+            "job_status": "archived",
+            "window_state": "closed",
+        },
+    )
+
+    assert main([
+        "--db", str(tmp_path / "db.sqlite3"),
+        "autofill-review", "complete", "--run-id", "101", "--outcome", "skipped",
+        "--annotation-file", str(annotation),
+    ]) == 0
+    assert root.opened_refs == [("legacy-run-101", 101)]
+    assert json.loads(capsys.readouterr().out)["artifact_ref"] == "legacy-run-101"
+def test_cli_review_retry_projects_queued_result(tmp_path: Path, capsys, monkeypatch):
+    root = _FakeReviewRoot()
+    monkeypatch.setattr(cli_mod.ArtifactRoot, "open", lambda *args, **kwargs: root)
+    monkeypatch.setattr(cli_mod, "connect", lambda path: _FakeReviewConnection())
+    monkeypatch.setattr(cli_mod, "initialize_database", lambda connection, migration_artifact_root: None)
+    monkeypatch.setattr(
+        cli_mod,
+        "retry_review",
+        lambda connection, **kwargs: {
+            "run_id": 3,
+            "job_id": 7,
+            "status": "failed",
+            "reason_code": "abandoned_running_attempt",
+            "outcome": "retry",
+            "job_status": "queued",
+            "window_state": "closed",
+        },
+    )
+    assert main([
+        "--db", str(tmp_path / "db.sqlite3"),
+        "autofill-review", "retry", "--run-id", "3",
+    ]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "run_id": 3,
+        "job_id": 7,
+        "status": "failed",
+        "reason_code": "abandoned_running_attempt",
+        "outcome": "retry",
+        "job_status": "queued",
+        "artifact_ref": "run-3",
+        "window_state": "closed",
+    }
+
+@pytest.mark.parametrize("limit", ["0", "101"])
+def test_cli_review_list_range_rejected_before_dependencies(monkeypatch, limit):
+    monkeypatch.setattr(cli_mod.ArtifactRoot, "open", lambda *args, **kwargs: pytest.fail("artifact opened"))
+    with pytest.raises(SystemExit) as exc:
+        main(["autofill-review", "list", "--limit", limit])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("review_command", ["complete", "retry"])
+@pytest.mark.parametrize("run_id", ["0", "-1"])
+def test_cli_review_run_id_rejected_before_dependencies(monkeypatch, review_command, run_id):
+    monkeypatch.setattr(cli_mod.ArtifactRoot, "open", lambda *args, **kwargs: pytest.fail("artifact opened"))
+    with pytest.raises(SystemExit) as exc:
+        argv = ["autofill-review", review_command, "--run-id", run_id]
+        if review_command == "complete":
+            argv.extend(["--outcome", "skipped"])
+        main(argv)
+    assert exc.value.code == 2
+
+
+
+
+@pytest.mark.parametrize("detail", ["run review CAS failed", "run retry CAS failed"])
+def test_cli_review_cas_failures_are_fixed_state_conflicts(detail):
+    assert cli_mod._review_failure_code(RuntimeError(detail)) == "state_conflict"
+@pytest.mark.parametrize("limit", ["0", "11"])
+def test_cli_autofill_range_rejected_before_dependencies(monkeypatch, limit):
+    calls: list[str] = []
+    monkeypatch.setattr(cli_mod.ArtifactRoot, "open", lambda *args, **kwargs: calls.append("artifact") or pytest.fail("artifact opened"))
+    monkeypatch.setattr(cli_mod.PuppeteerSession, "preflight", lambda **kwargs: calls.append("preflight"))
+    monkeypatch.setattr(cli_mod, "connect", lambda *args, **kwargs: calls.append("db"))
+
+    with pytest.raises(SystemExit) as exc:
+        main(["autofill", "--limit", limit])
+
+    assert exc.value.code == 2
+    assert calls == []
+
+
+def test_cli_autofill_malformed_profile_is_preclaim_error(tmp_path: Path, capsys, monkeypatch):
+    resume_file = tmp_path / "resume.txt"
+    resume_file.write_text("Alex Example\nalex@example.test", encoding="utf-8")
+    profile_file = tmp_path / "profile.json"
+    profile_file.write_text("{malformed", encoding="utf-8")
+    monkeypatch.setattr(cli_mod, "connect", lambda *args, **kwargs: pytest.fail("database opened"))
+
+    assert main([
+        "--db", str(tmp_path / "db.sqlite3"),
+        "autofill",
+        "--resume-file", str(resume_file),
+        "--profile-json", str(profile_file),
+        "--artifact-root", str(tmp_path / "artifacts"),
+    ]) == 1
+    assert json.loads(capsys.readouterr().err) == {
+        "error": {"code": "invalid_input", "message": "autofill input was rejected"}
+    }
+
+
+@pytest.mark.parametrize("ats", ["bogus", "greenhouse.io", ""])
+def test_cli_autofill_ats_is_exact_and_validated_before_dependencies(ats, monkeypatch):
+    monkeypatch.setattr(cli_mod, "connect", lambda *args, **kwargs: pytest.fail("database opened"))
+    with pytest.raises(SystemExit) as exc:
+        main(["autofill", "--ats", ats])
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("profile_flag", ["--profile-json", "--application-profile-json"])
+def test_cli_autofill_passes_durable_workflow_kwargs_without_browser(tmp_path: Path, capsys, monkeypatch, profile_flag: str):
+    """Autofill cleanly calls the durable workflow without launching Puppeteer."""
     db = tmp_path / "jobs.sqlite3"
-    resume_dir = tmp_path / "resume"
+    resume_file = tmp_path / "resume.txt"
     profile_json = tmp_path / "profile.json"
-    artifact_dir = tmp_path / "artifacts"
-    resume_dir.mkdir()
+    artifact_root = tmp_path / "artifacts"
+    resume_file.write_text("fixture resume", encoding="utf-8")
     profile_json.write_text('{"name": "Explicit Profile"}')
     calls: list[dict[str, object]] = []
 
-    async def fake_run_browser_autofill(conn, **kwargs):
+    async def fake_run_application_workflow(conn, **kwargs):
         calls.append(kwargs)
-        return [{"status": "manual", "reason": "fake guarded run"}]
+        return [{
+            "job_id": 7,
+            "run_id": 3,
+            "status": "failed",
+            "reason_code": "browser_error",
+            "ats": "greenhouse",
+            "artifact_ref": "run-3",
+            "window_state": "closed",
+        }]
 
-    monkeypatch.setattr(cli_mod, "run_browser_autofill", fake_run_browser_autofill)
+    monkeypatch.setattr(cli_mod, "run_application_workflow", fake_run_application_workflow)
 
     assert main([
         "--db", str(db),
         "autofill",
         "--limit", "2",
-        "--resume-dir", str(resume_dir),
+        "--resume-file", str(resume_file),
         profile_flag, str(profile_json),
-        "--artifact-dir", str(artifact_dir),
-        "--ats", ats,
+        "--artifact-root", str(artifact_root),
+        "--ats", "greenhouse",
         "--headed",
     ]) == 0
 
     assert calls == [{
         "limit": 2,
-        "resume_dir": str(resume_dir),
+        "resume_file": str(resume_file),
         "application_profile_json": str(profile_json),
-        "artifact_dir": str(artifact_dir),
-        "ats": ats,
+        "application_profile_preset": None,
+        "application_profile_dir": None,
+        "application_preferences": None,
+        "ats": "greenhouse",
+        "applicant_description_file": None,
+        "artifact_root": str(artifact_root),
         "headed": True,
     }]
     assert json.loads(capsys.readouterr().out) == {
-        "results": [{"status": "manual", "reason": "fake guarded run"}],
+        "results": [{
+            "job_id": 7,
+            "run_id": 3,
+            "status": "failed",
+            "reason_code": "browser_error",
+            "ats": "greenhouse",
+            "artifact_ref": "run-3",
+            "window_state": "closed",
+        }],
     }
+
+
+def test_cli_autofill_runtime_failure_is_redacted(tmp_path: Path, capsys, monkeypatch):
+    secret = str(tmp_path / "private-secret-resume.pdf")
+
+    def fail_preflight(**kwargs):
+        raise RuntimeError(f"node stack trace at {secret}")
+
+    monkeypatch.setattr(cli_mod.PuppeteerSession, "preflight", fail_preflight)
+    assert main(["--db", str(tmp_path / "db.sqlite3"), "autofill", "--artifact-root", str(tmp_path / "artifacts")]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error": {"code": "browser_preflight_error", "message": "browser preflight failed"}
+    }
+    assert secret not in captured.err
+
+
+def test_cli_autofill_malformed_result_fails_closed(tmp_path: Path, capsys, monkeypatch):
+    secret = "do-not-publish"
+
+    async def fake_run_application_workflow(conn, **kwargs):
+        return [{
+            "job_id": 7,
+            "run_id": 3,
+            "status": "manual",
+            "reason_code": "browser_error",
+            "ats": "greenhouse",
+            "artifact_ref": "run-3",
+            "window_state": "closed",
+            "secret": secret,
+        }]
+
+    monkeypatch.setattr(cli_mod, "run_application_workflow", fake_run_application_workflow)
+    assert main(["--db", str(tmp_path / "db.sqlite3"), "autofill", "--artifact-root", str(tmp_path / "artifacts")]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error": {"code": "invalid_result", "message": "autofill returned an invalid result"}
+    }
+    assert secret not in captured.out
+    assert secret not in captured.err
+
+
+
+def test_cli_review_transition_unhashable_job_status_fails_closed():
+    raw = {
+        "run_id": 3,
+        "job_id": 7,
+        "status": "failed",
+        "reason_code": "browser_error",
+        "outcome": "skipped",
+        "job_status": {"archived": True},
+        "window_state": "closed",
+    }
+    with pytest.raises(cli_mod._CliFailure) as exc:
+        cli_mod._sanitize_review_transition(raw, "run-3", outcome="skipped")
+    assert exc.value.code == "invalid_result"
+
+
+def test_cli_theirstack_preview_pinned_labels_count_unfiltered_and_does_not_persist(tmp_path: Path, capsys, monkeypatch):
+    db = tmp_path / "jobs.sqlite3"
+    monkeypatch.setenv("THEIRSTACK_API_KEY", "test-key")
+    fake = FakeTheirStackClient({"total_results": 9, "data": [{"id": "blurred", "url": "https://evil.example/apply"}]})
+    monkeypatch.setattr(cli_mod, "_theirstack_client", lambda *, paid_fetch: fake)
+
+    assert main(["--db", str(db), "theirstack-preview", "--ats", "greenhouse"]) == 0
+    assert "url_domain_or" not in fake.payloads[0]
+    output = json.loads(capsys.readouterr().out)
+    assert output["total_results"] == 9
+    assert output["total_results_unfiltered"] == 9
+    assert output["ats_filter"] == "greenhouse"
+    assert output["ats_filter_applied"] is False
+    assert "no application URLs" in output["ats_filter_reason"]
+    from jobs_assistant.db import connect
+    conn = connect(str(db))
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_cli_theirstack_pinned_sync_reports_filter_counts_and_forwards_ats(tmp_path: Path, capsys, monkeypatch):
+    db = tmp_path / "jobs.sqlite3"
+    monkeypatch.setenv("THEIRSTACK_API_KEY", "test-key")
+    fake = FakeTheirStackClient(
+        {
+            "data": [
+                {"id": "gh", "title": "Engineer", "company_name": "Acme", "url": "https://boards.greenhouse.io/acme/jobs/123"},
+                {"id": "bad", "title": "Engineer", "company_name": "Evil", "url": "https://evil.example/apply"},
+            ]
+        }
+    )
+    monkeypatch.setattr(cli_mod, "_theirstack_client", lambda *, paid_fetch: fake)
+
+    assert main(["--db", str(db), "theirstack-sync", "--paid-fetch", "--ats", "greenhouse"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["ats_filter"] == "greenhouse"
+    assert output["ats_filter_applied"] is True
+    assert output["fetched"] == 2
+    assert output["ats_eligible"] == 1
+    assert output["ats_rejected"] == 1
+    assert output["inserted"] == 1
+    assert output["seen"] == 1
+    from jobs_assistant.db import connect
+    conn = connect(str(db))
+    assert fake.payloads[0]["url_domain_or"] == ["greenhouse.io", "grnh.se"]
+    assert [row["source_job_id"] for row in conn.execute("SELECT source_job_id FROM jobs")] == ["gh"]
+
+
+def test_job_scrape_forwards_pinned_ats_filter(tmp_path: Path, capsys, monkeypatch):
+    db = tmp_path / "jobs.sqlite3"
+    monkeypatch.setenv("THEIRSTACK_API_KEY", "test-key")
+    fake = FakeTheirStackClient(
+        {
+            "data": [
+                {"id": "lev", "title": "Engineer", "company_name": "Acme", "url": "https://jobs.lever.co/acme/123e4567-e89b-12d3-a456-426614174000"},
+                {"id": "bad", "title": "Engineer", "company_name": "Evil", "url": "https://example.com/apply"},
+            ]
+        }
+    )
+    monkeypatch.setattr(cli_mod, "_theirstack_client", lambda *, paid_fetch: fake)
+
+    assert job_scrape_main(["--db", str(db), "--paid-fetch", "--ats", "lever", "--count", "2"]) == 0
+    assert fake.payloads[0]["url_domain_or"] == ["lever.co"]
+    output = json.loads(capsys.readouterr().out)
+    assert output["ats_filter"] == "lever"
+    assert output["fetched"] == 2
+    assert output["ats_eligible"] == 1
+    assert output["ats_rejected"] == 1

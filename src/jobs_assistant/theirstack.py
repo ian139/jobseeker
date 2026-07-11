@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Literal
+from types import MappingProxyType
+from typing import Any, Literal, Mapping, cast
 
 import httpx
 
+from jobs_assistant.ats import SUPPORTED_ATS, select_adapter
 from jobs_assistant.backlog import upsert_jobs
-from jobs_assistant.contracts import CreditEstimate, JobInput
+from jobs_assistant.browser_adapter import BrowserAdapterError, validate_ats_url
+from jobs_assistant.contracts import ATSFilter, CreditEstimate, JobInput
 
 SEARCH_PATH = "/v1/jobs/search"
 
@@ -24,9 +27,39 @@ class TheirStackError(RuntimeError):
 
 # --- Credit safety -----------------------------------------------------------
 
-# Profiles are simple string literals for typing convenience.
-ProfileName = Literal["new_grad_cs", "fall_coop_swe_data", "default"]
-PROFILE_NAMES: tuple[ProfileName, ...] = ("new_grad_cs", "fall_coop_swe_data", "default")
+ProfileName = Literal["new_grad_cs", "new_grad_non_coop_cs", "fall_coop_swe_data", "default"]
+PinnedATSFilter = Literal["greenhouse", "lever"]
+ATS_FILTER_NAMES: tuple[ATSFilter, ...] = ("auto", *SUPPORTED_ATS)
+ATS_URL_DOMAIN_OR: Mapping[PinnedATSFilter, tuple[str, ...]] = MappingProxyType(
+    {
+        "greenhouse": ("greenhouse.io", "grnh.se"),
+        "lever": ("lever.co",),
+    }
+)
+
+
+def validate_ats_filter_name(name: str) -> ATSFilter:
+    """Validate a TheirStack source filter name before any ingestion work."""
+    if type(name) is not str or name not in ATS_FILTER_NAMES:
+        raise ValueError(f"unsupported ATS filter: {name!r}")
+    return cast(ATSFilter, name)
+
+
+def checkpoint_profile_key(source_profile: ProfileName, ats_filter: ATSFilter) -> str:
+    """Return the bounded sync checkpoint namespace for a source/ATS selection.
+
+    ``auto`` intentionally returns the historical source-profile key so existing
+    checkpoints keep their legacy behavior.  Pinned ATS filters use separate,
+    deterministic internal keys and therefore cannot inherit one another's
+    checkpoint.
+    """
+    selected_filter = validate_ats_filter_name(ats_filter)
+    if selected_filter == "auto":
+        return source_profile
+    return f"{source_profile}::ats::{selected_filter}"
+
+
+PROFILE_NAMES: tuple[ProfileName, ...] = ("new_grad_cs", "new_grad_non_coop_cs", "fall_coop_swe_data", "default")
 
 
 def is_credit_safe_payload(payload: dict[str, Any]) -> bool:
@@ -120,6 +153,25 @@ EARLY_CAREER_PATTERNS = [
     "(?i)\\bgraduate program\\b",
 ]
 
+COOP_ROLE_TITLES = [
+    "co-op software engineer",
+    "co-op software developer",
+    "co-op data scientist",
+    "co-op data engineer",
+]
+
+COOP_DESCRIPTION_PATTERNS = [
+    "(?i)\\bco-op\\b",
+]
+
+NON_COOP_ROLE_TITLES = [
+    title for title in CS_ROLE_TITLES if "co-op" not in title.lower()
+]
+
+NON_COOP_EARLY_CAREER_PATTERNS = [
+    pattern for pattern in EARLY_CAREER_PATTERNS if "co-op" not in pattern.lower()
+]
+
 
 def _base_payload(*, blur_company_data: bool, include_total_results: bool, limit: int) -> dict[str, Any]:
     return {
@@ -141,10 +193,19 @@ def _base_payload(*, blur_company_data: bool, include_total_results: bool, limit
 
 
 def _apply_profile(payload: dict[str, Any], profile: ProfileName) -> None:
-    if profile in {"new_grad_cs", "fall_coop_swe_data"}:
-        payload["job_title_or"] = CS_ROLE_TITLES
-        payload["job_description_pattern_or"] = EARLY_CAREER_PATTERNS
-
+    if profile == "new_grad_cs":
+        payload["job_title_or"] = list(CS_ROLE_TITLES)
+        payload["job_description_pattern_or"] = list(EARLY_CAREER_PATTERNS)
+    elif profile == "new_grad_non_coop_cs":
+        payload["job_title_or"] = list(NON_COOP_ROLE_TITLES)
+        payload["job_description_pattern_or"] = list(NON_COOP_EARLY_CAREER_PATTERNS)
+        payload["job_description_pattern_not"] = [
+            *BAD_DESCRIPTION_PATTERNS,
+            *COOP_DESCRIPTION_PATTERNS,
+        ]
+    elif profile == "fall_coop_swe_data":
+        payload["job_title_or"] = list(COOP_ROLE_TITLES)
+        payload["job_description_pattern_or"] = list(COOP_DESCRIPTION_PATTERNS)
 
 def build_preview_payload(
     profile: ProfileName = "default",
@@ -161,15 +222,20 @@ def build_paid_fetch_payload(
     limit: int = 25,
     discovered_at_gte: str | None = None,
     discovered_at_gt: str | None = None,
+    ats_filter: ATSFilter = "auto",
 ) -> dict[str, Any]:
     """Build a paid-fetch payload that returns full job data.
 
-    Raises ValueError for invalid limits.
+    Raises ValueError for invalid limits or unsupported ATS filters.
     """
+    selected_filter = validate_ats_filter_name(ats_filter)
     if limit < 1 or limit > 100:
         raise ValueError("paid-fetch limit must be between 1 and 100")
 
     payload = _base_payload(blur_company_data=False, include_total_results=True, limit=limit)
+    if selected_filter != "auto":
+        # Return a fresh list so callers cannot mutate later payload builds.
+        payload["url_domain_or"] = list(ATS_URL_DOMAIN_OR[selected_filter])
     checkpoint = discovered_at_gte or discovered_at_gt
     if checkpoint is not None:
         payload["discovered_at_gte"] = checkpoint
@@ -293,11 +359,16 @@ class TheirStackClient:
     ) -> None:
         if not api_key.strip():
             raise ValueError("Missing TheirStack API key; pass api_key explicitly")
+        if type(max_retries) is not int or max_retries < 0:
+            raise ValueError("max_retries must be a non-negative integer")
         self._api_key = api_key
         self._enable_paid_fetch = enable_paid_fetch
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
-        self._max_retries = max_retries
+        # A paid request may consume credits even when the response is
+        # ambiguous. Never replay it automatically. Preview requests remain
+        # bounded-retry by default.
+        self._max_retries = 0 if enable_paid_fetch else max_retries
         self._client = client
 
     def search_jobs(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -374,14 +445,45 @@ class TheirStackClient:
         time.sleep(delay)
 
 
-def raw_job_to_input(raw: dict[str, Any]) -> JobInput:
+_URL_FIELDS: tuple[str, ...] = ("apply_url", "final_url", "url", "source_url", "job_url")
+
+
+def _legacy_apply_url(raw: dict[str, Any]) -> Any:
+    """Preserve the historical URL precedence for unpinned syncs."""
+    return raw.get("apply_url") or raw.get("final_url") or raw.get("url") or raw.get("source_url") or raw.get("job_url")
+
+
+def _validated_ats_url(url: object, ats_filter: ATSFilter) -> str | None:
+    if not isinstance(url, str) or not url:
+        return None
+    try:
+        adapter = select_adapter(ats_filter, url=url)
+        if adapter is None or adapter.name != ats_filter:
+            return None
+        route = validate_ats_url(url, adapter.name)
+    except (BrowserAdapterError, ValueError, TypeError):
+        return None
+    return url if route is not None else None
+
+
+def _select_apply_url(raw: dict[str, Any], ats_filter: ATSFilter) -> Any:
+    if ats_filter == "auto":
+        return _legacy_apply_url(raw)
+    for field in _URL_FIELDS:
+        candidate = raw.get(field)
+        if _validated_ats_url(candidate, ats_filter) is not None:
+            return candidate
+    return None
+
+
+def raw_job_to_input(raw: dict[str, Any], *, ats_filter: ATSFilter = "auto") -> JobInput:
     company = raw.get("company")
     company_name = ""
     if isinstance(company, dict):
         company_name = str(company.get("name") or "")
     company_name = company_name or str(raw.get("company_name") or raw.get("company") or "")
     source_id = raw.get("id") or raw.get("job_id") or raw.get("theirStackId") or raw.get("theirstack_job_id") or raw.get("theirstack_id")
-    apply_url = raw.get("apply_url") or raw.get("final_url") or raw.get("url") or raw.get("source_url") or raw.get("job_url")
+    apply_url = _select_apply_url(raw, ats_filter)
     return JobInput(
         source="theirstack",
         source_job_id=None if source_id is None else str(source_id),
@@ -396,18 +498,83 @@ def raw_job_to_input(raw: dict[str, Any]) -> JobInput:
     )
 
 
+def _ats_job_is_eligible(job: JobInput, ats_filter: ATSFilter) -> bool:
+    """Validate one normalized application URL for a pinned ATS filter.
+
+    ``auto`` is deliberately a compatibility mode: it does not filter source
+    results because the credit-free preview and historical paid sync accepted
+    arbitrary source URLs.  Pinned modes use the canonical adapter and route
+    validators, with no hostname substring matching.
+    """
+    if ats_filter == "auto":
+        return True
+    return _validated_ats_url(job.url, ats_filter) is not None
+
+
+def _normalize_and_filter_jobs(
+    raw_jobs: list[Any],
+    *,
+    ats_filter: ATSFilter,
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Normalize source jobs, then apply a pinned ATS route filter.
+
+    Returns ``(eligible_raw_jobs, fetched_count, rejected_count)``.  Filtering
+    is intentionally completed before company deduplication and any upsert.
+    """
+    fetched = len(raw_jobs)
+    rejected = 0
+    eligible: list[dict[str, Any]] = []
+    for raw in raw_jobs:
+        if not isinstance(raw, dict):
+            if ats_filter != "auto":
+                rejected += 1
+            continue
+        normalized = raw_job_to_input(raw, ats_filter=ats_filter)
+        if not _ats_job_is_eligible(normalized, ats_filter):
+            rejected += 1
+            continue
+        eligible.append(raw)
+    return eligible, fetched, rejected
+
+
 def sync_theirstack_response(
     conn: Any,
     response: dict[str, Any],
     *,
     paid_fetch_enabled: bool,
     one_per_company: bool = True,
+    ats_filter: ATSFilter = "auto",
+    stats: dict[str, int] | None = None,
 ) -> tuple[int, int, int]:
+    """Normalize, optionally filter, dedupe, and persist a paid response.
+
+    The three-item return value remains backward-compatible
+    ``(seen, inserted, updated)``.  When ``stats`` is supplied it is populated
+    with ``fetched``, ``ats_eligible``, and ``ats_rejected`` in addition to
+    those counters for CLI reporting.
+    """
     if not paid_fetch_enabled:
         raise PaidFetchDisabledError("Refusing to sync paid TheirStack results without explicit paid-fetch enablement")
-    raw_jobs = extract_jobs(response)
+    selected_filter = validate_ats_filter_name(ats_filter)
+    raw_jobs, fetched, rejected = _normalize_and_filter_jobs(
+        extract_jobs(response),
+        ats_filter=selected_filter,
+    )
+    ats_eligible = fetched - rejected
     if one_per_company:
         raw_jobs = select_one_job_per_company(raw_jobs)
-    jobs = [raw_job_to_input(raw) for raw in raw_jobs]
+    jobs = [raw_job_to_input(raw, ats_filter=selected_filter) for raw in raw_jobs]
     inserted, updated = upsert_jobs(conn, jobs)
-    return len(jobs), inserted, updated
+    seen = len(jobs)
+    if stats is not None:
+        stats.update(
+            {
+                "fetched": fetched,
+                "ats_eligible": ats_eligible,
+                "ats_rejected": rejected,
+                "seen": seen,
+                "inserted": inserted,
+                "updated": updated,
+            }
+        )
+    return seen, inserted, updated

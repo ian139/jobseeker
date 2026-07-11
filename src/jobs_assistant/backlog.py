@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Iterable
 
 from .contracts import JobInput
-from .db import canonicalize_url, encode_json, utc_now
+from .db import canonicalize_url, encode_json, find_existing_job, utc_now
 
 
 @dataclass(frozen=True)
@@ -15,23 +15,12 @@ class UpsertResult:
     updated: bool
 
 
-def _existing_job_id(conn: sqlite3.Connection, job: JobInput, canonical_url: str | None) -> int | None:
-    if job.source_job_id:
-        row = conn.execute("SELECT id FROM jobs WHERE source = ? AND source_job_id = ?", (job.source, job.source_job_id)).fetchone()
-        if row:
-            return int(row["id"])
-    if canonical_url:
-        row = conn.execute("SELECT id FROM jobs WHERE canonical_url = ?", (canonical_url,)).fetchone()
-        if row:
-            return int(row["id"])
-    return None
-
-
 def upsert_job(conn: sqlite3.Connection, job: JobInput) -> UpsertResult:
     canonical = canonicalize_url(job.url)
     if not job.source_job_id and not canonical:
         raise ValueError("job needs source_job_id or url")
-    existing_id = _existing_job_id(conn, job, canonical)
+    existing = find_existing_job(conn, job.source_job_id, canonical, job.source)
+    existing_id = int(existing["id"]) if existing is not None else None
     now = utc_now()
     raw_json = encode_json(job.raw)
     remote = None if job.remote is None else int(job.remote)

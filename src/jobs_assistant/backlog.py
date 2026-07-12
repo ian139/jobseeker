@@ -71,16 +71,13 @@ def next_queued_jobs(conn: sqlite3.Connection, *, limit: int = 10) -> list[sqlit
     )
 
 
-def next_backlog_jobs(conn: sqlite3.Connection, *, limit: int = 10) -> list[sqlite3.Row]:
-    return next_queued_jobs(conn, limit=limit)
-
-
 def job_application_url(row: sqlite3.Row | dict[str, object]) -> str | None:
     value = row["canonical_url"] if isinstance(row, sqlite3.Row) else row.get("canonical_url")
     return str(value) if value else None
 
 
 def count_backlog(conn: sqlite3.Connection) -> dict[str, int]:
-    total = conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0]
-    pending = conn.execute("SELECT COUNT(*) FROM jobs WHERE status = 'queued'").fetchone()[0]
-    return {"total": int(total), "pending": int(pending)}
+    counts = conn.execute(
+        "SELECT COUNT(*) AS total, SUM(status = 'queued') AS pending FROM jobs"
+    ).fetchone()
+    return {"total": int(counts[0]), "pending": int(counts[1] or 0)}

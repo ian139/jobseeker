@@ -298,10 +298,6 @@ class ApplicationProfilePresetRegistry:
             os.close(fd)
         return _decode_preset(raw, requested_name=requested_name)
 
-    # ``resolve`` is a boring alias useful to callers that treat the registry
-    # as a name resolver; it performs exactly the same validated load.
-    def resolve(self, name: str) -> ApplicationProfilePreset:
-        return self.load(name)
 
 
 def load_application_profile_preset(

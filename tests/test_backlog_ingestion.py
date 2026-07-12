@@ -1,4 +1,6 @@
-from jobs_assistant.backlog import canonicalize_url, next_queued_jobs, upsert_job
+import sqlite3
+
+from jobs_assistant.backlog import canonicalize_url, count_backlog, next_queued_jobs, upsert_job
 from jobs_assistant.contracts import JobInput
 from jobs_assistant.db import connect, init_db
 
@@ -37,3 +39,10 @@ def test_next_queued_jobs_returns_queued_jobs_without_applier_state():
     conn = memory_db()
     upsert_job(conn, JobInput(source="feed", source_job_id="1", url="https://a.test/apply", title="Dev", company="A", posted_at="2026-01-01"))
     assert [row["source_job_id"] for row in next_queued_jobs(conn, limit=1)] == ["1"]
+
+
+def test_count_backlog_supports_raw_sqlite_connections():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE jobs (status TEXT)")
+    conn.executemany("INSERT INTO jobs(status) VALUES (?)", [("queued",), ("done",)])
+    assert count_backlog(conn) == {"total": 2, "pending": 1}

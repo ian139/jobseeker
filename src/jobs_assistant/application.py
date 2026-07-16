@@ -450,7 +450,7 @@ def _observation_semantic_signature(observation: PageObservation) -> tuple[Any, 
         observation.site_markers,
         fields,
         buttons,
-        len(observation.final_submit_target_ids),
+        tuple(observation.final_submit_target_ids),
         tuple(button.target_id in final_target_ids for button in observation.buttons),
         tuple(error.text for error in observation.errors),
         tuple((blocker.code, blocker.text) for blocker in observation.blockers),
@@ -1801,7 +1801,7 @@ async def run_application_workflow(
                             )
                             for button in observation.buttons
                         ),
-                        len(final_target_ids),
+                        tuple(sorted(final_target_ids)),
                     )
                     if attempted_click_signature is not None:
                         prior_signature = attempted_click_signature

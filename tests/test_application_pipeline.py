@@ -536,6 +536,16 @@ def test_readiness_signature_rejects_validity_safety_and_enabled_changes() -> No
     unsafe = observation(field(valid=False, enabled=True, descriptors=("social security number",)))
     assert _observation_semantic_signature(baseline) != _observation_semantic_signature(disabled)
     assert _observation_semantic_signature(baseline) != _observation_semantic_signature(unsafe)
-    first = replace(baseline, final_submit_target_ids=("final-a",))
-    second = replace(baseline, final_submit_target_ids=("final-b",))
-    assert _observation_semantic_signature(first) != _observation_semantic_signature(second)
+    first = replace(
+        baseline,
+        buttons=(button("safe-a"), button("final-a", text="Submit", click_key="click-final")),
+        final_submit_target_ids=("final-a",),
+    )
+    renamed = replace(
+        baseline,
+        buttons=(button("safe-b"), button("final-b", text="Submit", click_key="click-final")),
+        final_submit_target_ids=("final-b",),
+    )
+    assert _observation_semantic_signature(first) != _observation_semantic_signature(renamed)
+    swapped = replace(renamed, final_submit_target_ids=("safe-b",))
+    assert _observation_semantic_signature(first) != _observation_semantic_signature(swapped)

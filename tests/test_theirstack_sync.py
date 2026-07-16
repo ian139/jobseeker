@@ -114,6 +114,21 @@ def test_paid_client_fetches_remaining_pages_from_nonzero_start_page():
     assert len(response["data"]) == 150
     assert [payload["page"] for payload in http.payloads] == [1, 2]
 
+def test_paid_client_enforces_page_safety_cap_without_total_results(monkeypatch):
+    http = SequenceHTTP(
+        [
+            {"data": [_job("one")]},
+            {"data": [_job("two")]},
+        ]
+    )
+    monkeypatch.setattr("jobs_assistant.theirstack.MAX_PAID_PAGES", 2)
+    client = TheirStackClient("token", enable_paid_fetch=True, client=http)
+
+    with pytest.raises(TheirStackError, match="safety page limit"):
+        client.search_jobs(build_paid_fetch_payload(limit=1))
+
+    assert [payload["page"] for payload in http.payloads] == [0, 1]
+
 
 def test_pinned_sync_filters_all_pages_before_global_company_dedupe():
     conn = connect(":memory:")

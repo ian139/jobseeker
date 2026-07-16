@@ -462,9 +462,12 @@ class TheirStackClient:
         pages_fetched = 0
 
         while True:
+            if pages_fetched >= MAX_PAID_PAGES:
+                raise TheirStackError("TheirStack paid pagination exceeded the safety page limit")
             page_payload = dict(payload)
             page_payload["page"] = page
             response = self._search_one_page(page_payload)
+            pages_fetched += 1
             page_key, page_jobs = _extract_jobs_with_key(response)
             page_total = _validated_total_results(response)
             if first_response is None:
@@ -486,8 +489,6 @@ class TheirStackClient:
                     break
             elif not page_jobs or len(page_jobs) < limit:
                 break
-            if pages_fetched >= MAX_PAID_PAGES:
-                raise TheirStackError("TheirStack paid pagination exceeded the safety page limit")
             page += 1
 
         if first_response is None or selected_key is None:
@@ -692,8 +693,7 @@ def _normalize_and_filter_jobs(
     eligible: list[dict[str, Any]] = []
     for raw in raw_jobs:
         if not isinstance(raw, dict):
-            if ats_filter != "auto":
-                rejected += 1
+            rejected += 1
             continue
         normalized = raw_job_to_input(raw, ats_filter=ats_filter)
         if not _ats_job_is_eligible(normalized, ats_filter):

@@ -121,6 +121,10 @@ every future adapter and preference feature.
 
 - [x] Persist guarded private workflow screenshots at initial, blocker, and final/handoff stages with verified path/bytes/SHA metadata, bounded deduplication, durable failure handling, and unchanged no-submit behavior. Coverage is in `tests/test_application_workflow.py`; live adapter coverage remains environment-skipped, and blocker-stage indexing is regression-tested.
 
+- [x] Extend read-only `backlog-list` with validated parameterized `--offset` pagination through 100,000 rows while preserving omitted-output compatibility, exact filters, deterministic ordering, stable counts, and no mutation/network/database creation. Coverage is in `tests/test_cli_smoke.py`; behavior is documented in `README.md`.
+
+- [x] Harden native submit-typed non-final ATS continuation with explicit permit evidence, approved same-job route identity across re-observation, distinct unsafe-navigation/network failures, durable before/after evidence, and zero final-submit calls. Coverage is in `tests/test_application_workflow.py`, `tests/test_application_pipeline.py`, and `tests/test_application_contracts.py`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

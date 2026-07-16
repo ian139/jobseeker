@@ -458,6 +458,18 @@ function validateFormAction(value, method, frameUrl) {
   return sameBoardJobUrl(value, identity) || sameBoardJobUrl(value, identity, { confirmation: true });
 }
 function proxyPermitKey(url, method) { return `${String(method || 'GET').toUpperCase()} ${String(url)}`; }
+function sameOrigin(left, right) {
+  const leftUrl = safeUrl(left);
+  const rightUrl = safeUrl(right);
+  return Boolean(
+    leftUrl
+      && rightUrl
+      && leftUrl.protocol === 'https:'
+      && rightUrl.protocol === 'https:'
+      && leftUrl.origin === rightUrl.origin
+  );
+}
+
 function authorizeProxyRequest(url, method, { ttl = 1000 } = {}) {
   const key = proxyPermitKey(url, method);
   proxyPermitUrls.set(key, Date.now() + ttl);
@@ -1297,7 +1309,9 @@ async function safeElementInfo(handle) {
     const rawType = input ? String(el.getAttribute('type') || 'text').toLowerCase() : (textarea ? 'textarea' : select ? 'select' : tag);
     const type = button ? String(el.getAttribute('type') || 'submit').toLowerCase() : rawType;
     const form = el.form || null;
-    const own = ['type', 'name', 'id', 'autocomplete', 'placeholder', 'title', 'aria-label'].map(name => el.getAttribute(name)).filter(Boolean);
+    const ownNames = ['type', 'name', 'id', 'autocomplete', 'placeholder', 'title', 'aria-label'];
+    const own = ownNames.map(name => el.getAttribute(name)).filter(Boolean);
+    const finalOwn = ownNames.filter(name => name !== 'type').map(name => el.getAttribute(name)).filter(Boolean);
     const labels = [];
     if (el.labels) for (const item of el.labels) labels.push(item.textContent || '');
     const described = el.getAttribute('aria-describedby');
@@ -1329,7 +1343,7 @@ async function safeElementInfo(handle) {
       return token;
     })() : null;
     const groupId = input && ['checkbox', 'radio'].includes(type) && name ? `${form ? (form.action || '') : ''}\u001f${name}` : null;
-    const flat = [...descriptors, name, action, el.getAttribute('href'), text, buttonValue].filter(Boolean).join(' ');
+    const flat = [...finalOwn, ...labels, ...(button || anchor ? [text, buttonValue] : []), name, action, el.getAttribute('href')].filter(Boolean).join(' ');
     const finalLike = finalTokens.some(token => new Set((flat.toLowerCase().match(/[a-z0-9]+/g) || [])).has(String(token).toLowerCase()));
     return {
       id: el.id || null,
@@ -1337,12 +1351,13 @@ async function safeElementInfo(handle) {
       isField: (input || textarea || select) && !['hidden', 'submit', 'button', 'reset', 'image'].includes(type),
       isButton: button || anchor || el.getAttribute('role') === 'button' || (input && ['submit', 'button', 'reset', 'image'].includes(type)),
       isNativeOfflineButton: button && type === 'button',
+      isNativeContinuationButton: button && type === 'submit' && !form,
       isAnchor: anchor, isFile: input && type === 'file', isCustomElement: tag.includes('-'),
       prototypePoisoned: (input || textarea) && (!valueDescriptor || typeof valueDescriptor.set !== 'function') || (input && ['checkbox', 'radio'].includes(type) && (!checkedDescriptor || typeof checkedDescriptor.set !== 'function')),
       kind: textarea ? 'textarea' : select ? 'select' : type, name, label, groupId, formIdentity, formToken, optionValue: input && ['checkbox', 'radio'].includes(type) ? String(el.value || '') : null, descriptors, selector: el.id ? `#${CSS.escape(el.id)}` : name ? `${tag}[name="${String(name).replaceAll('"', '\\"')}"]` : tag,
       required: Boolean(el.required || el.getAttribute('aria-required') === 'true'), visible: Boolean(rect.width && rect.height && (!style || (style.visibility !== 'hidden' && style.display !== 'none'))), enabled: !el.disabled, readonly: Boolean(el.readOnly),
       value: scalarValue, buttonValue, willValidate: Boolean(el.willValidate), valid: Boolean(el.validity ? el.validity.valid : true),
-      validityFlags: el.validity ? ['valueMissing', 'typeMismatch', 'patternMismatch', 'tooLong', 'tooShort', 'rangeUnderflow', 'rangeOverflow', 'stepMismatch', 'badInput', 'customError'].filter(flag => Boolean(el.validity[flag])) : [],
+      formActionUrl: action, effectiveMethod: method, documentOrigin: el.ownerDocument?.location?.origin || null, text: text.slice(0, 2048), buttonType: input ? type : (button ? type : (anchor ? 'anchor' : null)), target: el.getAttribute('target'), download: Boolean(el.getAttribute('download')), hrefUrl: anchor ? el.href : null, hrefAttribute: anchor ? el.getAttribute('href') : null, finalLike,
       fileCount: input && type === 'file' && el.files ? el.files.length : 0, fileBasenames: input && type === 'file' && el.files ? Array.from(el.files).map(file => file.name) : [], accept: input && type === 'file' ? String(el.accept || '').split(',').map(value => value.trim()).filter(Boolean) : [],
       minLength: Number.isInteger(el.minLength) && el.minLength >= 0 ? el.minLength : null, maxLength: Number.isInteger(el.maxLength) && el.maxLength >= 0 ? el.maxLength : null, pattern: el.pattern || null, minValue: el.min || null, maxValue: el.max || null, step: el.step || null, options,
       formActionUrl: action, effectiveMethod: method, text: text.slice(0, 2048), buttonType: input ? type : (button ? type : (anchor ? 'anchor' : null)), target: el.getAttribute('target'), download: Boolean(el.getAttribute('download')), hrefUrl: anchor ? el.href : null, hrefAttribute: anchor ? el.getAttribute('href') : null, finalLike,
@@ -1397,7 +1412,7 @@ function toObservedField(targetId, frameId, frameUrl, info, key, sensitive) {
   return { target_id: targetId, field_key: key, frame_id: frameId, frame_url: frameUrl, form_action_url: info.formActionUrl, kind: info.kind, name: info.name, label: info.label, group_id: info.groupId || null, option_value: info.optionValue || null, safety_descriptors: info.descriptors, selector: info.selector, required: info.required, visible: info.visible, enabled: info.enabled, readonly: info.readonly, value: info.value, will_validate: info.willValidate, valid: info.valid, validity_flags: [...info.validityFlags, ...(sensitive ? ['sensitive_field'] : [])], file_count: info.fileCount, file_basenames: info.fileBasenames, accept: info.accept, min_length: info.minLength, max_length: info.maxLength, pattern: info.pattern, min_value: info.minValue, max_value: info.maxValue, step: info.step, options: info.options };
 }
 function toObservedButton(targetId, frameId, frameUrl, info, clickKey, sensitive) {
-  return { target_id: targetId, frame_id: frameId, frame_url: frameUrl, click_key: info.finalLike || sensitive || info.collision ? null : clickKey, collision_count: Number(info.collisionCount || 0), element_id: info.id || null, element_kind: info.isAnchor ? 'a' : 'button', text: info.text, selector: info.selector, button_type: info.buttonType, name: info.name, value: info.buttonValue || null, target: info.target, download: info.download, effective_action_url: info.formActionUrl, effective_method: info.effectiveMethod, href_url: info.hrefUrl, href_attribute: info.hrefAttribute, visible: info.visible, enabled: info.enabled, safety_descriptors: info.descriptors };
+  return { target_id: targetId, frame_id: frameId, frame_url: frameUrl, click_key: info.finalLike || sensitive || info.collision ? null : clickKey, collision_count: Number(info.collisionCount || 0), element_id: info.id || null, element_kind: info.isAnchor ? 'a' : info.tag, text: info.text, selector: info.selector, button_type: info.buttonType, name: info.name, value: info.buttonValue || null, target: info.target, download: info.download, effective_action_url: info.formActionUrl, effective_method: info.effectiveMethod, href_url: info.hrefUrl, href_attribute: info.hrefAttribute, visible: info.visible, enabled: info.enabled, safety_descriptors: info.descriptors };
 }
 function assertPage() { if (!page) throw new Error('Puppeteer page is not initialized'); }
 async function trustedFrame(frame) {
@@ -1786,7 +1801,22 @@ async function action(command) {
   } finally { await selected.dispose().catch(() => {}); }
 }
 async function buttonAction(handle, info, command) {
-  if (!command.offline || info.isAnchor || !info.isNativeOfflineButton || info.finalLike || info.buttonType !== 'button' || !info.visible || !info.enabled) throw new Error('final_or_anchor_not_automated');
+  if (Object.hasOwn(command, 'continuation') && typeof command.continuation !== 'boolean') {
+    throw new Error('invalid_command_frame');
+  }
+  const continuation = command.continuation === true;
+  const buttonType = String(info.buttonType || '').toLowerCase();
+  const noAction = !info.formActionUrl && !info.effectiveMethod
+    && info.target == null && !info.download && !info.hrefUrl && !info.hrefAttribute;
+  const sameDocumentOrigin = sameOrigin(page.url(), info.documentOrigin);
+  const ordinary = !continuation && info.isNativeOfflineButton && buttonType === 'button';
+  const submitContinuation = continuation && info.isNativeContinuationButton
+    && buttonType === 'submit' && noAction && sameDocumentOrigin;
+  if (!command.offline || info.isAnchor || info.finalLike || !info.visible || !info.enabled
+      || !noAction || !sameDocumentOrigin || (!ordinary && !submitContinuation)) {
+    throw new Error('final_or_anchor_not_automated');
+  }
+  const beforeUrl = page.url();
   const hit = await handle.evaluate(el => {
     const rect = el.getBoundingClientRect();
     const style = getComputedStyle(el);
@@ -1804,6 +1834,7 @@ async function buttonAction(handle, info, command) {
     click.call(el);
   });
   await settle();
+  if (page.url() !== beforeUrl) throw new Error('unsafe_navigation_target');
   return { clicked: true, counters: { ...networkCounters } };
 }
 async function screenshot(command) {

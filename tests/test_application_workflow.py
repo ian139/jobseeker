@@ -489,8 +489,9 @@ def test_lever_button_only_workflow_clicks_policy_aware_continue(monkeypatch, tm
                 payload["buttons"] = []
             return payload
 
-        def click_offline(self, target_id):
+        def click_offline(self, target_id, continuation=False):
             type(self).clicks.append(target_id)
+            assert continuation is False
             return {"clicked": True, "counters": {}}
 
     monkeypatch.setattr(app, "PuppeteerSession", LeverButtonSession)
@@ -557,6 +558,106 @@ def test_lever_eu_safe_action_origin_is_allowed() -> None:
     default_observation = app._observation_from_payload({**payload, "buttons": [default_port]})
     assert app._safe_click_is_eligible(default_observation.buttons[0], ats_policy="lever")
 
+def test_safe_click_allows_nonfinal_submit_continuation_and_denies_unsafe_controls() -> None:
+    page_url = "https://boards.greenhouse.io/acme/jobs/123"
+    base = {
+        "target_id": "continue",
+        "frame_id": "frame-0",
+        "frame_url": page_url,
+        "click_key": "click-safe",
+        "element_kind": "button",
+        "button_type": "button",
+        "text": "Continue",
+        "visible": True,
+        "enabled": True,
+        "safety_descriptors": [],
+    }
+
+    def eligible(button: dict[str, object], final_ids: list[str] | None = None) -> bool:
+        payload = {
+            **_payload(),
+            "url": page_url,
+            "buttons": [button],
+            "final_submit_target_ids": final_ids or [],
+        }
+        observation = app._observation_from_payload(payload)
+        return app._safe_click_is_eligible(
+            observation.buttons[0],
+            observation.final_submit_target_ids,
+            ats_policy="greenhouse",
+            page_url=observation.url,
+        )
+
+    assert eligible(base)
+    submit = dict(base, button_type="submit")
+    assert eligible(submit)
+    assert not eligible(dict(base, target="_blank"))
+    assert not eligible(dict(submit, effective_action_url=page_url, effective_method="post"))
+    assert not eligible(dict(submit, frame_url="https://evil.example/acme/jobs/123"))
+    assert not eligible(dict(submit, download=True))
+    assert not eligible(dict(submit, safety_descriptors=["ssn"]))
+    assert not eligible(dict(submit, target_id="final"), final_ids=["final"])
+
+
+def test_workflow_dispatches_submit_continuation_through_offline_protocol(monkeypatch, tmp_path: Path) -> None:
+    claims = [ApplicationClaim(73, {"id": 73, "canonical_url": "https://boards.greenhouse.io/a/jobs/73", "title": "Continuation"})]
+
+    class SubmitContinuationSession(FakeSession):
+        observes = 0
+        clicks: list[tuple[str, bool]] = []
+
+        @classmethod
+        def start(cls, **kwargs):
+            return cls(kwargs["session_manifest"])
+
+        def observe(self):
+            type(self).observes += 1
+            payload = _payload()
+            if self.observes == 1:
+                payload["buttons"] = [{
+                    "target_id": "continue",
+                    "frame_id": "frame-0",
+                    "frame_url": payload["url"],
+                    "click_key": "continue-key",
+                    "element_kind": "button",
+                    "button_type": "submit",
+                    "text": "Continue",
+                    "visible": True,
+                    "enabled": True,
+                    "safety_descriptors": [],
+                }]
+            else:
+                payload["buttons"] = []
+            return payload
+
+        def click_offline(self, target_id, continuation=False):
+            type(self).clicks.append((target_id, continuation))
+            return {"clicked": True, "counters": {}}
+
+    monkeypatch.setattr(app, "PuppeteerSession", SubmitContinuationSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in ("register_application_artifact", "register_application_session", "register_application_owner_process", "register_application_browser_process"):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        app,
+        "resolve_with_llm",
+        lambda *args, **kwargs: app.AutofillPlan(
+            safe_click_target_id="continue",
+            status="ready",
+            reason_code=app.PublicReasonCode.draft_ready,
+        ),
+    )
+
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+    result = asyncio.run(app.run_application_workflow(object(), resume_file=resume, artifact_root=root))
+
+    assert result[0]["status"] == "review_ready"
+    assert SubmitContinuationSession.clicks == [("continue", True)]
+    actions = json.loads((root / "run-73" / "actions.json").read_text(encoding="utf-8"))
+    assert actions["final_submit_calls"] == 0
 def test_frame_origin_unknown_ats_policy_denies_greenhouse_origin() -> None:
     assert app._frame_origin_allowed(
         "https://boards.greenhouse.io/acme/jobs/123",
@@ -1178,7 +1279,8 @@ def test_each_mutation_failure_is_diagnostic_and_not_retried(monkeypatch, tmp_pa
         def fill(self, target_id, value):
             return self._fail("fill")
 
-        def click_offline(self, target_id):
+        def click_offline(self, target_id, continuation=False):
+            assert continuation is False
             return self._fail("click_offline")
 
     answer = app.FieldAnswer("field", "Ada", 1.0, "configured", "profile")

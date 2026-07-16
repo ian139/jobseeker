@@ -119,7 +119,7 @@ every future adapter and preference feature.
 
 - [x] Harden generic `import-feed` envelope and record validation with fixed redacted `invalid_input` failures, pre-connect local validation, all-record validation before transactional upsert, and unchanged valid/HTTP behavior. Coverage is in `tests/test_cli_smoke.py` and `tests/test_job_source.py`.
 
-- [x] Persist guarded private workflow screenshots at initial, blocker, and final/handoff stages with verified path/bytes/SHA metadata, bounded deduplication, durable failure handling, and unchanged no-submit behavior. Coverage is in `tests/test_application_workflow.py`; live adapter coverage remains environment-skipped.
+- [x] Persist guarded private workflow screenshots at initial, blocker, and final/handoff stages with verified path/bytes/SHA metadata, bounded deduplication, durable failure handling, and unchanged no-submit behavior. Coverage is in `tests/test_application_workflow.py`; live adapter coverage remains environment-skipped, and blocker-stage indexing is regression-tested.
 
 ## Reference-only history
 

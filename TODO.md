@@ -74,6 +74,9 @@ every future adapter and preference feature.
 - [x] Preserve normalized source location, remote status, and description metadata across feed normalization and backlog upserts, including supported aliases and malformed-value rejection. Coverage is in `tests/test_job_source.py`.
 - [x] Reject unframed browser protocol responses and poison the session after a bad length prefix; coverage is in `tests/test_puppeteer_adapter.py`.
 
+- [x] Reject malformed TheirStack/feed envelopes instead of silently accepting unsupported shapes; preserve strict source metadata normalization. Coverage is in `tests/test_job_source.py` and `tests/test_theirstack_sync.py`.
+- [x] Harden browser framing and response envelopes with canonical length parsing, schema validation, poisoned sessions, and durable malformed-observation failure evidence. Coverage is in `tests/test_puppeteer_adapter.py` and `tests/test_application_workflow.py`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

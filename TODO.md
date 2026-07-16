@@ -81,6 +81,8 @@ every future adapter and preference feature.
 
 - [x] Thread the selected ATS policy through inference, planning, and safe-button eligibility so final-like controls remain rejected consistently across adapters. Coverage is in `tests/test_application_pipeline.py`.
 
+- [x] Cover the Lever policy-aware button-only workflow, proving safe continuation actions use the selected ATS policy and remain non-final. Coverage is in `tests/test_application_workflow.py`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

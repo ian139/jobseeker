@@ -229,13 +229,118 @@ def validate_inference_privacy(plan: AutofillPlan, *, protected_values: tuple[st
 
 
 def _observation_from_payload(payload: Mapping[str, Any]) -> PageObservation:
+    required = (
+        "observation_id",
+        "url",
+        "title",
+        "site_markers",
+        "fields",
+        "buttons",
+        "final_submit_target_ids",
+        "errors",
+        "blockers",
+    )
+    if not isinstance(payload, Mapping) or any(key not in payload for key in required):
+        raise BrowserAdapterError("protocol_invalid_response")
+    if any(type(payload[key]) is not str for key in ("observation_id", "url", "title")):
+        raise BrowserAdapterError("protocol_invalid_response")
+    if (
+        type(payload["site_markers"]) is not list
+        or any(type(item) is not str for item in payload["site_markers"])
+        or type(payload["final_submit_target_ids"]) is not list
+        or any(type(item) is not str for item in payload["final_submit_target_ids"])
+    ):
+        raise BrowserAdapterError("protocol_invalid_response")
+    collection_keys = ("fields", "buttons", "errors", "blockers")
+    if any(
+        type(payload[key]) is not list
+        or any(not isinstance(item, Mapping) for item in payload[key])
+        for key in collection_keys
+    ):
+        raise BrowserAdapterError("protocol_invalid_response")
+    def _strings_or_none(raw: Mapping[str, Any], keys: tuple[str, ...]) -> bool:
+        return all(key not in raw or raw[key] is None or type(raw[key]) is str for key in keys)
+
+    def _string_lists(raw: Mapping[str, Any], keys: tuple[str, ...]) -> bool:
+        return all(
+            key not in raw
+            or (type(raw[key]) is list and all(type(item) is str for item in raw[key]))
+            for key in keys
+        )
+
+    def _valid_field(raw: Mapping[str, Any]) -> bool:
+        if any(type(raw.get(key)) is not str for key in ("target_id", "field_key", "kind")):
+            return False
+        if not _strings_or_none(
+            raw,
+            ("frame_id", "frame_url", "form_action_url", "name", "label", "group_id", "option_value", "selector"),
+        ):
+            return False
+        if not all(key not in raw or type(raw[key]) is bool for key in ("required", "visible", "enabled", "readonly", "will_validate", "valid")):
+            return False
+        value = raw.get("value")
+        if "value" in raw and value is not None and type(value) not in (str, bool):
+            return False
+        if "file_count" in raw and (type(raw["file_count"]) is not int or raw["file_count"] < 0):
+            return False
+        if not _string_lists(raw, ("safety_descriptors", "validity_flags", "file_basenames", "accept")):
+            return False
+        options = raw.get("options")
+        if "options" in raw and (
+            type(options) is not list
+            or any(
+                not isinstance(item, Mapping)
+                or type(item.get("value")) is not str
+                or type(item.get("label")) is not str
+                or type(item.get("enabled")) is not bool
+                for item in options
+            )
+        ):
+            return False
+        return True
+
+    def _valid_button(raw: Mapping[str, Any]) -> bool:
+        if any(type(raw.get(key)) is not str for key in ("target_id", "frame_id", "frame_url", "element_kind", "button_type")):
+            return False
+        if not _strings_or_none(
+            raw,
+            (
+                "click_key",
+                "element_id",
+                "text",
+                "selector",
+                "name",
+                "value",
+                "target",
+                "effective_action_url",
+                "effective_method",
+                "href_url",
+                "href_attribute",
+            ),
+        ):
+            return False
+        return all(key not in raw or type(raw[key]) is bool for key in ("download", "visible", "enabled"))
+
+    def _valid_blocker(raw: Mapping[str, Any]) -> bool:
+        return all(type(raw.get(key)) is str for key in ("code", "frame_id", "text"))
+
+    def _valid_error(raw: Mapping[str, Any]) -> bool:
+        return (raw.get("target_id") is None or type(raw.get("target_id")) is str) and type(raw.get("text")) is str
+
+    if (
+        any(not _valid_field(raw) for raw in payload["fields"])
+        or any(not _valid_button(raw) for raw in payload["buttons"])
+        or any(not _valid_blocker(raw) for raw in payload["blockers"])
+        or any(not _valid_error(raw) for raw in payload["errors"])
+    ):
+        raise BrowserAdapterError("protocol_invalid_response")
+
+
     def option(raw: Mapping[str, Any]) -> ObservedOption:
         return ObservedOption(str(raw.get("value", "")), str(raw.get("label", "")), bool(raw.get("enabled", True)))
 
     fields: list[ObservedField] = []
-    for raw in payload.get("fields", ()):
-        if not isinstance(raw, Mapping):
-            continue
+    for raw in payload["fields"]:
         fields.append(ObservedField(
             target_id=str(raw.get("target_id", "")), field_key=str(raw.get("field_key", "")),
             frame_id=str(raw.get("frame_id", "")), frame_url=str(raw.get("frame_url", "")),
@@ -252,9 +357,7 @@ def _observation_from_payload(payload: Mapping[str, Any]) -> PageObservation:
             options=tuple(option(x) for x in raw.get("options", ()) if isinstance(x, Mapping)),
         ))
     buttons: list[ObservedButton] = []
-    for raw in payload.get("buttons", ()):
-        if not isinstance(raw, Mapping):
-            continue
+    for raw in payload["buttons"]:
         buttons.append(ObservedButton(
             target_id=str(raw.get("target_id", "")), frame_id=str(raw.get("frame_id", "")), frame_url=str(raw.get("frame_url", "")),
             click_key=raw.get("click_key"), element_id=raw.get("element_id"), element_kind=str(raw.get("element_kind", "button")),
@@ -264,12 +367,12 @@ def _observation_from_payload(payload: Mapping[str, Any]) -> PageObservation:
             href_attribute=raw.get("href_attribute"), visible=bool(raw.get("visible", False)), enabled=bool(raw.get("enabled", False)),
             safety_descriptors=tuple(str(x) for x in raw.get("safety_descriptors", ())),
         ))
-    blockers = tuple(ObservedBlocker(str(x.get("code")), str(x.get("frame_id", "")), str(x.get("text", ""))) for x in payload.get("blockers", ()) if isinstance(x, Mapping))
-    errors = tuple(ObservedValidationError(x.get("target_id"), str(x.get("text", ""))) for x in payload.get("errors", ()) if isinstance(x, Mapping))
+    blockers = tuple(ObservedBlocker(str(x.get("code")), str(x.get("frame_id", "")), str(x.get("text", ""))) for x in payload["blockers"])
+    errors = tuple(ObservedValidationError(x.get("target_id"), str(x.get("text", ""))) for x in payload["errors"])
     return PageObservation(
-        observation_id=str(payload.get("observation_id", "")), url=str(payload.get("url", "")), title=str(payload.get("title", "")),
-        site_markers=tuple(str(x) for x in payload.get("site_markers", ())), fields=tuple(fields), buttons=tuple(buttons),
-        final_submit_target_ids=tuple(str(x) for x in payload.get("final_submit_target_ids", ())), errors=errors, blockers=blockers,
+        observation_id=payload["observation_id"], url=payload["url"], title=payload["title"],
+        site_markers=tuple(payload["site_markers"]), fields=tuple(fields), buttons=tuple(buttons),
+        final_submit_target_ids=tuple(payload["final_submit_target_ids"]), errors=errors, blockers=blockers,
     )
 
 
@@ -1331,6 +1434,17 @@ async def _invoke_browser(
             "browser_command_failed",
             iteration,
         ) from None
+def _observation_from_browser_payload(payload: Any, *, iteration: int) -> PageObservation:
+    try:
+        return _observation_from_payload(payload)
+    except BrowserAdapterError as exc:
+        raise _BrowserFailure(
+            "observation",
+            "observe",
+            normalize_browser_error_code(str(exc)),
+            iteration,
+        ) from None
+
 
 
 async def _maybe(value: Any) -> Any:
@@ -1603,7 +1717,7 @@ async def run_application_workflow(
                         iteration,
                         lambda: session.observe(),
                     )
-                    observation = _observation_from_payload(payload)
+                    observation = _observation_from_browser_payload(payload, iteration=iteration)
                     final_observation = observation
                     if attempted_mutation is not None:
                         attempted_key, attempted_kind, expected = attempted_mutation
@@ -1918,7 +2032,7 @@ async def run_application_workflow(
                             iteration,
                             lambda: session.observe(),
                         )
-                        stable_observation = _observation_from_payload(stable_payload)
+                        stable_observation = _observation_from_browser_payload(stable_payload, iteration=iteration)
                         if _observation_semantic_signature(observation) != _observation_semantic_signature(stable_observation):
                             final_observation = stable_observation
                             final_plan = AutofillPlan(

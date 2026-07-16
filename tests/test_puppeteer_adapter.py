@@ -20,6 +20,7 @@ import pytest
 from jobs_assistant.browser_adapter import (
     BrowserAdapterError,
     PuppeteerSession,
+    _read_one_frame,
     _capture_process_identity,
     normalize_browser_error_code,
     validate_ats_url,
@@ -960,6 +961,77 @@ def test_protocol_rejects_unframed_json_response() -> None:
         session._selector.close()
         stream.close()
 
+@pytest.mark.parametrize(
+    ("prefix", "error"),
+    (
+        (b"+1", "protocol_bad_length"),
+        (b" 1", "protocol_bad_length"),
+        (b"01", "protocol_bad_length"),
+        (b"9" * 32, "protocol_frame_too_large"),
+    ),
+)
+def test_protocol_rejects_noncanonical_response_length(prefix: bytes, error: str) -> None:
+    read_fd, write_fd = os.pipe()
+    stream = os.fdopen(read_fd, "rb")
+    try:
+        os.write(write_fd, prefix + b"\n{}")
+    finally:
+        os.close(write_fd)
+
+    session = object.__new__(PuppeteerSession)
+    session.process = type("FakeProcess", (), {"stdout": stream})()
+    session._selector = selectors.DefaultSelector()
+    session._selector.register(stream, selectors.EVENT_READ)
+    session._recv_buffer = bytearray()
+    session._poisoned = False
+    try:
+        with pytest.raises(BrowserAdapterError, match=error):
+            session.read_response(timeout=1)
+        assert session._poisoned is True
+    finally:
+        session._selector.close()
+        stream.close()
+
+
+@pytest.mark.parametrize(
+    ("prefix", "error"),
+    (
+        (b"+1", "protocol_bad_length"),
+        (b" 1", "protocol_bad_length"),
+        (b"01", "protocol_bad_length"),
+        (b"9" * 32, "protocol_frame_too_large"),
+    ),
+)
+def test_preflight_protocol_rejects_noncanonical_response_length(prefix: bytes, error: str) -> None:
+    read_fd, write_fd = os.pipe()
+    stream = os.fdopen(read_fd, "rb")
+    try:
+        os.write(write_fd, prefix + b"\n{}")
+    finally:
+        os.close(write_fd)
+
+    process = type("FakeProcess", (), {"stdout": stream})()
+    try:
+        with pytest.raises(BrowserAdapterError, match=error):
+            _read_one_frame(process, timeout=1)
+    finally:
+        stream.close()
+
+
+def test_preflight_protocol_accepts_canonical_response_length() -> None:
+    read_fd, write_fd = os.pipe()
+    stream = os.fdopen(read_fd, "rb")
+    try:
+        os.write(write_fd, b"2\n{}")
+    finally:
+        os.close(write_fd)
+
+    process = type("FakeProcess", (), {"stdout": stream})()
+    try:
+        assert _read_one_frame(process, timeout=1) == {}
+    finally:
+        stream.close()
+
 
 
 @BROWSER_INTEGRATION_SKIP
@@ -998,6 +1070,58 @@ def _session_with_response(response: dict) -> PuppeteerSession:
     session._write_frame = lambda payload, timeout: None
     session.read_response = lambda timeout=15.0: response
     return session
+
+
+def test_request_rejects_malformed_success_envelope_and_poison_session():
+    session = _session_with_response({"ok": True})
+
+    with pytest.raises(BrowserAdapterError, match="protocol_invalid_response"):
+        session.request({"action": "unknown"})
+
+    assert session._poisoned is True
+    with pytest.raises(BrowserAdapterError, match="protocol_poisoned"):
+        session.request({"action": "unknown"})
+
+
+def test_request_rejects_malformed_observe_success_and_poison_session():
+    session = _session_with_response({
+        "ok": True,
+        "data": {"observation_id": "obs-1", "fields": [], "buttons": []},
+    })
+
+    with pytest.raises(BrowserAdapterError, match="protocol_invalid_response"):
+        session.request({"action": "observe"})
+
+    assert session._poisoned is True
+
+
+def test_request_rejects_malformed_mutation_ack_and_accepts_valid_shapes():
+    malformed = _session_with_response({"ok": True, "data": {"counters": {}}})
+    with pytest.raises(BrowserAdapterError, match="protocol_invalid_response"):
+        malformed.request({"action": "fill"})
+    assert malformed._poisoned is True
+
+    valid_observation = {
+        "observation_id": "obs-1",
+        "url": "https://boards.greenhouse.io/acme/jobs/123",
+        "title": "Apply",
+        "site_markers": [],
+        "fields": [],
+        "buttons": [],
+        "final_submit_target_ids": [],
+        "errors": [],
+        "blockers": [],
+        "counters": {},
+        "terminal_reason": None,
+    }
+    valid_observe = _session_with_response({"ok": True, "data": valid_observation})
+    assert valid_observe.request({"action": "observe"}) == valid_observation
+
+    valid_mutation = _session_with_response({
+        "ok": True,
+        "data": {"retained": True, "counters": {}},
+    })
+    assert valid_mutation.request({"action": "fill"}) == {"retained": True, "counters": {}}
 
 
 def test_normalize_browser_error_code_collapses_raw_runner_messages():

@@ -24,6 +24,7 @@ from .safety import validate_ats_policy_name
 RUNNER = Path(__file__).with_name("puppeteer_runner.js").resolve(strict=True)
 MAX_IN_FRAME = 256 * 1024
 MAX_OUT_FRAME = 2 * 1024 * 1024
+MAX_OUT_FRAME_DIGITS = len(str(MAX_OUT_FRAME))
 # Keep observations and plans comfortably below the protocol frame ceiling.
 MAX_OBSERVATION_BYTES = 1_900_000
 FINAL_ROUTE_TOKENS = ("submit", "complete", "confirm", "finish", "send", "final")
@@ -102,6 +103,7 @@ SAFE_BROWSER_ERROR_CODES = {
     "protocol_frame_too_large",
     "protocol_invalid_json",
     "protocol_non_object",
+    "protocol_invalid_response",
     "output_frame_too_large",
     "adapter_stdout_missing",
     "adapter_stdin_missing",
@@ -111,6 +113,111 @@ SAFE_BROWSER_ERROR_CODES = {
 def normalize_browser_error_code(value: object) -> str:
     """Return only a privacy-safe, allowlisted browser diagnostic code."""
     return value if isinstance(value, str) and value in SAFE_BROWSER_ERROR_CODES else "browser_command_failed"
+def _parse_frame_length(prefix: bytes) -> int:
+    """Parse one canonical non-negative decimal protocol length."""
+    if re.fullmatch(rb"(?:0|[1-9][0-9]*)", prefix) is None:
+        raise BrowserAdapterError("protocol_bad_length")
+    if len(prefix) > MAX_OUT_FRAME_DIGITS:
+        raise BrowserAdapterError("protocol_frame_too_large")
+    length = int(prefix)
+    if length > MAX_OUT_FRAME:
+        raise BrowserAdapterError("protocol_frame_too_large")
+    return length
+
+def _positive_protocol_int(value: object) -> bool:
+    return type(value) is int and value > 0
+
+
+def _protocol_identity(value: object) -> bool:
+    return isinstance(value, dict) and all(
+        key in value for key in ("pid", "pgid", "birth")
+    )
+
+
+def _protocol_counters(value: object) -> bool:
+    return isinstance(value, dict)
+
+
+def _valid_response_data(action: object, data: dict[str, Any]) -> bool:
+    """Check the minimum response shape needed by each adapter operation."""
+    if not isinstance(action, str):
+        return True
+    if action == "startup_identity":
+        return (
+            data.get("hello") is True
+            and data.get("protocol") == "length-prefixed-json-v1"
+            and _protocol_identity(data.get("identity"))
+        )
+    if action == "launch":
+        return (
+            _positive_protocol_int(data.get("owner_pid"))
+            and _positive_protocol_int(data.get("browser_pid"))
+            and data.get("pipe") is True
+        )
+    if action == "register_browser_identity":
+        return _protocol_identity(data.get("browser_identity")) and _protocol_identity(data.get("identity"))
+    if action == "resolvePinnedAddress":
+        return isinstance(data.get("address"), str) and data.get("family") in (4, 6)
+    if action == "classifyResolverResult":
+        return isinstance(data.get("address"), str) and data.get("family") in (4, 6)
+    if action == "goto":
+        return (
+            isinstance(data.get("url"), str)
+            and isinstance(data.get("title"), str)
+            and (data.get("status") is None or type(data.get("status")) is int)
+            and isinstance(data.get("mode"), str)
+        )
+    if action == "observe":
+        return (
+            isinstance(data.get("observation_id"), str)
+            and isinstance(data.get("url"), str)
+            and isinstance(data.get("title"), str)
+            and all(isinstance(data.get(key), list) for key in (
+                "site_markers",
+                "fields",
+                "buttons",
+                "final_submit_target_ids",
+                "errors",
+                "blockers",
+            ))
+            and _protocol_counters(data.get("counters"))
+            and (data.get("terminal_reason") is None or isinstance(data.get("terminal_reason"), str))
+        )
+    if action in {"fill", "select", "check", "upload"}:
+        return data.get("retained") is True and _protocol_counters(data.get("counters"))
+    if action == "click":
+        return data.get("clicked") is True and _protocol_counters(data.get("counters"))
+    if action == "screenshot":
+        return (
+            isinstance(data.get("path"), str)
+            and isinstance(data.get("reference"), str)
+            and type(data.get("bytes")) is int
+            and data.get("bytes") >= 0
+            and isinstance(data.get("sha256"), str)
+            and type(data.get("full_page")) is bool
+            and type(data.get("truncated")) is bool
+            and type(data.get("pixel_width")) is int
+            and type(data.get("pixel_height")) is int
+        )
+    if action == "webrtcStatus":
+        return type(data.get("available")) is bool and data.get("policy") == "disable_non_proxied_udp"
+    if action == "prepare_handoff":
+        return data.get("state") == "prepared" and _protocol_identity(data.get("identity"))
+    if action == "commit_handoff":
+        return data.get("state") == "open_guarded" and _protocol_identity(data.get("identity"))
+    if action == "release_handoff":
+        return data.get("state") == "open_guarded" and data.get("released") is True
+    if action == "networkCounters":
+        return _protocol_counters(data) and isinstance(data.get("review_state"), str)
+    if action == "test_proxy_setup":
+        return _positive_protocol_int(data.get("proxy_port"))
+    if action == "test_proxy_freeze":
+        return _protocol_counters(data) and (
+            data.get("terminal_reason") is None or isinstance(data.get("terminal_reason"), str)
+        )
+    if action == "close":
+        return not data
+    return True
 
 IDENTITY_FIELDS = ("pid", "pgid", "birth")
 MANIFEST_VERSION = 1
@@ -741,13 +848,22 @@ class PuppeteerSession:
                 raise BrowserAdapterError("browser_session_closed")
             self._write_frame(payload, timeout=timeout)
             response = self.read_response(timeout=timeout)
-            if not response.get("ok"):
+            if response.get("ok") is False:
+                if set(response) != {"ok", "error"} or not isinstance(response.get("error"), str):
+                    self._poisoned = True
+                    raise BrowserAdapterError("protocol_invalid_response")
                 raise BrowserAdapterError(
-                    normalize_browser_error_code(response.get("error")),
+                    normalize_browser_error_code(response["error"]),
                     runner_originated=True,
                 )
-            data = response.get("data")
-            return data if isinstance(data, dict) else {}
+            if response.get("ok") is not True or set(response) != {"ok", "data"}:
+                self._poisoned = True
+                raise BrowserAdapterError("protocol_invalid_response")
+            data = response["data"]
+            if not isinstance(data, dict) or not _valid_response_data(payload.get("action"), data):
+                self._poisoned = True
+                raise BrowserAdapterError("protocol_invalid_response")
+            return data
 
     def goto(
         self,
@@ -895,13 +1011,10 @@ class PuppeteerSession:
         prefix = bytes(self._recv_buffer[:newline])
         del self._recv_buffer[: newline + 1]
         try:
-            length = int(prefix.decode("ascii"))
-        except (UnicodeDecodeError, ValueError) as exc:
+            length = _parse_frame_length(prefix)
+        except BrowserAdapterError:
             self._poisoned = True
-            raise BrowserAdapterError("protocol_bad_length") from exc
-        if length < 0 or length > MAX_OUT_FRAME:
-            self._poisoned = True
-            raise BrowserAdapterError("protocol_frame_too_large")
+            raise
         body = self._take_exact(length, deadline)
         if length > MAX_OBSERVATION_BYTES:
             self._poisoned = True
@@ -1044,12 +1157,7 @@ def _read_one_frame(process: subprocess.Popen[bytes], *, timeout: float) -> dict
                     raise BrowserAdapterError("protocol_bad_length")
                 continue
             line.extend(chunk[:newline])
-            try:
-                length = int(line.decode("ascii"))
-            except (UnicodeDecodeError, ValueError) as exc:
-                raise BrowserAdapterError("protocol_bad_length") from exc
-            if length < 0 or length > MAX_OUT_FRAME:
-                raise BrowserAdapterError("protocol_frame_too_large")
+            length = _parse_frame_length(line)
             body = bytearray(chunk[newline + 1 :])
             while len(body) < length:
                 if time.monotonic() >= deadline:

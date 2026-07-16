@@ -678,6 +678,48 @@ def _run_failure_case(monkeypatch, tmp_path, session_cls, *, headed=False, confi
     return result[0], root / "run-801", finished
 
 
+def test_malformed_observation_response_fails_closed_and_is_durable(monkeypatch, tmp_path):
+    class InvalidObservationSession(FakeSession):
+        starts = 0
+
+        @classmethod
+        def start(cls, **kwargs):
+            return cls(kwargs["session_manifest"])
+
+        def observe(self):
+            payload = _payload()
+            payload["fields"] = [{
+                "target_id": "field",
+                "field_key": "field",
+                "kind": "text",
+                "visible": "false",
+                "enabled": True,
+                "value": None,
+                "valid": True,
+                "will_validate": True,
+            }]
+            return payload
+
+    result, run_dir, finished = _run_failure_case(
+        monkeypatch,
+        tmp_path,
+        InvalidObservationSession,
+    )
+
+    assert result["status"] == "failed"
+    assert result["reason_code"] == "browser_error"
+    failure = json.loads((run_dir / "browser_failure.json").read_text(encoding="utf-8"))
+    assert failure["stage"] == "observation"
+    assert failure["operation"] == "observe"
+    assert failure["code"] == "protocol_invalid_response"
+    assert failure["no_final_submit"] is True
+    manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert manifest["stage"] == "failed"
+    assert manifest["no_final_submit"] is True
+    assert "prepared" not in manifest["stage"]
+    assert finished[-1]["reason_code"] == "browser_error"
+
+
 @pytest.mark.parametrize(
     ("failure", "stage", "operation"),
     (

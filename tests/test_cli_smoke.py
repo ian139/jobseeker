@@ -351,6 +351,102 @@ def test_cli_backlog_list_does_not_mutate_database(tmp_path: Path, capsys) -> No
         connection.close()
 
 
+
+def test_cli_backlog_show_returns_public_fields_description_and_no_raw_json(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    _seed_cli_backlog(db)
+    before = db.read_bytes()
+
+    assert main(["--db", str(db), "backlog-show", "1"]) == 0
+    output = capsys.readouterr().out
+    payload = json.loads(output)
+
+    assert set(payload) == {*cli_mod._BACKLOG_PUBLIC_FIELDS, "description"}
+    assert payload["id"] == 1
+    assert payload["source_job_id"] == "queued-late"
+    assert payload["description"] == "description"
+    assert "raw_json" not in payload
+    assert "hidden" not in output
+    assert db.read_bytes() == before
+
+
+@pytest.mark.parametrize(("job_id", "status"), [(1, "queued"), (4, "in_progress"), (5, "archived")])
+def test_cli_backlog_show_supports_all_backlog_statuses(
+    tmp_path: Path, capsys, job_id: int, status: str
+) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    _seed_cli_backlog(db)
+
+    assert main(["backlog-show", "--db", str(db), str(job_id)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == status
+    assert payload["id"] == job_id
+
+
+def test_cli_backlog_show_truncates_plain_text_and_preserves_null_description(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    _seed_cli_backlog(db)
+    connection = connect(db)
+    try:
+        connection.execute(
+            "UPDATE jobs SET description = ? WHERE id = 1",
+            (
+                "<p>Start</p><script>secret-from-script</script><p>"
+                + ("x" * (cli_mod.MAX_BACKLOG_DESCRIPTION_CHARS + 100))
+                + "</p>",
+            ),
+        )
+        connection.execute("UPDATE jobs SET description = NULL WHERE id = 5")
+        connection.commit()
+    finally:
+        connection.close()
+    before = db.read_bytes()
+
+    assert main(["--db", str(db), "backlog-show", "1"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["description"].startswith("Start\n")
+    assert len(shown["description"]) <= cli_mod.MAX_BACKLOG_DESCRIPTION_CHARS
+    assert "<p>" not in shown["description"]
+    assert "secret-from-script" not in shown["description"]
+    assert db.read_bytes() == before
+
+    assert main(["--db", str(db), "backlog-show", "5"]) == 0
+    assert json.loads(capsys.readouterr().out)["description"] is None
+    assert db.read_bytes() == before
+
+
+def test_cli_backlog_show_unknown_id_uses_database_error_without_mutation(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    _seed_cli_backlog(db)
+    before = db.read_bytes()
+
+    assert main(["--db", str(db), "backlog-show", "9999"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == '{"error": {"code": "database_error", "message": "database operation failed"}}\n'
+    assert db.read_bytes() == before
+
+
+def test_cli_backlog_show_missing_db_uses_database_error_without_creating_file(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "missing.sqlite3"
+
+    assert main(["backlog-show", "--db", str(db), "1"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == '{"error": {"code": "database_error", "message": "database operation failed"}}\n'
+    assert not db.exists()
+
+
+@pytest.mark.parametrize("job_id", ["0", "-1", "not-an-id"])
+def test_cli_backlog_show_rejects_invalid_id_before_db_work(tmp_path: Path, monkeypatch, job_id: str) -> None:
+    def fail_connect(*args, **kwargs):
+        pytest.fail("database opened before backlog-show ID validation")
+
+    monkeypatch.setattr(cli_mod, "connect_read_only", fail_connect)
+    with pytest.raises(SystemExit) as exc:
+        main(["--db", str(tmp_path / "jobs.sqlite3"), "backlog-show", job_id])
+    assert exc.value.code == 2
+
 def test_cli_init_db_rejects_group_readable_parent_without_leaking_details(tmp_path: Path, capsys):
     parent = tmp_path / "shared"
     parent.mkdir()

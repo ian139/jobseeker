@@ -123,6 +123,7 @@ Use `import-feed --source NAME` to record an exact source value for imported job
 |---|---|
 | `init-db` | Initialize the SQLite jobs/sync database |
 | `backlog-list` | List backlog jobs without claiming or mutating them; opens an existing SQLite database read-only and fails with `database_error` without creating a missing path |
+| `backlog-show JOB_ID` | Show one backlog job's allow-listed fields and bounded plain-text description without claiming or mutating it; opens an existing SQLite database read-only and never exposes `raw_json` |
 | `backlog-archive` | Archive explicitly named queued job IDs without deleting rows; requires `--confirm` and never claims or requeues jobs |
 | `theirstack-preview` | Preview the unfiltered TheirStack total for a source profile without saving jobs; an ATS flag is descriptive only |
 | `theirstack-sync` | Paid-fetch full jobs, then filter pinned Greenhouse/Lever routes before upsert; requires `--paid-fetch` or `THEIRSTACK_ENABLE_PAID_FETCH=true` |
@@ -134,6 +135,8 @@ Use `import-feed --source NAME` to record an exact source value for imported job
 | `autofill-review retry` | Queue an explicit retry for a reviewed run |
 
 `backlog-list` accepts `--status {queued,in_progress,archived}`, `--limit 1-100`, and an optional exact `--source` value (non-empty, at most 128 characters). It never initializes or writes the database, so a missing `--db` path remains absent; source-filtered totals and pending counts are scoped to that source.
+
+`backlog-show JOB_ID` requires a positive integer and reads one queued, in-progress, or archived row through the existing read-only SQLite connection. It returns the same allow-listed job fields as `backlog-list` plus a nullable description capped at 12,000 characters after plain-text conversion; `raw_json` and embedded metadata are never returned. Missing databases and unknown IDs use the fixed `database_error` response, and the command performs no claim, status change, archive, or network action.
 
 `backlog-archive JOB_ID... --confirm` accepts 1-100 positive, unique IDs. The command uses an all-or-nothing queued-only compare-and-set: missing, `in_progress`, or already archived IDs reject the entire request without changing any job row. URL-less queued rows are eligible. Its JSON output contains only the sorted archived IDs and count; `backlog-list` remains read-only and reports the updated pending count.
 

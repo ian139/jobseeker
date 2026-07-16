@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from collections.abc import Mapping
 
+from html.parser import HTMLParser
+
 from . import __version__
 from .application import (
     AnnotationError,
@@ -113,6 +115,55 @@ _BACKLOG_PUBLIC_FIELDS = (
     "discovered_at",
     "status",
 )
+MAX_BACKLOG_DESCRIPTION_CHARS = 12_000
+
+
+class _BacklogPlainTextParser(HTMLParser):
+    """Extract bounded plain text without exposing markup or embedded scripts."""
+
+    _BLOCK_TAGS = frozenset({"article", "br", "div", "li", "p", "section", "tr"})
+    _IGNORED_TAGS = frozenset({"script", "style", "template"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._ignored_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        normalized = tag.lower()
+        if normalized in self._IGNORED_TAGS:
+            self._ignored_depth += 1
+        elif not self._ignored_depth and normalized in self._BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        normalized = tag.lower()
+        if normalized in self._IGNORED_TAGS:
+            self._ignored_depth = max(0, self._ignored_depth - 1)
+        elif not self._ignored_depth and normalized in self._BLOCK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._ignored_depth:
+            self.parts.append(data)
+
+
+def _safe_backlog_description(raw: object) -> str | None:
+    """Return bounded text-only listing description, preserving nullability."""
+    if raw is None:
+        return None
+    if type(raw) is not str:
+        raise _CliFailure("database_error")
+    parser = _BacklogPlainTextParser()
+    parser.feed(raw[: MAX_BACKLOG_DESCRIPTION_CHARS + 1])
+    parser.close()
+    text = "".join(parser.parts)
+    text = re.sub(r"\r\n?", "\n", text)
+    text = re.sub(r"[ \t]*\n[ \t]*", "\n", text)
+    return text.strip()[:MAX_BACKLOG_DESCRIPTION_CHARS]
+
+
 _PUBLIC_ERROR_MESSAGES = {
     "invalid_input": "autofill input was rejected",
     "artifact_root_error": "artifact root was rejected",
@@ -521,6 +572,17 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"exact source value to list, non-empty and at most {MAX_BACKLOG_SOURCE_CHARS} characters",
     )
     backlog_list.add_argument("--limit", type=int, default=25, help="maximum jobs to list, 1-100")
+
+    backlog_show = sub.add_parser(
+        "backlog-show",
+        help="show one backlog job without claiming or mutating it",
+    )
+    backlog_show.add_argument(
+        "--db",
+        default=argparse.SUPPRESS,
+        help="SQLite database path (also accepted as the global option before the command)",
+    )
+    backlog_show.add_argument("job_id", type=int, metavar="JOB_ID", help="positive backlog job ID to show")
 
     backlog_archive = sub.add_parser(
         "backlog-archive",
@@ -1130,6 +1192,12 @@ def _validate_backlog_list_args(parser: argparse.ArgumentParser, args: argparse.
         )
 
 
+def _validate_backlog_show_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject backlog-show controls before opening SQLite."""
+    if type(args.job_id) is not int or args.job_id <= 0:
+        parser.error("backlog-show JOB_ID must be a positive integer")
+
+
 def _run_backlog_list(args: argparse.Namespace) -> int:
     connection = None
     try:
@@ -1191,12 +1259,48 @@ def _run_backlog_list(args: argparse.Namespace) -> int:
             _close_database(connection)
 
 
+def _run_backlog_show(args: argparse.Namespace) -> int:
+    connection = None
+    try:
+        try:
+            connection = connect_read_only(args.db)
+        except FileNotFoundError as exc:
+            raise _CliFailure("database_error") from exc
+        except (PermissionError, OSError) as exc:
+            raise _CliFailure("database_privacy_error") from exc
+        try:
+            row = connection.execute(
+                """
+                SELECT id, source, source_job_id, canonical_url, title, company,
+                       location, remote, posted_at, discovered_at, status,
+                       substr(description, 1, ?) AS description
+                FROM jobs
+                WHERE id = ?
+                """,
+                (MAX_BACKLOG_DESCRIPTION_CHARS + 1, args.job_id),
+            ).fetchone()
+        except OverflowError as exc:
+            raise _CliFailure("database_error") from exc
+        if row is None or type(row["status"]) is not str or row["status"] not in _BACKLOG_STATUSES:
+            raise _CliFailure("database_error")
+        job = {field: row[field] for field in _BACKLOG_PUBLIC_FIELDS}
+        job["description"] = _safe_backlog_description(row["description"])
+        print(json.dumps(job, sort_keys=True))
+        return 0
+    finally:
+        if connection is not None:
+            _close_database(connection)
+
+
 def _run_database_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     connection = None
     try:
         if args.command == "backlog-list":
             _validate_backlog_list_args(parser, args)
             return _run_backlog_list(args)
+        if args.command == "backlog-show":
+            _validate_backlog_show_args(parser, args)
+            return _run_backlog_show(args)
         if args.command == "backlog-archive":
             _validate_backlog_archive_args(args)
             return _run_backlog_archive(args)

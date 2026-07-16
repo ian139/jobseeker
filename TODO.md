@@ -107,6 +107,8 @@ every future adapter and preference feature.
 
 - [x] Add read-only `backlog-list` inspection with validated status/limit filters, deterministic ordering, stable public JSON rows, total/pending counts, and no mutation/claim/network behavior. Coverage is in `tests/test_cli_smoke.py` and `tests/test_backlog_ingestion.py`.
 
+- [x] Enforce `backlog-list` read-only SQLite access without creating missing databases, while preserving writable behavior for ingestion and application commands. Coverage is in `tests/test_cli_smoke.py` and `tests/test_application_claims.py`; command behavior is documented in `README.md`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

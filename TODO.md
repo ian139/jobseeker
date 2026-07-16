@@ -79,6 +79,8 @@ every future adapter and preference feature.
 
 - [x] Add guarded ATS location autofill from explicit profile facts, with safe-field validation and workflow coverage in `tests/test_application_profile.py`.
 
+- [x] Thread the selected ATS policy through inference, planning, and safe-button eligibility so final-like controls remain rejected consistently across adapters. Coverage is in `tests/test_application_pipeline.py`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

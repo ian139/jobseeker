@@ -33,6 +33,7 @@ from .application_preferences import (
     PreferenceValidationError,
     load_application_preferences,
 )
+from .backlog import count_backlog
 from .application_profiles import load_application_profile_preset
 from .db import (
     REASON_STATUS,
@@ -90,6 +91,20 @@ _REVIEW_PUBLIC_FIELDS = frozenset(
 _REVIEW_STATUSES = frozenset({"running", "review_ready", "manual", "blocked", "failed"})
 _REVIEW_OUTCOMES = frozenset({"submitted", "skipped", "retry"})
 _REVIEW_WINDOW_STATES = frozenset({"open", "starting", "prepared", "closed", "stale", "failed", "none", "unknown"})
+_BACKLOG_STATUSES = frozenset({"queued", "in_progress", "archived"})
+_BACKLOG_PUBLIC_FIELDS = (
+    "id",
+    "source",
+    "source_job_id",
+    "canonical_url",
+    "title",
+    "company",
+    "location",
+    "remote",
+    "posted_at",
+    "discovered_at",
+    "status",
+)
 _PUBLIC_ERROR_MESSAGES = {
     "invalid_input": "autofill input was rejected",
     "artifact_root_error": "artifact root was rejected",
@@ -473,6 +488,19 @@ def build_parser() -> argparse.ArgumentParser:
     import_feed.add_argument("--base-url", help="source feed base URL; defaults to JOB_SOURCE_BASE_URL when unset")
 
     preview = sub.add_parser("theirstack-preview", help="preview filtered TheirStack match count without persisting jobs")
+    backlog_list = sub.add_parser("backlog-list", help="inspect backlog jobs without claiming or mutating them")
+    backlog_list.add_argument(
+        "--db",
+        default=argparse.SUPPRESS,
+        help="SQLite database path (also accepted as the global option before the command)",
+    )
+    backlog_list.add_argument(
+        "--status",
+        choices=tuple(sorted(_BACKLOG_STATUSES)),
+        default="queued",
+        help="backlog status to list",
+    )
+    backlog_list.add_argument("--limit", type=int, default=25, help="maximum jobs to list, 1-100")
     _add_source_profile_argument(preview)
     _add_theirstack_ats_argument(preview)
 
@@ -996,9 +1024,58 @@ def _run_autofill(args: argparse.Namespace) -> list[dict[str, object]]:
         raise _CliFailure("artifact_root_error") from exc
 
 
+def _validate_backlog_list_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject backlog-list controls before opening SQLite."""
+    if args.status not in _BACKLOG_STATUSES:
+        parser.error("backlog-list --status is unsupported")
+    if type(args.limit) is not int or not 1 <= args.limit <= 100:
+        parser.error("backlog-list --limit must be between 1 and 100")
+
+
+def _run_backlog_list(args: argparse.Namespace) -> int:
+    connection = None
+    try:
+        try:
+            connection = connect(args.db)
+        except (PermissionError, OSError) as exc:
+            raise _CliFailure("database_privacy_error") from exc
+        counts = count_backlog(connection)
+        rows = connection.execute(
+            """
+            SELECT id, source, source_job_id, canonical_url, title, company,
+                   location, remote, posted_at, discovered_at, status
+            FROM jobs
+            WHERE status = ?
+            ORDER BY posted_at DESC NULLS LAST, first_seen_at ASC, id ASC
+            LIMIT ?
+            """,
+            (args.status, args.limit),
+        ).fetchall()
+        jobs = [{field: row[field] for field in _BACKLOG_PUBLIC_FIELDS} for row in rows]
+        print(
+            json.dumps(
+                {
+                    "jobs": jobs,
+                    "limit": args.limit,
+                    "pending": counts["pending"],
+                    "status": args.status,
+                    "total": counts["total"],
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    finally:
+        if connection is not None:
+            _close_database(connection)
+
+
 def _run_database_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     connection = None
     try:
+        if args.command == "backlog-list":
+            _validate_backlog_list_args(parser, args)
+            return _run_backlog_list(args)
         try:
             connection = connect(args.db)
             init_db(connection)

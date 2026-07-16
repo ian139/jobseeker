@@ -5,6 +5,9 @@ import pytest
 from pathlib import Path
 
 import jobs_assistant.cli as cli_mod
+from jobs_assistant.backlog import upsert_job
+from jobs_assistant.contracts import JobInput
+from jobs_assistant.db import connect, init_db
 
 from jobs_assistant.cli import job_scrape_main, main
 from jobs_assistant.theirstack import TheirStackClient
@@ -96,6 +99,186 @@ def test_cli_init_db(tmp_path: Path):
     db = tmp_path / "jobs.sqlite3"
     assert main(["--db", str(db), "init-db"]) == 0
     assert db.exists()
+
+
+def _seed_cli_backlog(db: Path) -> None:
+    connection = connect(db)
+    init_db(connection)
+    connection.executemany(
+        """
+        INSERT INTO jobs (
+            source, source_job_id, canonical_url, title, company, location,
+            remote, posted_at, discovered_at, description, raw_json,
+            first_seen_at, last_seen_at, status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (
+                "feed",
+                "queued-late",
+                "https://jobs.example.test/late",
+                "Late",
+                "Acme",
+                "Toronto",
+                1,
+                "2026-03-01",
+                "2026-01-03",
+                "description",
+                '{"secret":"hidden"}',
+                "2026-01-03",
+                "2026-01-03",
+                "queued",
+            ),
+            (
+                "feed",
+                "queued-early",
+                "https://jobs.example.test/early",
+                "Early",
+                "Acme",
+                "Montreal",
+                0,
+                "2026-02-01",
+                "2026-01-02",
+                "description",
+                '{"secret":"hidden"}',
+                "2026-01-02",
+                "2026-01-02",
+                "queued",
+            ),
+            (
+                "feed",
+                "queued-no-date",
+                "https://jobs.example.test/no-date",
+                "No date",
+                "Acme",
+                None,
+                None,
+                None,
+                "2026-01-01",
+                "description",
+                '{"secret":"hidden"}',
+                "2026-01-01",
+                "2026-01-01",
+                "queued",
+            ),
+            (
+                "feed",
+                "in-progress",
+                "https://jobs.example.test/in-progress",
+                "In progress",
+                "Acme",
+                "Remote",
+                1,
+                "2026-04-01",
+                "2026-01-04",
+                "description",
+                '{"secret":"hidden"}',
+                "2026-01-04",
+                "2026-01-04",
+                "in_progress",
+            ),
+            (
+                "feed",
+                "archived",
+                "https://jobs.example.test/archived",
+                "Archived",
+                "Acme",
+                "Remote",
+                0,
+                "2026-05-01",
+                "2026-01-05",
+                "description",
+                '{"secret":"hidden"}',
+                "2026-01-05",
+                "2026-01-05",
+                "archived",
+            ),
+        ],
+    )
+    connection.commit()
+    connection.close()
+
+
+def test_cli_backlog_list_empty_db(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    assert main(["--db", str(db), "init-db"]) == 0
+    capsys.readouterr()
+
+    assert main(["--db", str(db), "backlog-list"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "jobs": [],
+        "limit": 25,
+        "pending": 0,
+        "status": "queued",
+        "total": 0,
+    }
+
+
+def test_cli_backlog_list_filters_orders_and_limits_without_raw_json(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    _seed_cli_backlog(db)
+
+    assert main(["--db", str(db), "backlog-list", "--status", "queued", "--limit", "2"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "queued"
+    assert payload["limit"] == 2
+    assert payload["total"] == 5
+    assert payload["pending"] == 3
+    assert [job["source_job_id"] for job in payload["jobs"]] == ["queued-late", "queued-early"]
+    assert set(payload["jobs"][0]) == {
+        "id",
+        "source",
+        "source_job_id",
+        "canonical_url",
+        "title",
+        "company",
+        "location",
+        "remote",
+        "posted_at",
+        "discovered_at",
+        "status",
+    }
+    assert "hidden" not in json.dumps(payload)
+
+    assert main(["backlog-list", "--db", str(db), "--status", "archived"]) == 0
+    archived = json.loads(capsys.readouterr().out)
+    assert [job["source_job_id"] for job in archived["jobs"]] == ["archived"]
+    assert archived["jobs"][0]["status"] == "archived"
+    assert archived["pending"] == 3
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        ["--limit", "0"],
+        ["--limit", "101"],
+        ["--status", "unsupported"],
+    ],
+)
+def test_cli_backlog_list_rejects_invalid_arguments_before_db_work(tmp_path: Path, monkeypatch, option) -> None:
+    def fail_connect(*args, **kwargs):
+        pytest.fail("database opened before backlog-list argument validation")
+
+    monkeypatch.setattr(cli_mod, "connect", fail_connect)
+    with pytest.raises(SystemExit) as exc:
+        main(["--db", str(tmp_path / "jobs.sqlite3"), "backlog-list", *option])
+    assert exc.value.code == 2
+
+
+def test_cli_backlog_list_does_not_mutate_database(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    _seed_cli_backlog(db)
+    before = db.read_bytes()
+
+    assert main(["--db", str(db), "backlog-list", "--status", "in_progress"]) == 0
+    capsys.readouterr()
+    assert db.read_bytes() == before
+    connection = connect(db)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 5
+        assert connection.execute("SELECT COUNT(*) FROM jobs WHERE status = 'queued'").fetchone()[0] == 3
+    finally:
+        connection.close()
 
 
 def test_cli_init_db_rejects_group_readable_parent_without_leaking_details(tmp_path: Path, capsys):

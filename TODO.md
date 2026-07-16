@@ -123,7 +123,11 @@ every future adapter and preference feature.
 
 - [x] Extend read-only `backlog-list` with validated parameterized `--offset` pagination through 100,000 rows while preserving omitted-output compatibility, exact filters, deterministic ordering, stable counts, and no mutation/network/database creation. Coverage is in `tests/test_cli_smoke.py`; behavior is documented in `README.md`.
 
-- [x] Harden native submit-typed non-final ATS continuation with explicit permit evidence, approved same-job route identity across re-observation, distinct unsafe-navigation/network failures, durable before/after evidence, and zero final-submit calls. Coverage is in `tests/test_application_workflow.py`, `tests/test_application_pipeline.py`, and `tests/test_application_contracts.py`.
+- [x] Harden native submit-typed non-final ATS continuation with explicit permit evidence, approved same-job route identity across re-observation, distinct unsafe-navigation/network failures, durable before/after evidence, and zero final-submit calls. Direct continuation assertions are in `tests/test_application_workflow.py`; semantic-signature and final-target schema coverage is in `tests/test_application_pipeline.py` and `tests/test_application_contracts.py`.
+
+- [x] Promote validated read-only backlog listing query into a typed domain API (`list_backlog_jobs`) with exact status/source/limit/offset validation, deterministic ordering, stable counts, and no duplicate CLI SQL. Coverage is in `tests/test_backlog_ingestion.py` and `tests/test_cli_smoke.py`.
+
+- [ ] Native `<input type="button">` ATS continuation support was attempted but blocked by integration test failures; the safe-click gate and runner remain unchanged. Revisit when a clean browser fixture and smoke path are available.
 
 ## Reference-only history
 

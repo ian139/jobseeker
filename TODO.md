@@ -77,6 +77,8 @@ every future adapter and preference feature.
 - [x] Reject malformed TheirStack/feed envelopes instead of silently accepting unsupported shapes; preserve strict source metadata normalization. Coverage is in `tests/test_job_source.py` and `tests/test_theirstack_sync.py`.
 - [x] Harden browser framing and response envelopes with canonical length parsing, schema validation, poisoned sessions, and durable malformed-observation failure evidence. Coverage is in `tests/test_puppeteer_adapter.py` and `tests/test_application_workflow.py`.
 
+- [x] Add guarded ATS location autofill from explicit profile facts, with safe-field validation and workflow coverage in `tests/test_application_profile.py`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

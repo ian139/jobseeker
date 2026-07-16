@@ -131,7 +131,7 @@ uv run --frozen jobs-assistant import-feed
 | `autofill-review complete` | Record the human's `submitted` or `skipped` decision |
 | `autofill-review retry` | Queue an explicit retry for a reviewed run |
 
-`backlog-list` accepts `--status {queued,in_progress,archived}` and `--limit 1-100`. It never initializes or writes the database, so a missing `--db` path remains absent.
+`backlog-list` accepts `--status {queued,in_progress,archived}`, `--limit 1-100`, and an optional exact `--source` value (non-empty, at most 128 characters). It never initializes or writes the database, so a missing `--db` path remains absent; source-filtered totals and pending counts are scoped to that source.
 
 `backlog-archive JOB_ID... --confirm` accepts 1-100 positive, unique IDs. The command uses an all-or-nothing queued-only compare-and-set: missing, `in_progress`, or already archived IDs reject the entire request without changing any job row. URL-less queued rows are eligible. Its JSON output contains only the sorted archived IDs and count; `backlog-list` remains read-only and reports the updated pending count.
 

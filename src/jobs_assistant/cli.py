@@ -99,6 +99,7 @@ _REVIEW_STATUSES = frozenset({"running", "review_ready", "manual", "blocked", "f
 _REVIEW_OUTCOMES = frozenset({"submitted", "skipped", "retry"})
 _REVIEW_WINDOW_STATES = frozenset({"open", "starting", "prepared", "closed", "stale", "failed", "none", "unknown"})
 _BACKLOG_STATUSES = frozenset({"queued", "in_progress", "archived"})
+MAX_BACKLOG_SOURCE_CHARS = 128
 _BACKLOG_PUBLIC_FIELDS = (
     "id",
     "source",
@@ -509,6 +510,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=tuple(sorted(_BACKLOG_STATUSES)),
         default="queued",
         help="backlog status to list",
+    )
+    backlog_list.add_argument(
+        "--source",
+        help=f"exact source value to list, non-empty and at most {MAX_BACKLOG_SOURCE_CHARS} characters",
     )
     backlog_list.add_argument("--limit", type=int, default=25, help="maximum jobs to list, 1-100")
 
@@ -1098,6 +1103,14 @@ def _validate_backlog_list_args(parser: argparse.ArgumentParser, args: argparse.
         parser.error("backlog-list --status is unsupported")
     if type(args.limit) is not int or not 1 <= args.limit <= 100:
         parser.error("backlog-list --limit must be between 1 and 100")
+    if args.source is not None and (
+        type(args.source) is not str
+        or not args.source.strip()
+        or len(args.source) > MAX_BACKLOG_SOURCE_CHARS
+    ):
+        parser.error(
+            f"backlog-list --source must be a non-empty string of at most {MAX_BACKLOG_SOURCE_CHARS} characters"
+        )
 
 
 def _run_backlog_list(args: argparse.Namespace) -> int:
@@ -1109,18 +1122,39 @@ def _run_backlog_list(args: argparse.Namespace) -> int:
             raise _CliFailure("database_error") from exc
         except (PermissionError, OSError) as exc:
             raise _CliFailure("database_privacy_error") from exc
-        counts = count_backlog(connection)
-        rows = connection.execute(
-            """
-            SELECT id, source, source_job_id, canonical_url, title, company,
-                   location, remote, posted_at, discovered_at, status
-            FROM jobs
-            WHERE status = ?
-            ORDER BY posted_at DESC NULLS LAST, first_seen_at ASC, id ASC
-            LIMIT ?
-            """,
-            (args.status, args.limit),
-        ).fetchall()
+        if args.source is None:
+            counts = count_backlog(connection)
+            rows = connection.execute(
+                """
+                SELECT id, source, source_job_id, canonical_url, title, company,
+                       location, remote, posted_at, discovered_at, status
+                FROM jobs
+                WHERE status = ?
+                ORDER BY posted_at DESC NULLS LAST, first_seen_at ASC, id ASC
+                LIMIT ?
+                """,
+                (args.status, args.limit),
+            ).fetchall()
+        else:
+            count_row = connection.execute(
+                "SELECT COUNT(*) AS total, SUM(status = 'queued') AS pending FROM jobs WHERE source = ?",
+                (args.source,),
+            ).fetchone()
+            counts = {
+                "total": int(count_row["total"]),
+                "pending": int(count_row["pending"] or 0),
+            }
+            rows = connection.execute(
+                """
+                SELECT id, source, source_job_id, canonical_url, title, company,
+                       location, remote, posted_at, discovered_at, status
+                FROM jobs
+                WHERE status = ? AND source = ?
+                ORDER BY posted_at DESC NULLS LAST, first_seen_at ASC, id ASC
+                LIMIT ?
+                """,
+                (args.status, args.source, args.limit),
+            ).fetchall()
         jobs = [{field: row[field] for field in _BACKLOG_PUBLIC_FIELDS} for row in rows]
         print(
             json.dumps(

@@ -257,6 +257,65 @@ def test_cli_backlog_list_filters_orders_and_limits_without_raw_json(tmp_path: P
     assert archived["jobs"][0]["status"] == "archived"
     assert archived["pending"] == 3
 
+def test_cli_backlog_list_source_filters_exactly_and_scopes_counts(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    _seed_cli_backlog(db)
+    connection = connect(db)
+    try:
+        connection.execute(
+            "UPDATE jobs SET source = ? WHERE source_job_id IN (?, ?)",
+            ("other-feed", "queued-early", "archived"),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    before = db.read_bytes()
+
+    assert main(["--db", str(db), "backlog-list", "--source", "feed", "--status", "queued"]) == 0
+    feed = json.loads(capsys.readouterr().out)
+    assert feed["total"] == 3
+    assert feed["pending"] == 2
+    assert [job["source_job_id"] for job in feed["jobs"]] == ["queued-late", "queued-no-date"]
+    assert {job["source"] for job in feed["jobs"]} == {"feed"}
+    assert db.read_bytes() == before
+
+    assert main(["--db", str(db), "backlog-list", "--source", "other-feed", "--status", "archived"]) == 0
+    other = json.loads(capsys.readouterr().out)
+    assert other["total"] == 2
+    assert other["pending"] == 1
+    assert [job["source_job_id"] for job in other["jobs"]] == ["archived"]
+    assert db.read_bytes() == before
+
+    injection = "feed' OR 1=1 --"
+    assert main(["--db", str(db), "backlog-list", "--source", injection]) == 0
+    literal = json.loads(capsys.readouterr().out)
+    assert literal["jobs"] == []
+    assert literal["total"] == 0
+    assert literal["pending"] == 0
+    assert db.read_bytes() == before
+
+
+def test_cli_backlog_list_source_missing_db_fails_without_creating_file(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "missing.sqlite3"
+
+    assert main(["--db", str(db), "backlog-list", "--source", "feed"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == '{"error": {"code": "database_error", "message": "database operation failed"}}\n'
+    assert not db.exists()
+
+
+@pytest.mark.parametrize("source", ["", "   ", "x" * 129])
+def test_cli_backlog_list_rejects_invalid_source_before_db_work(tmp_path: Path, monkeypatch, source: str) -> None:
+    def fail_connect(*args, **kwargs):
+        pytest.fail("database opened before backlog-list source validation")
+
+    monkeypatch.setattr(cli_mod, "connect_read_only", fail_connect)
+    with pytest.raises(SystemExit) as exc:
+        main(["--db", str(tmp_path / "jobs.sqlite3"), "backlog-list", "--source", source])
+    assert exc.value.code == 2
+
 
 @pytest.mark.parametrize(
     "option",

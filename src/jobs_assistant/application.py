@@ -419,6 +419,7 @@ def _observation_semantic_signature(observation: PageObservation) -> tuple[Any, 
         )
         for field in observation.fields
     )
+    final_target_ids = frozenset(observation.final_submit_target_ids)
     buttons = tuple(
         (
             button.frame_id,
@@ -439,6 +440,7 @@ def _observation_semantic_signature(observation: PageObservation) -> tuple[Any, 
             button.visible,
             button.enabled,
             button.safety_descriptors,
+            button.target_id in final_target_ids,
         )
         for button in observation.buttons
     )
@@ -449,6 +451,7 @@ def _observation_semantic_signature(observation: PageObservation) -> tuple[Any, 
         fields,
         buttons,
         len(observation.final_submit_target_ids),
+        tuple(button.target_id in final_target_ids for button in observation.buttons),
         tuple(error.text for error in observation.errors),
         tuple((blocker.code, blocker.text) for blocker in observation.blockers),
     )
@@ -1782,10 +1785,23 @@ async def run_application_workflow(
                         final_plan = AutofillPlan(status="manual", reason_code=PublicReasonCode.page_validation_error)
                         reason = PublicReasonCode.page_validation_error
                         break
+                    final_target_ids = frozenset(observation.final_submit_target_ids)
                     current_signature = (
                         observation.url,
                         tuple((field.field_key, field.kind, field.required, field.valid, field.file_count, field.value) for field in observation.fields),
-                        tuple((button.click_key, button.text, button.element_kind, button.button_type, button.effective_action_url, button.href_url) for button in observation.buttons),
+                        tuple(
+                            (
+                                button.click_key,
+                                button.text,
+                                button.element_kind,
+                                button.button_type,
+                                button.effective_action_url,
+                                button.href_url,
+                                button.target_id in final_target_ids,
+                            )
+                            for button in observation.buttons
+                        ),
+                        len(final_target_ids),
                     )
                     if attempted_click_signature is not None:
                         prior_signature = attempted_click_signature

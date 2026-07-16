@@ -120,6 +120,20 @@ def test_sync_response_requires_paid_enablement_before_persisting():
     seen, inserted, updated = sync_theirstack_response(conn, response, paid_fetch_enabled=True)
     assert (seen, inserted, updated) == (1, 1, 0)
 
+def test_sync_rejects_malformed_secondary_envelope_key_before_upsert():
+    conn = connect(":memory:")
+    init_db(conn)
+    response = {
+        "data": [
+            {"id": "valid", "title": "Engineer", "company_name": "Acme", "url": "https://a.test/apply"},
+        ],
+        "jobs": {},
+    }
+
+    with pytest.raises(TheirStackError):
+        sync_theirstack_response(conn, response, paid_fetch_enabled=True)
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
 
 def test_preview_payload_includes_profile_keys():
     """Profile payloads carry job_title_or, job_description_pattern_or, and posted_at_max_age_days."""

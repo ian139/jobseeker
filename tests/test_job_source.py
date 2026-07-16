@@ -1,5 +1,9 @@
+import httpx
+import pytest
+
 from jobs_assistant.db import connect, init_db
-from jobs_assistant.job_source import import_source_jobs, normalize_source_job, source_job_to_input
+from jobs_assistant.job_source import fetch_source_jobs, import_source_jobs, normalize_source_job, source_job_to_input
+
 
 
 def test_source_job_normalization_stays_at_ingestion_boundary():
@@ -103,3 +107,47 @@ def test_import_source_jobs_dedupes_by_external_id():
     assert import_source_jobs(conn, [first]) == (1, 1, 0)
     assert import_source_jobs(conn, [second]) == (1, 0, 1)
     assert conn.execute("SELECT title FROM jobs").fetchone()["title"] == "Dev II"
+
+
+class _SourceClient:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def get(self, url, *, headers):
+        request = httpx.Request("GET", url)
+        return httpx.Response(200, json=self.payload, request=request)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        [{"id": "top-level"}],
+        {"jobs": []},
+        {"jobs": [{"id": "jobs"}]},
+        {"data": []},
+        {"data": [{"id": "data"}]},
+    ],
+)
+def test_fetch_source_jobs_accepts_supported_envelopes_and_empty_lists(payload):
+    assert fetch_source_jobs("https://feed.example", client=_SourceClient(payload)) == (
+        payload if isinstance(payload, list) else next(value for key, value in payload.items() if key in {"jobs", "data"})
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {},
+        {"results": []},
+        {"jobs": {}},
+        {"data": None},
+        [{"id": "valid"}, "malformed"],
+        {"data": [{"id": "valid"}, None]},
+        {"jobs": [{"id": "valid"}], "data": {}},
+    ],
+)
+def test_fetch_source_jobs_rejects_malformed_envelopes_and_items(payload):
+    with pytest.raises(ValueError):
+        fetch_source_jobs("https://feed.example", client=_SourceClient(payload))

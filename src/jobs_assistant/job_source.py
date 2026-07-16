@@ -44,6 +44,14 @@ def _remote_value(raw: dict[str, Any]) -> bool | None:
     return remote if isinstance(remote, bool) else None
 
 
+def _date_posted_value(raw: dict[str, Any]) -> str | None:
+    for key in ("date_posted", "posted_at"):
+        value = _non_empty_string(raw.get(key))
+        if value is not None:
+            return value
+    return None
+
+
 def normalize_source_job(raw: dict[str, Any]) -> SourceJob:
     external_id = raw.get("id") or raw.get("external_id") or raw.get("source_job_id")
     title = raw.get("title") or raw.get("job_title")
@@ -56,7 +64,7 @@ def normalize_source_job(raw: dict[str, Any]) -> SourceJob:
         company=None if company is None else str(company),
         listing_url=None if raw.get("listing_url") is None else str(raw.get("listing_url")),
         apply_url=None if (raw.get("apply_url") or raw.get("url")) is None else str(raw.get("apply_url") or raw.get("url")),
-        date_posted=None if (raw.get("date_posted") or raw.get("posted_at")) is None else str(raw.get("date_posted") or raw.get("posted_at")),
+        date_posted=_date_posted_value(raw),
         raw=raw,
         location=_location_value(raw),
         remote=_remote_value(raw),
@@ -95,9 +103,24 @@ def fetch_source_jobs(base_url: str, *, api_key: str | None = None, client: http
     response.raise_for_status()
     payload = response.json()
     if isinstance(payload, list):
-        return [item for item in payload if isinstance(item, dict)]
-    if isinstance(payload, dict):
-        items = payload.get("jobs") or payload.get("data") or []
-        if isinstance(items, list):
-            return [item for item in items if isinstance(item, dict)]
-    raise ValueError("job source returned unsupported JSON")
+        items = payload
+    elif isinstance(payload, dict):
+        selected: list[dict[str, Any]] | None = None
+        for key in ("jobs", "data"):
+            if key not in payload:
+                continue
+            candidate = payload[key]
+            if not isinstance(candidate, list):
+                raise ValueError(f"job source response field {key!r} is not a list")
+            if any(not isinstance(item, dict) for item in candidate):
+                raise ValueError(f"job source response field {key!r} contains a non-object job")
+            if selected is None:
+                selected = candidate
+        if selected is None:
+            raise ValueError("job source response is missing a recognized job-list key")
+        items = selected
+    else:
+        raise ValueError("job source returned unsupported JSON")
+    if any(not isinstance(item, dict) for item in items):
+        raise ValueError("job source response contains a non-object job")
+    return items

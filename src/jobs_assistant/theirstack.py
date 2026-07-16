@@ -325,13 +325,27 @@ def select_one_job_per_company(
 # --- HTTP client -------------------------------------------------------------
 
 
-def extract_jobs(response: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract job list from TheirStack response."""
+def extract_jobs(response: Any) -> list[dict[str, Any]]:
+    """Extract and validate the job list from a TheirStack response envelope."""
+    if not isinstance(response, dict):
+        raise TheirStackError("TheirStack returned non-object JSON response")
+    selected: list[dict[str, Any]] | None = None
     for key in ("data", "jobs", "results"):
-        items = response.get(key)
-        if isinstance(items, list):
-            return items
-    return []
+        if key not in response:
+            continue
+        items = response[key]
+        if not isinstance(items, list):
+            raise TheirStackError(f"TheirStack response field {key!r} is not a list")
+        if any(not isinstance(item, dict) for item in items):
+            raise TheirStackError(f"TheirStack response field {key!r} contains a non-object job")
+        if selected is None:
+            selected = items
+    if selected is not None:
+        return selected
+    raise TheirStackError(
+        "TheirStack response is missing a recognized job-list key "
+        "(expected one of: data, jobs, results)"
+    )
 
 
 def response_total_results(response: dict[str, Any]) -> int | None:
@@ -476,6 +490,50 @@ def _select_apply_url(raw: dict[str, Any], ats_filter: ATSFilter) -> Any:
     return None
 
 
+def _non_empty_string(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _description_value(raw: dict[str, Any]) -> str | None:
+    for key in ("description", "job_description", "description_text", "description_html"):
+        value = _non_empty_string(raw.get(key))
+        if value is not None:
+            return value
+    details = raw.get("details")
+    value = _non_empty_string(details)
+    if value is not None:
+        return value
+    if isinstance(details, dict):
+        for key in ("text", "html", "content", "value"):
+            value = _non_empty_string(details.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+def _location_value(raw: dict[str, Any]) -> str | None:
+    for key in ("location", "job_location", "city", "country_code"):
+        value = _non_empty_string(raw.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _date_posted_value(raw: dict[str, Any]) -> str | None:
+    for key in ("date_posted", "posted_at"):
+        value = _non_empty_string(raw.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _remote_value(raw: dict[str, Any]) -> bool | None:
+    remote = raw.get("remote")
+    return remote if type(remote) is bool else None
+
+
 def raw_job_to_input(raw: dict[str, Any], *, ats_filter: ATSFilter = "auto") -> JobInput:
     company = raw.get("company")
     company_name = ""
@@ -490,10 +548,10 @@ def raw_job_to_input(raw: dict[str, Any], *, ats_filter: ATSFilter = "auto") -> 
         url=None if apply_url is None else str(apply_url),
         title=str(raw.get("job_title") or raw.get("title") or "Untitled role"),
         company=company_name or "Unknown company",
-        location=None if raw.get("location") is None else str(raw.get("location")),
-        remote=bool(raw.get("remote")) if raw.get("remote") is not None else None,
-        posted_at=None if raw.get("date_posted") is None else str(raw.get("date_posted")),
-        description=None if raw.get("description") is None else str(raw.get("description")),
+        location=_location_value(raw),
+        remote=_remote_value(raw),
+        posted_at=_date_posted_value(raw),
+        description=_description_value(raw),
         raw=raw,
     )
 

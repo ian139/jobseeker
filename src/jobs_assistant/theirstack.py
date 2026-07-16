@@ -649,7 +649,7 @@ def raw_job_to_input(raw: dict[str, Any], *, ats_filter: ATSFilter = "auto") -> 
     if isinstance(company, dict):
         company_name = str(company.get("name") or "")
     company_name = company_name or str(raw.get("company_name") or raw.get("company") or "")
-    source_id = raw.get("id") or raw.get("job_id") or raw.get("theirStackId") or raw.get("theirstack_job_id") or raw.get("theirstack_id")
+    source_id = raw.get("id") or raw.get("job_id") or raw.get("theirStackId") or raw.get("theirstack_job_id") or raw.get("theirstack_id") or raw.get("external_id") or raw.get("source_job_id")
     apply_url = _select_apply_url(raw, ats_filter)
     return JobInput(
         source="theirstack",

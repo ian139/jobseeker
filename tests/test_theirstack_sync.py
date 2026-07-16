@@ -462,6 +462,54 @@ def test_sync_persists_jobs_in_db():
     assert row[0] == 2
 
 
+
+def test_sync_external_id_alias_without_url_updates_same_temporary_db_row(tmp_path):
+    conn = connect(tmp_path / "theirstack.sqlite3")
+    init_db(conn)
+    first = {
+        "external_id": "external-1",
+        "title": "Software Engineer",
+        "company_name": "Acme",
+    }
+    second = {
+        **first,
+        "title": "Senior Software Engineer",
+    }
+
+    assert sync_theirstack_response(conn, {"data": [first]}, paid_fetch_enabled=True) == (1, 1, 0)
+    assert sync_theirstack_response(conn, {"data": [second]}, paid_fetch_enabled=True) == (1, 0, 1)
+
+    row = conn.execute("SELECT source_job_id, canonical_url, title FROM jobs").fetchone()
+    assert (row["source_job_id"], row["canonical_url"], row["title"]) == (
+        "external-1",
+        None,
+        "Senior Software Engineer",
+    )
+
+
+def test_sync_rejects_record_without_id_or_url_transactionally(tmp_path):
+    conn = connect(tmp_path / "theirstack-invalid.sqlite3")
+    init_db(conn)
+    response = {
+        "data": [
+            {
+                "external_id": "valid",
+                "title": "Software Engineer",
+                "company_name": "Acme",
+            },
+            {
+                "title": "Malformed",
+                "company_name": "Beta",
+            },
+        ]
+    }
+
+    with pytest.raises(ValueError, match="source_job_id or url"):
+        sync_theirstack_response(conn, response, paid_fetch_enabled=True, one_per_company=False)
+
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
 def test_latest_sync_checkpoint_ignores_failed_runs():
     """latest_sync_checkpoint skips failed runs and returns the stored successful checkpoint."""
     from jobs_assistant.db import latest_sync_checkpoint, record_sync_run, update_sync_run

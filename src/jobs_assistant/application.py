@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 
@@ -940,6 +940,59 @@ def _safe_click_is_eligible(
     return page_url is not None and _same_origin(button.frame_url, page_url)
 
 
+def _continuation_permitted(
+    button: ObservedButton,
+    final_submit_target_ids: tuple[str, ...],
+    *,
+    ats_policy: str,
+    page_url: str | None,
+) -> bool:
+    """Return the explicit protocol permit for a native submit continuation."""
+    return (
+        str(button.button_type).lower() == "submit"
+        and _safe_click_is_eligible(
+            button,
+            final_submit_target_ids,
+            ats_policy=ats_policy,
+            page_url=page_url,
+        )
+    )
+
+
+def _application_route_identity(url: str, ats_policy: str) -> tuple[Any, ...] | None:
+    """Project an approved ATS URL to the identity used by continuation gates."""
+    try:
+        route = validate_ats_url(url, ats_policy)
+    except (BrowserAdapterError, TypeError, ValueError):
+        return None
+    if ats_policy == "lever":
+        parts = route.path.strip("/").split("/")
+        if len(parts) < 2:
+            return None
+        return ("lever_job", route.host, parts[0], parts[1])
+    if route.mode == "greenhouse_embed":
+        parsed = urlsplit(route.url)
+        try:
+            query = tuple(sorted(parse_qsl(parsed.query, keep_blank_values=True, strict_parsing=True)))
+        except ValueError:
+            return None
+        return (route.mode, route.host, route.path, query)
+    return (route.mode, route.host, route.path)
+
+
+def _continuation_route_is_approved(
+    expected: tuple[Any, ...] | None,
+    candidate: tuple[Any, ...] | None,
+) -> bool:
+    if expected is None or candidate is None:
+        return False
+    if expected == candidate:
+        return True
+    # A grnh.se short route has no job identity until its approved hosted
+    # redirect; retain the runner's one-time route establishment behavior.
+    return expected[0] == "greenhouse_short" and candidate[0] == "greenhouse_job"
+
+
 def _field_is_sensitive_button(button: ObservedButton) -> bool:
     try:
         return classify_descriptors(tuple(button.safety_descriptors)) is DescriptorSafety.SENSITIVE
@@ -1773,8 +1826,9 @@ def _action_evidence_payload(
     ats_policy: str,
     planned: list[dict[str, Any]],
     rejected: list[dict[str, Any]],
+    continuation_permit: bool | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "version": 2,
         "iteration": iteration,
         "observation_id": observation_id,
@@ -1785,6 +1839,9 @@ def _action_evidence_payload(
         "planned": planned,
         "rejected": rejected,
     }
+    if continuation_permit is not None:
+        payload["continuation_permit"] = continuation_permit
+    return payload
 
 
 
@@ -1975,6 +2032,9 @@ async def run_application_workflow(
                     validate_ats_url(url, adapter.name)
                 except BrowserAdapterError as exc:
                     raise RuntimeError(str(exc)) from exc
+                application_route_identity = _application_route_identity(url, adapter.name)
+                if application_route_identity is None:
+                    raise RuntimeError("invalid_application_url")
                 claim_result = _write_json_verified(
                     run,
                     "claim.json",
@@ -2125,6 +2185,7 @@ async def run_application_workflow(
                 cached_inference: dict[tuple[str, str], FieldAnswer] = {}
                 cached_click_key: str | None = None
                 attempted_mutation: tuple[str, str, str | bool] | None = None
+                continuation_route_identity: tuple[Any, ...] | None = None
                 attempted_click_signature: tuple[Any, ...] | None = None
                 executed_actions: list[dict[str, Any]] = []
                 final_plan: AutofillPlan | None = None
@@ -2134,6 +2195,7 @@ async def run_application_workflow(
                     observation_result: Any,
                     planned: list[dict[str, Any]],
                     rejected: list[dict[str, Any]],
+                    continuation_permit: bool | None = None,
                 ) -> Any:
                     if run is None or manifest_payload is None:
                         raise RuntimeError("manifest_error")
@@ -2147,6 +2209,7 @@ async def run_application_workflow(
                         ats_policy=adapter.name,
                         planned=planned,
                         rejected=rejected,
+                        continuation_permit=continuation_permit,
                     )
                     result = _write_json_verified(run, relative_path, evidence)
                     _manifest_set_iteration(
@@ -2220,6 +2283,18 @@ async def run_application_workflow(
                     )
                     observation = _observation_from_browser_payload(payload, iteration=iteration)
                     final_observation = observation
+                    if continuation_route_identity is not None:
+                        expected_route_identity = continuation_route_identity
+                        observed_route_identity = _application_route_identity(observation.url, adapter.name)
+                        if not _continuation_route_is_approved(expected_route_identity, observed_route_identity):
+                            raise _BrowserFailure(
+                                "observation",
+                                "route",
+                                "unsafe_navigation_target",
+                                iteration,
+                            )
+                        if expected_route_identity[0] == "greenhouse_short":
+                            continuation_route_identity = observed_route_identity
                     if attempted_mutation is not None:
                         attempted_key, attempted_kind, expected = attempted_mutation
                         retained_field = next((item for item in observation.fields if item.field_key == attempted_key and item.kind == attempted_kind), None)
@@ -2456,6 +2531,27 @@ async def run_application_workflow(
                     if conflict:
                         plan = AutofillPlan(status="manual", reason_code=PublicReasonCode.preexisting_value_conflict, skipped_target_ids=plan.skipped_target_ids)
                         planned = []
+                    continuation_permit: bool | None = None
+                    click_button_for_action: ObservedButton | None = None
+                    if planned and planned[0].get("action") == "click":
+                        click_button_for_action = next(
+                            (
+                                item
+                                for item in observation.buttons
+                                if item.target_id == planned[0]["target_id"]
+                            ),
+                            None,
+                        )
+                        continuation_permit = (
+                            _continuation_permitted(
+                                click_button_for_action,
+                                observation.final_submit_target_ids,
+                                ats_policy=adapter.name,
+                                page_url=observation.url,
+                            )
+                            if click_button_for_action is not None
+                            else False
+                        )
                     observation_path = f"iterations/{iteration:04d}/observation.json"
                     iteration_observation = _write_json_verified(
                         run,
@@ -2473,23 +2569,32 @@ async def run_application_workflow(
                         iteration_observation,
                         planned,
                         rejected,
+                        continuation_permit=continuation_permit,
                     )
                     if planned:
                         action = planned[0]
                         if action["action"] == "click":
                             cached_click_key = None
                             attempted_click_signature = current_signature
-                            click_button = next(
-                                (
-                                    item
-                                    for item in observation.buttons
-                                    if item.target_id == action["target_id"]
-                                ),
-                                None,
-                            )
-                            if click_button is None:
+                            click_button = click_button_for_action
+                            if click_button is None or not _safe_click_is_eligible(
+                                click_button,
+                                observation.final_submit_target_ids,
+                                ats_policy=adapter.name,
+                                page_url=observation.url,
+                            ):
                                 raise RuntimeError("safe_click_no_progress")
-                            click_continuation = str(click_button.button_type).lower() == "submit"
+                            click_continuation = bool(continuation_permit)
+                            if click_continuation:
+                                observed_route_identity = _application_route_identity(observation.url, adapter.name)
+                                if not _continuation_route_is_approved(application_route_identity, observed_route_identity):
+                                    raise _BrowserFailure(
+                                        "mutation",
+                                        "route",
+                                        "unsafe_navigation_target",
+                                        iteration,
+                                    )
+                                continuation_route_identity = observed_route_identity
                             await _invoke_browser(
                                 "click_offline",
                                 "mutation",
@@ -2543,6 +2648,8 @@ async def run_application_workflow(
                             "generation": observation.observation_id,
                             "executed": True,
                         }
+                        if action["action"] == "click":
+                            executed_action["continuation"] = bool(continuation_permit)
                         executed_actions.append(executed_action)
                         iteration_action = _write_json_verified(
                             run,
@@ -2601,6 +2708,18 @@ async def run_application_workflow(
                             lambda: session.observe(),
                         )
                         stable_observation = _observation_from_browser_payload(stable_payload, iteration=iteration)
+                        if continuation_route_identity is not None:
+                            expected_route_identity = continuation_route_identity
+                            stable_route_identity = _application_route_identity(stable_observation.url, adapter.name)
+                            if not _continuation_route_is_approved(expected_route_identity, stable_route_identity):
+                                raise _BrowserFailure(
+                                    "observation",
+                                    "route",
+                                    "unsafe_navigation_target",
+                                    iteration,
+                                )
+                            if expected_route_identity[0] == "greenhouse_short":
+                                continuation_route_identity = stable_route_identity
                         if _observation_semantic_signature(observation) != _observation_semantic_signature(stable_observation):
                             final_observation = stable_observation
                             final_plan = AutofillPlan(

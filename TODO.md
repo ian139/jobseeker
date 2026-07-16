@@ -115,6 +115,8 @@ every future adapter and preference feature.
 
 - [x] Expose import-feed source provenance through validated `--source`, preserving the `job_source` default while keeping distinct feed sources filterable in the backlog. Coverage is in `tests/test_cli_smoke.py` and `tests/test_job_source.py`; default, invalid, and injection-like source cases pass.
 
+- [x] Add read-only `backlog-show JOB_ID` detail inspection with positive-ID pre-connect validation, deterministic parameterized lookup across statuses, bounded plain-text descriptions, raw-payload exclusion, and no mutation/network behavior. Coverage is in `tests/test_cli_smoke.py`; command safety is documented in `README.md`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

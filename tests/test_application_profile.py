@@ -11,6 +11,7 @@ from types import MappingProxyType
 import pytest
 
 import jobs_assistant.ats as ats
+from jobs_assistant.application import _configured_and_profile_plan
 from jobs_assistant.ats import (
     ApplicationProfile,
     GreenhouseAdapter,
@@ -403,6 +404,100 @@ def test_descriptor_aliases_consensus_and_opaque_boundaries() -> None:
     conflict = _observation(_field(target_id="bad", name="job_application[first_name]", label="Last Name"))
     assert canonical_greenhouse_fact(conflict.fields[0]) is None
     assert adapter.deterministic_answers(conflict, _context(profile), profile=profile) == ()
+
+
+
+
+@pytest.mark.parametrize("adapter_type", (GreenhouseAdapter, LeverAdapter))
+def test_location_aliases_fill_common_required_ats_fields(adapter_type) -> None:
+    profile = ApplicationProfile(
+        facts={
+            "street_address": "123 Main Street",
+            "address_line_2": "Apt 4",
+            "city": "New York",
+            "state_province": "NY",
+            "zip": "10001",
+            "country_code": "US",
+        }
+    )
+    fields = (
+        _field(
+            target_id="address",
+            name="job_application[address]",
+            label="Address",
+            safety_descriptors=("autocomplete=street-address",),
+        ),
+        _field(
+            target_id="address-2",
+            name="address_line_2",
+            label="Address Line 2",
+            safety_descriptors=("autocomplete=address-line2",),
+        ),
+        _field(target_id="city", name="city", label="City"),
+        _field(target_id="state", name="state_province", label="State/Province"),
+        _field(target_id="postal", name="zip", label="Postal Code"),
+        _field(
+            target_id="country",
+            name="country",
+            label="Country",
+            safety_descriptors=("autocomplete=country",),
+        ),
+    )
+    answers = adapter_type().deterministic_answers(
+        _observation(*fields),
+        _context(profile),
+        profile=profile,
+    )
+    assert {answer.target_id: answer.value for answer in answers} == {
+        "address": "123 Main Street",
+        "address-2": "Apt 4",
+        "city": "New York",
+        "state": "NY",
+        "postal": "10001",
+        "country": "US",
+    }
+
+
+def test_location_aliases_preserve_conflict_ambiguity_and_validation_gates() -> None:
+    profile = ApplicationProfile(
+        facts={
+            "address": "123 Main Street",
+            "street_address": "456 Other Street",
+            "postal_code": "100001",
+        }
+    )
+    observation = _observation(
+        _field(target_id="address", name="address", label="Address"),
+        _field(target_id="postal", name="postal_code", label="Postal Code", max_length=5),
+        _field(target_id="city", name="city", label="City"),
+    )
+    answers = GreenhouseAdapter().deterministic_answers(
+        observation,
+        _context(profile),
+        profile=profile,
+        resume_facts=ResumeFacts(
+            facts={"city": "Paris"},
+            candidates={"city": ("Paris", "London")},
+            ambiguous=("city",),
+        ),
+    )
+    assert answers == ()
+
+
+def test_location_answer_resolves_required_field_before_manual_fallback() -> None:
+    profile = ApplicationProfile(facts={"city": "New York"})
+    field = _field(target_id="city", name="city", label="City", required=True)
+    resume = ResumeContext("resume.txt", "text/plain", "", "0" * 64, -1, facts=ResumeFacts())
+    plan = _configured_and_profile_plan(
+        _observation(field),
+        adapter=LeverAdapter(),
+        context=_context(profile),
+        profile=profile,
+        resume=resume,
+    )
+    assert plan.status == "ready"
+    assert plan.answers == (FieldAnswer("city", "New York", 1.0, "profile field", "profile"),)
+    assert unresolved_required_fields(_observation(field), plan.answers) == ()
 
 
 def test_safe_noncanonical_zero_candidate_remains_inference_eligible() -> None:

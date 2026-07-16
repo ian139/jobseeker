@@ -221,6 +221,82 @@ def test_lever_auto_workflow_persists_policy_and_no_final_submit(monkeypatch, tm
     assert calls[0]["ats_policy"] == "lever"
 
 
+
+
+def test_lever_button_only_workflow_clicks_policy_aware_continue(monkeypatch, tmp_path: Path) -> None:
+    url = "https://jobs.eu.lever.co/acme/123e4567-e89b-12d3-a456-426614174000/apply"
+    claims = [ApplicationClaim(72, {"id": 72, "canonical_url": url, "title": "Lever"})]
+    resolve_calls: list[dict[str, object]] = []
+    evidence_policies: list[str | None] = []
+
+    class LeverButtonSession(FakeSession):
+        observes = 0
+        clicks: list[str] = []
+
+        @classmethod
+        def start(cls, **kwargs):
+            return cls(kwargs["session_manifest"])
+
+        def observe(self):
+            type(self).observes += 1
+            payload = _payload()
+            payload["url"] = url
+            payload["site_markers"] = ["lever"]
+            if self.observes == 1:
+                payload["buttons"] = [{
+                    "target_id": "continue",
+                    "frame_id": "frame-0",
+                    "frame_url": url,
+                    "click_key": "continue-key",
+                    "element_kind": "button",
+                    "button_type": "button",
+                    "text": "Continue",
+                    "visible": True,
+                    "enabled": True,
+                    "safety_descriptors": [],
+                }]
+            else:
+                payload["buttons"] = []
+            return payload
+
+        def click_offline(self, target_id):
+            type(self).clicks.append(target_id)
+            return {"clicked": True, "counters": {}}
+
+    monkeypatch.setattr(app, "PuppeteerSession", LeverButtonSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in ("register_application_artifact", "register_application_session", "register_application_owner_process", "register_application_browser_process"):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+
+    def resolve(*args, **kwargs):
+        resolve_calls.append(kwargs)
+        return app.AutofillPlan(
+            safe_click_target_id="continue",
+            status="ready",
+            reason_code=app.PublicReasonCode.draft_ready,
+        )
+
+    original_evidence = app.plan_action_evidence
+    def evidence(*args, **kwargs):
+        evidence_policies.append(kwargs.get("ats_policy"))
+        return original_evidence(*args, **kwargs)
+
+    monkeypatch.setattr(app, "resolve_with_llm", resolve)
+    monkeypatch.setattr(app, "plan_action_evidence", evidence)
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+    result = asyncio.run(app.run_application_workflow(object(), resume_file=resume, artifact_root=root, ats="auto"))
+
+    assert result[0]["status"] == "review_ready"
+    assert result[0]["reason_code"] == "draft_ready"
+    assert LeverButtonSession.clicks == ["continue"]
+    assert resolve_calls and resolve_calls[0]["ats_policy"] == "lever"
+    assert evidence_policies and evidence_policies[0] == "lever"
+    actions = json.loads((root / "run-72" / "actions.json").read_text(encoding="utf-8"))
+    assert actions["actions"][0]["action"] == "click"
+    assert actions["final_submit_calls"] == 0
 def test_lever_eu_safe_action_origin_is_allowed() -> None:
     payload = _payload()
     button = {

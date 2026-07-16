@@ -1868,7 +1868,7 @@ async def run_application_workflow(
                             if button.click_key is not None
                         )
                         cached_llm = resolve_with_llm(
-                            replace(observation, fields=new_fields),
+                            replace(observation, fields=new_fields, buttons=new_inference_buttons),
                             job=job,
                             resume_context=resume,
                             job_description=job.get("description"),

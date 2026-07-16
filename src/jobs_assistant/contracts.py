@@ -53,6 +53,9 @@ class SourceJob:
     apply_url: str | None
     date_posted: str | None
     raw: dict[str, Any]
+    location: str | None = None
+    remote: bool | None = None
+    description: str | None = None
 
 
 @dataclass(frozen=True)

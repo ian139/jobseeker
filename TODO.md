@@ -111,6 +111,8 @@ every future adapter and preference feature.
 
 - [x] Add explicit `backlog-archive JOB_ID... --confirm` for queued-only atomic compare-and-set archival, including URL-less rows, rollback on conflicts, fixed redacted results, and no deletion/claim/browser/network behavior. Coverage is in `tests/test_backlog_ingestion.py` and `tests/test_cli_smoke.py`; command safety is documented in `README.md`.
 
+- [x] Add exact, parameterized `--source` filtering to read-only `backlog-list`, with pre-connect validation, source-scoped counts, deterministic ordering, literal SQL-injection-safe matching, and unchanged no-source behavior. Coverage is in `tests/test_cli_smoke.py`; syntax and full package checks pass.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

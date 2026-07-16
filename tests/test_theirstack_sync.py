@@ -42,6 +42,153 @@ class FakeResponse:
         return self._payload
 
 
+class SequenceHTTP:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.payloads = []
+
+    def post(self, url, headers, json, timeout):
+        self.payloads.append(dict(json))
+        return FakeResponse(self.responses.pop(0))
+
+
+def _job(job_id, *, company="Acme", title="Software Engineer", url="https://jobs.example/apply"):
+    return {"id": job_id, "title": title, "company_name": company, "url": url}
+
+
+@pytest.mark.parametrize("page", [-1, True, 1.5])
+def test_paid_payload_rejects_invalid_page(page):
+    with pytest.raises(ValueError, match="page"):
+        build_paid_fetch_payload(page=page)
+
+
+def test_paid_payload_accepts_explicit_page_without_changing_preview():
+    assert build_paid_fetch_payload(limit=10, page=3)["page"] == 3
+    assert build_preview_payload()["page"] == 0
+
+
+def test_paid_client_aggregates_pages_until_total_results_in_order():
+    http = SequenceHTTP(
+        [
+            {"data": [_job("one"), _job("two")], "metadata": {"total_results": 3}},
+            {"data": [_job("three")], "metadata": {"total_results": 3}},
+        ]
+    )
+    client = TheirStackClient("token", enable_paid_fetch=True, client=http)
+
+    response = client.search_jobs(build_paid_fetch_payload(limit=2))
+
+    assert [job["id"] for job in response["data"]] == ["one", "two", "three"]
+    assert [payload["page"] for payload in http.payloads] == [0, 1]
+    assert response["metadata"]["total_results"] == 3
+
+
+
+def test_paid_client_fetches_three_pages_for_large_total():
+    http = SequenceHTTP(
+        [
+            {"data": [_job(f"job-{index}") for index in range(100)], "total_results": 250},
+            {"data": [_job(f"job-{index}") for index in range(100, 200)], "total_results": 250},
+            {"data": [_job(f"job-{index}") for index in range(200, 250)], "total_results": 250},
+        ]
+    )
+    client = TheirStackClient("token", enable_paid_fetch=True, client=http)
+
+    response = client.search_jobs(build_paid_fetch_payload(limit=100))
+
+    assert len(response["data"]) == 250
+    assert [payload["page"] for payload in http.payloads] == [0, 1, 2]
+
+
+def test_paid_client_fetches_remaining_pages_from_nonzero_start_page():
+    http = SequenceHTTP(
+        [
+            {"data": [_job(f"job-{index}") for index in range(100, 200)], "total_results": 250},
+            {"data": [_job(f"job-{index}") for index in range(200, 250)], "total_results": 250},
+        ]
+    )
+    client = TheirStackClient("token", enable_paid_fetch=True, client=http)
+
+    response = client.search_jobs(build_paid_fetch_payload(limit=100, page=1))
+
+    assert len(response["data"]) == 150
+    assert [payload["page"] for payload in http.payloads] == [1, 2]
+
+
+def test_pinned_sync_filters_all_pages_before_global_company_dedupe():
+    conn = connect(":memory:")
+    init_db(conn)
+    http = SequenceHTTP(
+        [
+            {
+                "data": [
+                    _job(
+                        "invalid",
+                        title="Software Engineer",
+                        url="https://arbitrary.example/acme/invalid",
+                    )
+                ],
+                "total_results": 2,
+            },
+            {
+                "data": [
+                    _job(
+                        "valid",
+                        title="Office Manager",
+                        url="https://boards.greenhouse.io/acme/jobs/123",
+                    )
+                ],
+                "total_results": 2,
+            },
+        ]
+    )
+    client = TheirStackClient("token", enable_paid_fetch=True, client=http)
+    response = client.search_jobs(build_paid_fetch_payload(limit=1))
+
+    assert sync_theirstack_response(
+        conn,
+        response,
+        paid_fetch_enabled=True,
+        ats_filter="greenhouse",
+    ) == (1, 1, 0)
+    assert conn.execute("SELECT source_job_id FROM jobs").fetchone()["source_job_id"] == "valid"
+
+def test_paid_client_stops_on_empty_page_and_does_not_persist_partial_results():
+    conn = connect(":memory:")
+    init_db(conn)
+    http = SequenceHTTP(
+        [
+            {"data": [_job("one")], "total_results": 5},
+            {"data": [], "total_results": 5},
+        ]
+    )
+    client = TheirStackClient("token", enable_paid_fetch=True, client=http)
+
+    response = client.search_jobs(build_paid_fetch_payload(limit=1))
+    sync_theirstack_response(conn, response, paid_fetch_enabled=True)
+
+    assert [payload["page"] for payload in http.payloads] == [0, 1]
+    assert conn.execute("SELECT source_job_id FROM jobs").fetchall()[0]["source_job_id"] == "one"
+
+
+def test_paid_client_rejects_malformed_later_page_before_returning_any_jobs():
+    conn = connect(":memory:")
+    init_db(conn)
+    http = SequenceHTTP(
+        [
+            {"data": [_job("one")], "total_results": 2},
+            {"data": {}, "total_results": 2},
+        ]
+    )
+    client = TheirStackClient("token", enable_paid_fetch=True, client=http)
+
+    with pytest.raises(TheirStackError):
+        response = client.search_jobs(build_paid_fetch_payload(limit=1))
+        sync_theirstack_response(conn, response, paid_fetch_enabled=True)
+
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+
+
 def test_preview_payload_is_credit_safe():
     payload = build_preview_payload()
     assert is_credit_safe_payload(payload)

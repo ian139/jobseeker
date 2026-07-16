@@ -173,12 +173,21 @@ NON_COOP_EARLY_CAREER_PATTERNS = [
 ]
 
 
-def _base_payload(*, blur_company_data: bool, include_total_results: bool, limit: int) -> dict[str, Any]:
+def _validated_page(value: Any, *, name: str = "page") -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
+MAX_PAID_PAGES = 1000
+
+
+def _base_payload(*, blur_company_data: bool, include_total_results: bool, limit: int, page: int = 0) -> dict[str, Any]:
     return {
         "blur_company_data": blur_company_data,
         "include_total_results": include_total_results,
         "limit": limit,
-        "page": 0,
+        "page": _validated_page(page),
         "posted_at_max_age_days": 7,
         "order_by": [
             {"field": "date_posted", "desc": True},
@@ -220,19 +229,21 @@ def build_paid_fetch_payload(
     profile: ProfileName = "default",
     *,
     limit: int = 25,
+    page: int = 0,
     discovered_at_gte: str | None = None,
     discovered_at_gt: str | None = None,
     ats_filter: ATSFilter = "auto",
 ) -> dict[str, Any]:
     """Build a paid-fetch payload that returns full job data.
 
-    Raises ValueError for invalid limits or unsupported ATS filters.
+    Raises ValueError for invalid limits, pages, or unsupported ATS filters.
     """
     selected_filter = validate_ats_filter_name(ats_filter)
     if limit < 1 or limit > 100:
         raise ValueError("paid-fetch limit must be between 1 and 100")
+    page = _validated_page(page)
 
-    payload = _base_payload(blur_company_data=False, include_total_results=True, limit=limit)
+    payload = _base_payload(blur_company_data=False, include_total_results=True, limit=limit, page=page)
     if selected_filter != "auto":
         # Return a fresh list so callers cannot mutate later payload builds.
         payload["url_domain_or"] = list(ATS_URL_DOMAIN_OR[selected_filter])
@@ -325,10 +336,11 @@ def select_one_job_per_company(
 # --- HTTP client -------------------------------------------------------------
 
 
-def extract_jobs(response: Any) -> list[dict[str, Any]]:
-    """Extract and validate the job list from a TheirStack response envelope."""
+def _extract_jobs_with_key(response: Any) -> tuple[str, list[dict[str, Any]]]:
+    """Extract the validated job list and its envelope key."""
     if not isinstance(response, dict):
         raise TheirStackError("TheirStack returned non-object JSON response")
+    selected_key: str | None = None
     selected: list[dict[str, Any]] | None = None
     for key in ("data", "jobs", "results"):
         if key not in response:
@@ -338,23 +350,57 @@ def extract_jobs(response: Any) -> list[dict[str, Any]]:
             raise TheirStackError(f"TheirStack response field {key!r} is not a list")
         if any(not isinstance(item, dict) for item in items):
             raise TheirStackError(f"TheirStack response field {key!r} contains a non-object job")
-        if selected is None:
+        if selected_key is None:
+            selected_key = key
             selected = items
-    if selected is not None:
-        return selected
-    raise TheirStackError(
-        "TheirStack response is missing a recognized job-list key "
-        "(expected one of: data, jobs, results)"
-    )
+    if selected_key is None or selected is None:
+        raise TheirStackError(
+            "TheirStack response is missing a recognized job-list key "
+            "(expected one of: data, jobs, results)"
+        )
+    return selected_key, selected
+
+
+def extract_jobs(response: Any) -> list[dict[str, Any]]:
+    """Extract and validate the job list from a TheirStack response envelope."""
+    return _extract_jobs_with_key(response)[1]
+
+
+def _validated_total_results(response: dict[str, Any]) -> int | None:
+    """Validate and return a consistent total_results value, if supplied."""
+    metadata = response.get("metadata")
+    if "metadata" in response and not isinstance(metadata, Mapping):
+        raise TheirStackError("TheirStack response field 'metadata' is not an object")
+    containers: list[Mapping[str, Any]] = [response]
+    if isinstance(metadata, Mapping):
+        containers.append(metadata)
+    values: list[int] = []
+    for container in containers:
+        if "total_results" not in container:
+            continue
+        value = container["total_results"]
+        if type(value) is not int or value < 0:
+            raise TheirStackError("TheirStack response total_results must be a non-negative integer")
+        values.append(value)
+    if values and any(value != values[0] for value in values[1:]):
+        raise TheirStackError("TheirStack response total_results values disagree")
+    return values[0] if values else None
 
 
 def response_total_results(response: dict[str, Any]) -> int | None:
-    """Return the total_results field, if present."""
-    value = response.get("total_results")
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
+    """Return the top-level or metadata total_results field, if present."""
+    if not isinstance(response, dict):
+        return None
+    containers: list[Mapping[str, Any]] = [response]
+    metadata = response.get("metadata")
+    if isinstance(metadata, Mapping):
+        containers.append(metadata)
+    for container in containers:
+        value = container.get("total_results")
+        if type(value) is int:
+            return value
+        if type(value) is float:
+            return int(value)
     return None
 
 
@@ -386,10 +432,11 @@ class TheirStackClient:
         self._client = client
 
     def search_jobs(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """POST /v1/jobs/search.
+        """POST /v1/jobs/search, paging through an explicitly enabled paid fetch.
 
-        Raises PaidFetchDisabledError if the payload is not credit-safe and
-        paid fetch has not been explicitly enabled.
+        Credit-safe preview requests remain a single bounded request. Paid
+        responses are fully collected and validated before the aggregate is
+        returned, so callers cannot persist a partial result set.
         """
         if not self._enable_paid_fetch and not is_credit_safe_payload(payload):
             raise PaidFetchDisabledError(
@@ -397,7 +444,67 @@ class TheirStackClient:
                 "(blur_company_data=true, include_total_results=true, limit=1) "
                 "or construct TheirStackClient with enable_paid_fetch=True after explicit approval."
             )
+        if self._enable_paid_fetch and not is_credit_safe_payload(payload):
+            return self._search_paid_pages(payload)
+        return self._search_one_page(payload)
 
+    def _search_paid_pages(self, payload: dict[str, Any]) -> dict[str, Any]:
+        page = _validated_page(payload.get("page", 0))
+        start_page = page
+        limit = payload.get("limit")
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("paid-fetch limit must be between 1 and 100")
+
+        aggregate: list[dict[str, Any]] = []
+        first_response: dict[str, Any] | None = None
+        selected_key: str | None = None
+        total_results: int | None = None
+        pages_fetched = 0
+
+        while True:
+            page_payload = dict(payload)
+            page_payload["page"] = page
+            response = self._search_one_page(page_payload)
+            page_key, page_jobs = _extract_jobs_with_key(response)
+            page_total = _validated_total_results(response)
+            if first_response is None:
+                first_response = dict(response)
+                selected_key = page_key
+            elif page_key != selected_key:
+                raise TheirStackError("TheirStack response job-list key changed between pages")
+            if page_total is not None:
+                if total_results is not None and page_total != total_results:
+                    raise TheirStackError("TheirStack response total_results changed between pages")
+                total_results = page_total
+
+            aggregate.extend(page_jobs)
+            observed_total = start_page * limit + len(aggregate)
+            if total_results is not None:
+                if observed_total > total_results:
+                    raise TheirStackError("TheirStack response returned more jobs than total_results")
+                if observed_total >= total_results or not page_jobs:
+                    break
+            elif not page_jobs or len(page_jobs) < limit:
+                break
+            if pages_fetched >= MAX_PAID_PAGES:
+                raise TheirStackError("TheirStack paid pagination exceeded the safety page limit")
+            page += 1
+
+        if first_response is None or selected_key is None:
+            raise TheirStackError("TheirStack paid pagination returned no response")
+        first_response[selected_key] = aggregate
+        if total_results is not None:
+            if "total_results" not in first_response:
+                metadata = first_response.get("metadata")
+                if isinstance(metadata, Mapping):
+                    merged_metadata = dict(metadata)
+                    merged_metadata["total_results"] = total_results
+                    first_response["metadata"] = merged_metadata
+                else:
+                    first_response["total_results"] = total_results
+        return first_response
+
+    def _search_one_page(self, payload: dict[str, Any]) -> dict[str, Any]:
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "Content-Type": "application/json",
@@ -438,6 +545,7 @@ class TheirStackClient:
             if not isinstance(data, dict):
                 raise TheirStackError("TheirStack returned non-object JSON response")
             return data
+        raise TheirStackError("TheirStack request did not return a response")
 
     def _post(
         self,

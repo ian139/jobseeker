@@ -28,6 +28,7 @@ from jobs_assistant.contracts import (
     ApplicationContext,
     AutofillPlan,
     FieldAnswer,
+    ObservedButton,
     ObservedField,
     ObservedOption,
     PageObservation,
@@ -84,8 +85,44 @@ def field(
     )
 
 
-def observation(*fields, final=()):
-    return PageObservation("obs-1", "https://boards.greenhouse.io/fixture/jobs/123", "Apply", (), tuple(fields), (), tuple(final), (), ())
+def button(
+    target_id: str = "button-continue",
+    *,
+    frame_url: str = "https://boards.greenhouse.io/fixture/jobs/123",
+    text: str = "Continue",
+    click_key: str = "click-continue",
+    visible: bool = True,
+    enabled: bool = True,
+    descriptors: tuple[str, ...] = (),
+) -> ObservedButton:
+    return ObservedButton(
+        target_id=target_id,
+        frame_id="frame-0",
+        frame_url=frame_url,
+        click_key=click_key,
+        element_id=None,
+        element_kind="button",
+        text=text,
+        selector=f"#{target_id}",
+        button_type="button",
+        name=None,
+        value=None,
+        target=None,
+        download=False,
+        effective_action_url=None,
+        effective_method=None,
+        href_url=None,
+        href_attribute=None,
+        visible=visible,
+        enabled=enabled,
+        safety_descriptors=descriptors,
+    )
+
+
+def observation(*fields, final=(), buttons=(), url="https://boards.greenhouse.io/fixture/jobs/123"):
+    return PageObservation("obs-1", url, "Apply", (), tuple(fields), tuple(buttons), tuple(final), (), ())
+
+
 
 
 def test_exact_llm_schema_and_kind_validation():
@@ -109,6 +146,93 @@ def test_current_value_is_preserved_and_different_value_is_manual():
     planned, rejected = plan_action_evidence(observation(item), plan)
     assert planned == []
     assert rejected[0]["reason"] == "preexisting_value_conflict"
+
+def test_inference_request_projects_only_policy_safe_buttons_and_redacts_text() -> None:
+    safe = button(
+        frame_url="https://jobs.eu.lever.co/acme/123e4567-e89b-12d3-a456-426614174000/apply",
+        text="Continue safely",
+    )
+    final = button(target_id="final", click_key="click-final")
+    hidden = button(target_id="hidden", click_key="click-hidden", visible=False)
+    sensitive = button(
+        target_id="sensitive",
+        click_key="click-sensitive",
+        descriptors=("start date",),
+    )
+    wrong_origin = button(
+        target_id="wrong-origin",
+        click_key="click-wrong",
+        frame_url="https://api.lever.co/acme/123",
+    )
+    request = build_inference_request(
+        observation(
+            buttons=(safe, final, hidden, sensitive, wrong_origin),
+            final=("final",),
+            url=safe.frame_url,
+        ),
+        job={"title": "Engineer"},
+        resume_text="resume",
+        profile_facts={"private": "safely"},
+        ats_policy="lever",
+    )
+    assert [item["target_id"] for item in request["buttons"]] == ["button-continue"]
+    assert request["buttons"][0]["text"] == "Continue [REDACTED]"
+    assert "safely" not in json.dumps(request)
+
+
+def test_parse_and_action_evidence_require_selected_ats_policy_for_safe_click() -> None:
+    safe = button(
+        frame_url="https://jobs.eu.lever.co/acme/123e4567-e89b-12d3-a456-426614174000/apply",
+    )
+    observed = observation(buttons=(safe,), url=safe.frame_url)
+    payload = {"answers": [], "safe_click_target_id": safe.target_id}
+    assert parse_llm_plan(payload, observed).reason_code is PublicReasonCode.invalid_llm_response
+    plan = parse_llm_plan(payload, observed, ats_policy="lever")
+    assert plan.reason_code is PublicReasonCode.draft_ready
+    assert plan.safe_click_target_id == safe.target_id
+    assert plan_action_evidence(observed, plan)[0] == []
+    planned, rejected = plan_action_evidence(observed, plan, ats_policy="lever")
+    assert planned == [{"target_id": safe.target_id, "action": "click", "kind": "button", "source": "inference"}]
+    assert rejected == []
+
+
+def test_button_only_lever_inference_is_resolved(monkeypatch) -> None:
+    safe = button(
+        frame_url="https://jobs.lever.co/acme/123e4567-e89b-12d3-a456-426614174000/apply",
+    )
+    observed = observation(buttons=(safe,), url=safe.frame_url)
+    calls = []
+    monkeypatch.setattr(app.socket, "getaddrinfo", lambda *args, **kwargs: [(2, 1, 6, "", ("8.8.8.8", 443))])
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(app.httpx, "Client", Client)
+
+    def client_json(*args, **kwargs):
+        calls.append(json.loads(kwargs["body"]["messages"][0]["content"]) if isinstance(kwargs["body"], dict) else None)
+        return {"answers": [], "safe_click_target_id": safe.target_id}
+
+    monkeypatch.setattr(app, "_client_json", client_json)
+    result = resolve_with_llm(
+        observed,
+        job={"title": "Engineer"},
+        resume_context="safe",
+        profile_context={},
+        api_key="token",
+        base_url="https://ollama.example.test",
+        ats_policy="lever",
+    )
+    assert result.reason_code is PublicReasonCode.draft_ready
+    assert result.safe_click_target_id == safe.target_id
+    assert len(calls) == 1
+    assert calls[0]["fields"] == []
+    assert calls[0]["buttons"][0]["target_id"] == safe.target_id
 
 
 def test_inference_request_is_target_scoped_and_redacted():

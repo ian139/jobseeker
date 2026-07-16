@@ -481,6 +481,41 @@ def _answer_payload(field: ObservedField, protected: tuple[str, ...] = ()) -> di
             "step": redact(field.step),
         },
     }
+def _button_payload(
+    button: ObservedButton,
+    final_submit_target_ids: tuple[str, ...],
+    protected: tuple[str, ...],
+    *,
+    ats_policy: str,
+) -> dict[str, Any] | None:
+    if not _safe_click_is_eligible(button, final_submit_target_ids, ats_policy=ats_policy):
+        return None
+    redact = lambda value: _redact_text(str(value), protected) if value is not None else value
+    return {
+        "target_id": button.target_id,
+        "text": redact(button.text),
+        "descriptors": [redact(item) for item in button.safety_descriptors],
+    }
+
+
+def _eligible_inference_buttons(
+    observation: PageObservation,
+    *,
+    protected: tuple[str, ...] = (),
+    ats_policy: str = "greenhouse",
+) -> list[dict[str, Any]]:
+    return [
+        payload
+        for button in observation.buttons
+        if (payload := _button_payload(
+            button,
+            observation.final_submit_target_ids,
+            protected,
+            ats_policy=ats_policy,
+        )) is not None
+    ]
+
+
 
 
 def build_inference_request(
@@ -492,6 +527,7 @@ def build_inference_request(
     job_description: str | None = None,
     applicant_description: str = "",
     configured_values: tuple[str, ...] = (),
+    ats_policy: str = "greenhouse",
 ) -> dict[str, Any]:
     protected = _flatten_strings(profile_facts) + tuple(
         value for value in configured_values if isinstance(value, str)
@@ -508,6 +544,7 @@ def build_inference_request(
         for field in observation.fields
         if _field_is_llm_eligible(field) and field.value in (None, "", False)
     ]
+    buttons = _eligible_inference_buttons(observation, protected=tuple(protected), ats_policy=ats_policy)
     allowed_job = {
         key: _redact_text(str(job.get(key) or ""), protected)
         for key in ("title", "company", "location")
@@ -525,6 +562,7 @@ def build_inference_request(
             "description": _redact_text(resolved_applicant_description, protected),
         },
         "fields": [_answer_payload(field, tuple(protected)) for field in fields],
+        "buttons": buttons,
         "answers": [],
         "safe_click_target_id": None,
     }
@@ -650,7 +688,7 @@ def _merge_blocked_target_ids(
         blocked.update(field.target_id for field in observation.fields)
     return blocked
 
-def parse_llm_plan(payload: Any, observation: PageObservation) -> AutofillPlan:
+def parse_llm_plan(payload: Any, observation: PageObservation, *, ats_policy: str = "greenhouse") -> AutofillPlan:
     if (
         not isinstance(payload, Mapping)
         or set(payload) != {"answers", "safe_click_target_id"}
@@ -688,7 +726,7 @@ def parse_llm_plan(payload: Any, observation: PageObservation) -> AutofillPlan:
         eligible = {
             button.target_id
             for button in observation.buttons
-            if _safe_click_is_eligible(button, observation.final_submit_target_ids)
+            if _safe_click_is_eligible(button, observation.final_submit_target_ids, ats_policy=ats_policy)
         }
         if not isinstance(click, str) or click not in eligible:
             return AutofillPlan(status="manual", reason_code=PublicReasonCode.invalid_llm_response)
@@ -733,6 +771,7 @@ def _safe_click_is_eligible(
         and isinstance(button.click_key, str)
         and bool(button.click_key)
         and _frame_origin_allowed(button.frame_url, ats_policy)
+        and button.visible
         and button.enabled
         and not _field_is_sensitive_button(button)
         and button.target in (None, "")
@@ -893,6 +932,7 @@ def resolve_with_llm(
     base_url: str | None = None,
     model: str | None = None,
     mutated: bool = False,
+    ats_policy: str = "greenhouse",
 ) -> AutofillPlan:
     if mutated:
         return AutofillPlan(status="manual", reason_code=PublicReasonCode.no_deterministic_next_step)
@@ -917,13 +957,14 @@ def resolve_with_llm(
             configured_values=configured_values,
             job_description=job_description,
             applicant_description=applicant_description,
+            ats_policy=ats_policy,
         )
     except ValueError as exc:
         reason = str(exc)
         code = PublicReasonCode.inference_context_too_large if "too_large" in reason else PublicReasonCode.invalid_llm_response
         return AutofillPlan(status="manual", reason_code=code)
     fields = request["fields"]
-    if not fields:
+    if not fields and not request["buttons"]:
         return AutofillPlan(status="manual", reason_code=PublicReasonCode.no_deterministic_next_step)
     token = api_key or os.environ.get("OLLAMA_CLOUD_API_KEY") or os.environ.get("OLLAMA_API_KEY")
     if not token:
@@ -979,7 +1020,7 @@ def resolve_with_llm(
                 body=body,
                 allow_ndjson=True,
             )
-        plan = parse_llm_plan(_extract_llm_content(raw), observation)
+        plan = parse_llm_plan(_extract_llm_content(raw), observation, ats_policy=ats_policy)
         protected_sources = _flatten_strings(profile_facts) + configured_values
         if not validate_inference_privacy(plan, protected_values=protected_sources, source_text=text):
             return AutofillPlan(status="manual", reason_code=PublicReasonCode.inference_privacy_violation)
@@ -1081,7 +1122,12 @@ def _action_for(field: ObservedField) -> str:
     return "check" if field.kind in {"checkbox", "radio"} else ("select" if field.kind == "select" else "fill")
 
 
-def plan_action_evidence(observation: PageObservation, plan: AutofillPlan) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def plan_action_evidence(
+    observation: PageObservation,
+    plan: AutofillPlan,
+    *,
+    ats_policy: str = "greenhouse",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     planned: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     inference_rejected: set[str] = set()
@@ -1152,7 +1198,7 @@ def plan_action_evidence(observation: PageObservation, plan: AutofillPlan) -> tu
             rejected.append({"target_id": field.target_id, "action": "upload", "reason": "ineligible_field"})
     if not planned and plan.safe_click_target_id:
         button = next((item for item in observation.buttons if item.target_id == plan.safe_click_target_id), None)
-        if _safe_click_is_eligible(button, observation.final_submit_target_ids) if button is not None else False:
+        if _safe_click_is_eligible(button, observation.final_submit_target_ids, ats_policy=ats_policy) if button is not None else False:
             planned.append({"target_id": button.target_id, "action": "click", "kind": "button", "source": "inference"})
         else:
             rejected.append({"target_id": plan.safe_click_target_id, "action": "click", "reason": "safe_click_no_progress"})
@@ -1702,6 +1748,7 @@ async def run_application_workflow(
                 mutation_count = 0
                 cached_llm: AutofillPlan | None = None
                 cached_inference_target_ids: set[tuple[str, str]] = set()
+                cached_inference_button_keys: set[str] = set()
                 final_observation: PageObservation | None = None
                 cached_inference: dict[tuple[str, str], FieldAnswer] = {}
                 cached_click_key: str | None = None
@@ -1796,10 +1843,29 @@ async def run_application_workflow(
                         and field.value in (None, "", False)
                         and (field.field_key, field.kind) not in cached_inference_target_ids
                     )
-                    if new_fields:
+                    eligible_inference_buttons = tuple(
+                        button
+                        for button in observation.buttons
+                        if _safe_click_is_eligible(
+                            button,
+                            observation.final_submit_target_ids,
+                            ats_policy=adapter.name,
+                        )
+                    )
+                    new_inference_buttons = tuple(
+                        button
+                        for button in eligible_inference_buttons
+                        if button.click_key not in cached_inference_button_keys
+                    )
+                    if new_fields or new_inference_buttons:
                         cached_inference_target_ids.update(
                             (field.field_key, field.kind)
                             for field in new_fields
+                        )
+                        cached_inference_button_keys.update(
+                            button.click_key
+                            for button in eligible_inference_buttons
+                            if button.click_key is not None
                         )
                         cached_llm = resolve_with_llm(
                             replace(observation, fields=new_fields),
@@ -1809,6 +1875,7 @@ async def run_application_workflow(
                             applicant_description=applicant_description,
                             profile_context=profile,
                             mutated=False,
+                            ats_policy=adapter.name,
                         )
                         for answer in cached_llm.answers:
                             source_field = next(
@@ -1903,7 +1970,7 @@ async def run_application_workflow(
                     protected_sources = _flatten_strings(profile.facts) + _flatten_strings(resume.facts.facts) + tuple(answer.value for answer in profile.field_answers if isinstance(answer.value, str))
                     if not validate_inference_privacy(plan, protected_values=protected_sources, source_text=resume.text):
                         plan = AutofillPlan(status="manual", reason_code=PublicReasonCode.inference_privacy_violation)
-                    planned, rejected = plan_action_evidence(observation, plan)
+                    planned, rejected = plan_action_evidence(observation, plan, ats_policy=adapter.name)
                     if planned and preferences.review_order:
                         ordered_ids = order_actions(
                             preferences,

@@ -381,6 +381,75 @@ def test_iteration_action_evidence_is_durable_before_mutation(monkeypatch, tmp_p
     actions = json.loads((run_dir / "actions.json").read_text(encoding="utf-8"))
     assert actions["final_submit_calls"] == 0
 
+def test_configured_resume_upload_is_retained_on_reobserve_without_submit(monkeypatch, tmp_path: Path):
+    claims = [ApplicationClaim(74, {"id": 74, "canonical_url": "https://boards.greenhouse.io/a/jobs/74", "title": "Resume"})]
+
+    class ResumeContinuationSession(FakeSession):
+        starts = 0
+        instances = []
+
+        @classmethod
+        def start(cls, **kwargs):
+            cls.starts += 1
+            session = cls(kwargs["session_manifest"])
+            cls.instances.append(session)
+            return session
+
+        def __init__(self, manifest):
+            super().__init__(manifest)
+            self.observations = 0
+            self.upload_calls = 0
+            self.uploaded = False
+
+        def observe(self):
+            self.observations += 1
+            payload = _payload()
+            payload["fields"] = [{
+                "target_id": "resume-field",
+                "field_key": "resume",
+                "kind": "file",
+                "name": "resume",
+                "label": "Resume",
+                "required": True,
+                "visible": True,
+                "enabled": True,
+                "readonly": False,
+                "value": None,
+                "will_validate": True,
+                "valid": True,
+                "file_count": 1 if self.uploaded else 0,
+                "file_basenames": ["resume.txt"] if self.uploaded else [],
+                "accept": [".txt"],
+            }]
+            return payload
+
+        def upload(self, target_id):
+            assert target_id == "resume-field"
+            self.upload_calls += 1
+            self.uploaded = True
+
+    monkeypatch.setattr(app, "PuppeteerSession", ResumeContinuationSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in ("register_application_artifact", "register_application_session", "register_application_owner_process", "register_application_browser_process"):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+
+    resume = tmp_path / "resume.txt"
+    resume.write_text("resume")
+    root = tmp_path / "artifacts"
+    result = asyncio.run(app.run_application_workflow(object(), resume_file=resume, artifact_root=root))
+
+    assert result[0]["status"] == "review_ready"
+    session = ResumeContinuationSession.instances[0]
+    assert session.upload_calls == 1
+    assert session.observations == 3
+    run_dir = root / "run-74"
+    retained_snapshot = json.loads((run_dir / "iterations" / "0002" / "observation.json").read_text(encoding="utf-8"))
+    assert retained_snapshot["fields"][0]["file_count"] == 1
+    actions = json.loads((run_dir / "actions.json").read_text(encoding="utf-8"))
+    assert actions["mutation_count"] == 1
+    assert [item["action"] for item in actions["actions"]] == ["upload"]
+    assert actions["final_submit_calls"] == 0
 
 
 

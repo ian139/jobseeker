@@ -1136,8 +1136,15 @@ def resolve_with_llm(
 
 def unresolved_required_fields(observation: PageObservation, answers: tuple[FieldAnswer, ...]) -> tuple[str, ...]:
     """Evaluate required controls using the adapter's group semantics."""
-    return _ats_unresolved_required_fields(observation, answers)
-
+    unresolved = _ats_unresolved_required_fields(observation, answers)
+    by_id = _unique_observed_fields(observation)
+    if by_id is None:
+        return unresolved
+    return tuple(
+        target_id
+        for target_id in unresolved
+        if not _field_existing_value_resolved(by_id[target_id])
+    )
 
 def _configured_and_profile_plan(
     observation: PageObservation,
@@ -1160,7 +1167,12 @@ def _configured_and_profile_plan(
     preference_optouts: set[str] = set()
     if preferences is not None:
         try:
-            pref_result = apply_preferences(preferences, observation.fields, deterministic, ats=adapter.name)
+            preference_fields = tuple(
+                field
+                for field in observation.fields
+                if str(field.kind).lower() != "file"
+            )
+            pref_result = apply_preferences(preferences, preference_fields, deterministic, ats=adapter.name)
         except PreferenceValidationError:
             return AutofillPlan(status="manual", reason_code=PublicReasonCode.no_deterministic_next_step)
         deterministic = pref_result.selected_answers
@@ -1172,7 +1184,7 @@ def _configured_and_profile_plan(
         if field is None:
             continue
         if str(field.kind).lower() == "file":
-            if field_accepts_resume(field, resume):
+            if not _field_existing_value_resolved(field) and field_accepts_resume(field, resume):
                 upload_target = field.target_id
             continue
         if _field_is_sensitive(field):
@@ -1937,7 +1949,7 @@ async def run_application_workflow(
                         attempted_key, attempted_kind, expected = attempted_mutation
                         retained_field = next((item for item in observation.fields if item.field_key == attempted_key and item.kind == attempted_kind), None)
                         retained = bool(retained_field is not None and (
-                            (attempted_kind == "file" and retained_field.file_count == 1 and resume.basename in retained_field.file_basenames)
+                            (attempted_kind == "file" and _field_existing_value_resolved(retained_field) and resume.basename in retained_field.file_basenames)
                             or (attempted_kind != "file" and retained_field.value is not None and _retained_value_equal(retained_field, expected))
                         ))
                         attempted_mutation = None

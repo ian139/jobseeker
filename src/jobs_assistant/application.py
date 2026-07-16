@@ -283,6 +283,14 @@ def _observation_from_payload(payload: Mapping[str, Any]) -> PageObservation:
             return False
         if "file_count" in raw and (type(raw["file_count"]) is not int or raw["file_count"] < 0):
             return False
+        if any(
+            key in raw and raw[key] is not None
+            and (type(raw[key]) is not int or raw[key] < 0)
+            for key in ("min_length", "max_length")
+        ):
+            return False
+        if not _strings_or_none(raw, ("pattern", "min_value", "max_value", "step")):
+            return False
         if not _string_lists(raw, ("safety_descriptors", "validity_flags", "file_basenames", "accept")):
             return False
         options = raw.get("options")
@@ -1420,6 +1428,21 @@ def _manifest_set_iteration(
         raise RuntimeError("manifest_error")
     iterations[str(iteration)] = {"stage": stage, "artifacts": dict(artifacts)}
     _manifest_latest(payload, iteration=iteration, stage=stage)
+def _action_evidence_payload(
+    *,
+    iteration: int,
+    ats_policy: str,
+    planned: list[dict[str, Any]],
+    rejected: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "iteration": iteration,
+        "ats_policy": ats_policy,
+        "no_final_submit": True,
+        "planned": planned,
+        "rejected": rejected,
+    }
 
 
 
@@ -1759,6 +1782,37 @@ async def run_application_workflow(
                 attempted_click_signature: tuple[Any, ...] | None = None
                 executed_actions: list[dict[str, Any]] = []
                 final_plan: AutofillPlan | None = None
+                def persist_iteration_action_evidence(
+                    iteration: int,
+                    planned: list[dict[str, Any]],
+                    rejected: list[dict[str, Any]],
+                ) -> Any:
+                    if run is None or manifest_payload is None:
+                        raise RuntimeError("manifest_error")
+                    relative_path = f"iterations/{iteration:04d}/action_evidence.json"
+                    evidence = _action_evidence_payload(
+                        iteration=iteration,
+                        ats_policy=adapter.name,
+                        planned=planned,
+                        rejected=rejected,
+                    )
+                    result = _write_json_verified(run, relative_path, evidence)
+                    _manifest_set_iteration(
+                        manifest_payload,
+                        iteration,
+                        stage="action_planned",
+                        artifacts={
+                            "action_evidence": _manifest_artifact(
+                                result,
+                                relative_path,
+                                iteration=iteration,
+                                stage="action_planned",
+                            ),
+                        },
+                    )
+                    _write_run_manifest(run, manifest_payload)
+                    return result
+
                 for iteration in range(1, MAX_AUTOFILL_ITERATIONS + 1):
                     latest_iteration = iteration
                     payload = await _invoke_browser(
@@ -2000,6 +2054,11 @@ async def run_application_workflow(
                     if conflict:
                         plan = AutofillPlan(status="manual", reason_code=PublicReasonCode.preexisting_value_conflict, skipped_target_ids=plan.skipped_target_ids)
                         planned = []
+                    iteration_action_evidence = persist_iteration_action_evidence(
+                        iteration,
+                        planned,
+                        rejected,
+                    )
                     if planned:
                         action = planned[0]
                         if action["action"] == "click":
@@ -2084,12 +2143,14 @@ async def run_application_workflow(
                             iteration,
                             stage=iteration_stage,
                             artifacts={
+                                "action_evidence": _manifest_artifact(iteration_action_evidence, f"iterations/{iteration:04d}/action_evidence.json", iteration=iteration, stage=iteration_stage),
                                 "action": _manifest_artifact(iteration_action, f"iterations/{iteration:04d}/action.json", iteration=iteration, stage=iteration_stage),
                                 "observation": _manifest_artifact(iteration_observation, f"iterations/{iteration:04d}/observation.json", iteration=iteration, stage=iteration_stage),
                                 "plan": _manifest_artifact(iteration_plan, f"iterations/{iteration:04d}/plan.json", iteration=iteration, stage=iteration_stage),
                                 "checkpoint": _manifest_artifact(iteration_checkpoint, f"iterations/{iteration:04d}/checkpoint.json", iteration=iteration, stage=iteration_stage),
                             },
                         )
+                        _write_run_manifest(run, manifest_payload)
                         final_plan = plan
                         continue
                     optional_inference_reasons = {

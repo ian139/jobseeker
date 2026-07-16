@@ -20,6 +20,52 @@ def _payload():
     }
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    (
+        ("min_length", True),
+        ("min_length", -1),
+        ("min_length", "1"),
+        ("max_length", 1.5),
+        ("max_length", -1),
+        ("pattern", 1),
+        ("min_value", 1),
+        ("max_value", False),
+        ("step", 1),
+        ("step", ["1"]),
+    ),
+)
+def test_observation_rejects_malformed_constraint_types(key, value):
+    payload = _payload()
+    payload["fields"] = [{
+        "target_id": "field",
+        "field_key": "field",
+        "kind": "text",
+        key: value,
+    }]
+    with pytest.raises(app.BrowserAdapterError, match="protocol_invalid_response"):
+        app._observation_from_payload(payload)
+
+
+def test_observation_accepts_typed_constraints():
+    payload = _payload()
+    payload["fields"] = [{
+        "target_id": "field",
+        "field_key": "field",
+        "kind": "number",
+        "min_length": 0,
+        "max_length": 20,
+        "pattern": r"[0-9]+",
+        "min_value": "1",
+        "max_value": "10",
+        "step": "1",
+    }]
+    field = app._observation_from_payload(payload).fields[0]
+    assert (field.min_length, field.max_length, field.pattern, field.min_value, field.max_value, field.step) == (
+        0, 20, r"[0-9]+", "1", "10", "1"
+    )
+
+
 class FakeSession:
     starts = 0
     releases = 0
@@ -219,6 +265,105 @@ def test_lever_auto_workflow_persists_policy_and_no_final_submit(monkeypatch, tm
     assert manifest["ats_policy"] == "lever"
     assert manifest["no_final_submit"] is True
     assert calls[0]["ats_policy"] == "lever"
+
+
+def test_iteration_action_evidence_is_durable_before_mutation(monkeypatch, tmp_path: Path) -> None:
+    claims = [ApplicationClaim(73, {"id": 73, "canonical_url": "https://boards.greenhouse.io/a/jobs/73", "title": "Evidence"})]
+    deterministic_plan = app.AutofillPlan(
+        answers=(
+            app.FieldAnswer("safe-field", "Ada", 1.0, "configured", "profile"),
+            app.FieldAnswer("rejected-field", "ignored", 1.0, "configured", "profile"),
+        ),
+        status="ready",
+        reason_code=app.PublicReasonCode.draft_ready,
+    )
+
+    class EvidenceSession(FakeSession):
+        @classmethod
+        def start(cls, **kwargs):
+            return cls(kwargs["session_manifest"])
+
+        def __init__(self, manifest):
+            super().__init__(manifest)
+            self.observations = 0
+            self.filled = False
+
+        def observe(self):
+            self.observations += 1
+            payload = _payload()
+            payload["fields"] = [
+                {
+                    "target_id": "safe-field",
+                    "field_key": "safe",
+                    "kind": "text",
+                    "visible": True,
+                    "enabled": True,
+                    "value": "Ada" if self.filled else None,
+                    "valid": True,
+                    "will_validate": True,
+                },
+                {
+                    "target_id": "rejected-field",
+                    "field_key": "rejected",
+                    "kind": "text",
+                    "visible": False,
+                    "enabled": True,
+                    "value": None,
+                    "valid": True,
+                    "will_validate": True,
+                },
+            ]
+            return payload
+
+        def fill(self, target_id, value):
+            assert target_id == "safe-field"
+            evidence_path = self.manifest.parent / "iterations" / "0001" / "action_evidence.json"
+            assert evidence_path.exists()
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            assert evidence["ats_policy"] == "greenhouse"
+            assert evidence["no_final_submit"] is True
+            assert evidence["planned"] == [{
+                "target_id": "safe-field",
+                "action": "fill",
+                "kind": "text",
+                "source": "profile",
+                "value_length": 3,
+            }]
+            assert evidence["rejected"] == [{
+                "target_id": "rejected-field",
+                "action": "fill",
+                "reason": "ineligible_field",
+            }]
+            manifest = json.loads((self.manifest.parent / "run.json").read_text(encoding="utf-8"))
+            indexed = manifest["iterations"]["1"]["artifacts"]["action_evidence"]
+            assert indexed["sha256"] == hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+            assert manifest["no_final_submit"] is True
+            self.filled = True
+
+    monkeypatch.setattr(app, "PuppeteerSession", EvidenceSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in ("register_application_artifact", "register_application_session", "register_application_owner_process", "register_application_browser_process"):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, "_configured_and_profile_plan", lambda *args, **kwargs: deterministic_plan)
+    monkeypatch.setattr(app, "resolve_with_llm", lambda *args, **kwargs: app.AutofillPlan())
+
+    resume = tmp_path / "resume.txt"
+    resume.write_text("resume")
+    root = tmp_path / "artifacts"
+    result = asyncio.run(app.run_application_workflow(object(), resume_file=resume, artifact_root=root))
+
+    assert result[0]["status"] == "review_ready"
+    run_dir = root / "run-73"
+    evidence_path = run_dir / "iterations" / "0001" / "action_evidence.json"
+    evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert evidence["iteration"] == 1
+    manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    indexed = manifest["iterations"]["1"]["artifacts"]["action_evidence"]
+    assert indexed["sha256"] == hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    assert manifest["no_final_submit"] is True
+    actions = json.loads((run_dir / "actions.json").read_text(encoding="utf-8"))
+    assert actions["final_submit_calls"] == 0
 
 
 

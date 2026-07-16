@@ -99,6 +99,8 @@ every future adapter and preference feature.
 
 - [x] Make batch backlog upserts atomic with caller-aware BEGIN/SAVEPOINT semantics, preserving public single-row commit behavior and rolling back earlier rows when a later item fails. Coverage is in `tests/test_backlog_ingestion.py`.
 
+- [x] Allow runtime-backed non-final native submit continuations only through an explicit framed protocol flag, same-origin/no-form/no-navigation/no-sensitive gates, and final-target exclusion. Generic submit/input/role controls and final submission remain denied. Coverage is in `tests/test_application_workflow.py`, `tests/test_puppeteer_adapter.py`, and the Puppeteer smoke.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

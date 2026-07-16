@@ -120,6 +120,7 @@ uv run --frozen jobs-assistant import-feed
 | Command | Description |
 |---|---|
 | `init-db` | Initialize the SQLite jobs/sync database |
+| `backlog-list` | List backlog jobs without claiming or mutating them; opens an existing SQLite database read-only and fails with `database_error` without creating a missing path |
 | `theirstack-preview` | Preview the unfiltered TheirStack total for a source profile without saving jobs; an ATS flag is descriptive only |
 | `theirstack-sync` | Paid-fetch full jobs, then filter pinned Greenhouse/Lever routes before upsert; requires `--paid-fetch` or `THEIRSTACK_ENABLE_PAID_FETCH=true` |
 | `job-scrape` | Compatibility wrapper for `theirstack-sync`; `--count` maps to TheirStack paid-fetch `limit`, and SQLite dedupe still removes duplicates by source job ID and canonical URL |
@@ -128,6 +129,8 @@ uv run --frozen jobs-assistant import-feed
 | `autofill-review list` | List the latest unreviewed application runs |
 | `autofill-review complete` | Record the human's `submitted` or `skipped` decision |
 | `autofill-review retry` | Queue an explicit retry for a reviewed run |
+
+`backlog-list` accepts `--status {queued,in_progress,archived}` and `--limit 1-100`. It never initializes or writes the database, so a missing `--db` path remains absent.
 
 ## Autofill flags and inputs
 
@@ -395,6 +398,7 @@ Exact CLI help checks:
 ```bash
 uv run --frozen jobs-assistant --help
 uv run --frozen jobs-assistant init-db --help
+uv run --frozen jobs-assistant backlog-list --help
 uv run --frozen jobs-assistant import-feed --help
 uv run --frozen jobs-assistant theirstack-preview --help
 uv run --frozen jobs-assistant theirstack-sync --help

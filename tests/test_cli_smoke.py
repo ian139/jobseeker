@@ -213,6 +213,17 @@ def test_cli_backlog_list_empty_db(tmp_path: Path, capsys) -> None:
         "total": 0,
     }
 
+def test_cli_backlog_list_missing_db_fails_without_creating_file(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "missing.sqlite3"
+
+    assert not db.exists()
+    assert main(["--db", str(db), "backlog-list"]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == '{"error": {"code": "database_error", "message": "database operation failed"}}\n'
+    assert not db.exists()
+
 
 def test_cli_backlog_list_filters_orders_and_limits_without_raw_json(tmp_path: Path, capsys) -> None:
     db = tmp_path / "jobs.sqlite3"

@@ -405,8 +405,8 @@ def _validate_sqlite_ancestor_directory(st: os.stat_result) -> None:
         raise PermissionError("unsafe writable SQLite ancestor")
 
 
-def _secure_prepare_sqlite_path(db_path: Path) -> None:
-    """Validate and prepare a SQLite path without following path symlinks."""
+def _secure_prepare_sqlite_path(db_path: Path, *, create: bool = True) -> None:
+    """Validate and optionally prepare a SQLite path without following path symlinks."""
     raw = os.fspath(db_path)
     uid = os.geteuid()
     if raw == ":memory:":
@@ -421,7 +421,7 @@ def _secure_prepare_sqlite_path(db_path: Path) -> None:
     try:
         for component in components[:-1]:
             _validate_sqlite_ancestor_directory(os.fstat(current_fd))
-            child_fd = _open_dir_component(current_fd, component, create=True)
+            child_fd = _open_dir_component(current_fd, component, create=create)
             opened.append(child_fd)
             current_fd = child_fd
         parent = os.fstat(current_fd)
@@ -436,6 +436,8 @@ def _secure_prepare_sqlite_path(db_path: Path) -> None:
         try:
             st = os.stat(filename, dir_fd=current_fd, follow_symlinks=False)
         except FileNotFoundError:
+            if not create:
+                raise
             try:
                 fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0), 0o600, dir_fd=current_fd)
                 os.close(fd)
@@ -471,6 +473,25 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
         connection.execute("PRAGMA foreign_keys=ON")
         if str(db_path) != ":memory:":
             _secure_prepare_sqlite_path(Path(db_path))
+    except BaseException:
+        connection.close()
+        raise
+    return connection
+
+
+def connect_read_only(db_path: str | Path) -> sqlite3.Connection:
+    """Open an existing SQLite file without permitting writes."""
+    if str(db_path) == ":memory:":
+        raise sqlite3.OperationalError("read-only SQLite connection requires an existing file")
+    path = Path(db_path)
+    _secure_prepare_sqlite_path(path, create=False)
+    uri = f"{path.absolute().as_uri()}?mode=ro"
+    connection = sqlite3.connect(uri, uri=True, timeout=30.0)
+    try:
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA query_only=ON")
+        _secure_prepare_sqlite_path(path, create=False)
     except BaseException:
         connection.close()
         raise

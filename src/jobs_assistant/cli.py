@@ -39,6 +39,7 @@ from .db import (
     REASON_STATUS,
     complete_review,
     connect,
+    connect_read_only,
     init_db,
     initialize_database,
     latest_sync_checkpoint,
@@ -1036,7 +1037,9 @@ def _run_backlog_list(args: argparse.Namespace) -> int:
     connection = None
     try:
         try:
-            connection = connect(args.db)
+            connection = connect_read_only(args.db)
+        except FileNotFoundError as exc:
+            raise _CliFailure("database_error") from exc
         except (PermissionError, OSError) as exc:
             raise _CliFailure("database_privacy_error") from exc
         counts = count_backlog(connection)

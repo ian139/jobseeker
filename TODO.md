@@ -83,6 +83,8 @@ every future adapter and preference feature.
 
 - [x] Cover the Lever policy-aware button-only workflow, proving safe continuation actions use the selected ATS policy and remain non-final. Coverage is in `tests/test_application_workflow.py`.
 
+- [x] Keep readiness and safe-click progress signatures generation-agnostic while retaining final-control membership, preventing stale semantic comparisons without treating re-observation IDs as progress. Coverage is in `tests/test_application_pipeline.py`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

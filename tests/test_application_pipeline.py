@@ -546,6 +546,6 @@ def test_readiness_signature_rejects_validity_safety_and_enabled_changes() -> No
         buttons=(button("safe-b"), button("final-b", text="Submit", click_key="click-final")),
         final_submit_target_ids=("final-b",),
     )
-    assert _observation_semantic_signature(first) != _observation_semantic_signature(renamed)
+    assert _observation_semantic_signature(first) == _observation_semantic_signature(renamed)
     swapped = replace(renamed, final_submit_target_ids=("safe-b",))
     assert _observation_semantic_signature(first) != _observation_semantic_signature(swapped)

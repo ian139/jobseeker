@@ -15,7 +15,7 @@ def _non_empty_string(value: Any) -> str | None:
 
 
 def _description_value(raw: dict[str, Any]) -> str | None:
-    for key in ("description", "job_description", "description_html"):
+    for key in ("description", "job_description", "description_text", "description_html"):
         value = _non_empty_string(raw.get(key))
         if value is not None:
             return value

@@ -64,6 +64,18 @@ def test_import_source_jobs_persists_and_updates_metadata():
     row = conn.execute("SELECT location, remote, description FROM jobs").fetchone()
     assert (row["location"], row["remote"], row["description"]) == ("Montreal", 0, "<p>Updated description</p>")
 
+def test_source_job_normalization_accepts_description_text_alias():
+    source = normalize_source_job(
+        {
+            "id": "description-text",
+            "title": "Dev",
+            "company": "Acme",
+            "description_text": "Build platform services.",
+        }
+    )
+
+    assert source.description == "Build platform services."
+
 
 def test_source_job_normalization_does_not_coerce_malformed_metadata():
     source = normalize_source_job(

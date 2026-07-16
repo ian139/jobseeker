@@ -14,6 +14,16 @@ class UpsertResult:
     inserted: bool
     updated: bool
 
+MAX_ARCHIVE_JOB_IDS = 100
+
+
+class BacklogArchiveError(ValueError):
+    """A queued-backlog archive request was rejected."""
+
+
+class BacklogArchiveConflictError(BacklogArchiveError):
+    """A requested backlog row was missing or not queued."""
+
 
 def _upsert_job(conn: sqlite3.Connection, job: JobInput) -> UpsertResult:
     canonical = canonicalize_url(job.url)
@@ -103,3 +113,65 @@ def count_backlog(conn: sqlite3.Connection) -> dict[str, int]:
         "SELECT COUNT(*) AS total, SUM(status = 'queued') AS pending FROM jobs"
     ).fetchone()
     return {"total": int(counts[0]), "pending": int(counts[1] or 0)}
+
+
+def _validated_archive_ids(job_ids: Iterable[int]) -> tuple[int, ...]:
+    if isinstance(job_ids, (str, bytes)):
+        raise BacklogArchiveError("job IDs must be positive integers")
+    try:
+        values = tuple(job_ids)
+    except TypeError as exc:
+        raise BacklogArchiveError("job IDs must be positive integers") from exc
+    if not values:
+        raise BacklogArchiveError("job IDs must not be empty")
+    if len(values) > MAX_ARCHIVE_JOB_IDS:
+        raise BacklogArchiveError(f"job IDs must contain at most {MAX_ARCHIVE_JOB_IDS} entries")
+    if any(type(value) is not int or value <= 0 for value in values):
+        raise BacklogArchiveError("job IDs must be positive integers")
+    if len(set(values)) != len(values):
+        raise BacklogArchiveError("job IDs must be unique")
+    return tuple(sorted(values))
+
+
+def archive_queued_jobs(conn: sqlite3.Connection, job_ids: Iterable[int]) -> tuple[int, ...]:
+    """Atomically archive exactly the requested queued jobs.
+
+    Every requested row must exist and still be queued.  The compare-and-set
+    update is scoped to ``status = 'queued'`` and is rolled back in full when
+    any requested row is missing or has another status.
+    """
+    ids = _validated_archive_ids(job_ids)
+    placeholders = ",".join("?" for _ in ids)
+    owns_transaction = not conn.in_transaction
+    savepoint = "_jobs_assistant_archive_queued"
+    if owns_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    else:
+        conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        rows = conn.execute(
+            f"SELECT id, status FROM jobs WHERE id IN ({placeholders})",
+            ids,
+        ).fetchall()
+        if len(rows) != len(ids):
+            raise BacklogArchiveConflictError("requested job ID was not found")
+        if any(row[1] != "queued" for row in rows):
+            raise BacklogArchiveConflictError("requested job is not queued")
+        changed = conn.execute(
+            f"UPDATE jobs SET status = 'archived' WHERE status = 'queued' AND id IN ({placeholders})",
+            ids,
+        ).rowcount
+        if changed != len(ids):
+            raise BacklogArchiveConflictError("queued job state changed")
+        if owns_transaction:
+            conn.commit()
+        else:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except BaseException:
+        if owns_transaction:
+            conn.rollback()
+        else:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
+    return ids

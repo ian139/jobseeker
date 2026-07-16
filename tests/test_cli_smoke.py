@@ -1198,3 +1198,77 @@ def test_job_scrape_forwards_pinned_ats_filter(tmp_path: Path, capsys, monkeypat
     assert output["fetched"] == 2
     assert output["ats_eligible"] == 1
     assert output["ats_rejected"] == 1
+
+
+def _add_cli_url_less_queued(db: Path) -> int:
+    connection = connect(db)
+    try:
+        result = upsert_job(
+            connection,
+            JobInput(source="feed", source_job_id="queued-url-less", url=None, title="No URL", company="Acme"),
+        )
+        return result.job_id
+    finally:
+        connection.close()
+
+
+def test_cli_backlog_archive_is_explicit_atomic_and_updates_read_only_list(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    _seed_cli_backlog(db)
+    url_less_id = _add_cli_url_less_queued(db)
+
+    assert main(["--db", str(db), "backlog-archive", "1", str(url_less_id), "--confirm"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"archived": [1, url_less_id], "count": 2}
+
+    connection = connect(db)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 6
+        assert connection.execute("SELECT status FROM jobs WHERE id=1").fetchone()[0] == "archived"
+        assert connection.execute("SELECT status FROM jobs WHERE id=?", (url_less_id,)).fetchone()[0] == "archived"
+    finally:
+        connection.close()
+
+    assert main(["--db", str(db), "backlog-list", "--status", "queued"]) == 0
+    listed = json.loads(capsys.readouterr().out)
+    assert listed["pending"] == 2
+    assert [job["id"] for job in listed["jobs"]] == [2, 3]
+
+
+def test_cli_backlog_archive_rolls_back_on_in_progress_or_missing_row(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    _seed_cli_backlog(db)
+
+    assert main(["--db", str(db), "backlog-archive", "1", "4", "--confirm"]) == 1
+    assert capsys.readouterr().err == '{"error": {"code": "backlog_archive_conflict", "message": "backlog archive state conflict"}}\n'
+    connection = connect(db)
+    try:
+        assert connection.execute("SELECT status FROM jobs WHERE id=1").fetchone()[0] == "queued"
+    finally:
+        connection.close()
+
+    assert main(["--db", str(db), "backlog-archive", "1", "999", "--confirm"]) == 1
+    assert capsys.readouterr().err == '{"error": {"code": "backlog_archive_conflict", "message": "backlog archive state conflict"}}\n'
+    connection = connect(db)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 5
+        assert connection.execute("SELECT status FROM jobs WHERE id=1").fetchone()[0] == "queued"
+    finally:
+        connection.close()
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["1"],
+        ["--confirm"],
+        ["1", "1", "--confirm"],
+        ["0", "--confirm"],
+        [*(str(value) for value in range(1, 102)), "--confirm"],
+    ],
+)
+def test_cli_backlog_archive_rejects_invalid_ids_before_opening_db(tmp_path: Path, monkeypatch, capsys, args) -> None:
+    def fail_connect(*_args, **_kwargs):
+        pytest.fail("database opened before backlog-archive argument validation")
+
+    monkeypatch.setattr(cli_mod, "connect", fail_connect)
+    assert main(["--db", str(tmp_path / "jobs.sqlite3"), "backlog-archive", *args]) == 1
+    assert capsys.readouterr().out == ""

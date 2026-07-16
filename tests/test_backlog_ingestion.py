@@ -2,7 +2,17 @@ import sqlite3
 
 import pytest
 
-from jobs_assistant.backlog import canonicalize_url, count_backlog, next_queued_jobs, upsert_job, upsert_jobs
+from jobs_assistant.backlog import (
+    MAX_ARCHIVE_JOB_IDS,
+    BacklogArchiveConflictError,
+    BacklogArchiveError,
+    archive_queued_jobs,
+    canonicalize_url,
+    count_backlog,
+    next_queued_jobs,
+    upsert_job,
+    upsert_jobs,
+)
 from jobs_assistant.contracts import JobInput
 from jobs_assistant.db import connect, init_db
 
@@ -116,3 +126,51 @@ def test_upsert_jobs_success_leaves_caller_transaction_open():
     conn.execute("ROLLBACK TO SAVEPOINT caller_scope")
     conn.execute("RELEASE SAVEPOINT caller_scope")
     assert count_backlog(conn) == {"total": 0, "pending": 0}
+
+
+def test_archive_queued_jobs_archives_url_less_rows_without_deleting_them():
+    conn = memory_db()
+    queued = upsert_job(conn, JobInput(source="feed", source_job_id="url-less", url=None, title="No URL", company="A"))
+
+    assert archive_queued_jobs(conn, [queued.job_id]) == (queued.job_id,)
+    row = conn.execute("SELECT status, canonical_url FROM jobs WHERE id=?", (queued.job_id,)).fetchone()
+    assert row["status"] == "archived"
+    assert row["canonical_url"] is None
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+
+
+def test_archive_queued_jobs_rolls_back_when_a_later_requested_row_conflicts():
+    conn = memory_db()
+    first = upsert_job(conn, JobInput(source="feed", source_job_id="first", url=None, title="First", company="A"))
+    second = upsert_job(conn, JobInput(source="feed", source_job_id="second", url=None, title="Second", company="A"))
+    conn.execute("UPDATE jobs SET status='in_progress' WHERE id=?", (second.job_id,))
+    conn.commit()
+
+    with pytest.raises(BacklogArchiveConflictError, match="not queued"):
+        archive_queued_jobs(conn, [first.job_id, second.job_id])
+
+    statuses = conn.execute("SELECT id, status FROM jobs ORDER BY id").fetchall()
+    assert [(row["id"], row["status"]) for row in statuses] == [
+        (first.job_id, "queued"),
+        (second.job_id, "in_progress"),
+    ]
+    assert conn.in_transaction is False
+
+
+@pytest.mark.parametrize(
+    ("job_ids", "message"),
+    [
+        ([], "must not be empty"),
+        ([0], "positive integers"),
+        ([1, 1], "must be unique"),
+        (list(range(1, MAX_ARCHIVE_JOB_IDS + 2)), "at most"),
+    ],
+)
+def test_archive_queued_jobs_rejects_invalid_id_lists_before_mutation(job_ids, message):
+    conn = memory_db()
+
+    with pytest.raises(BacklogArchiveError, match=message):
+        archive_queued_jobs(conn, job_ids)
+
+    assert conn.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+    assert conn.in_transaction is False

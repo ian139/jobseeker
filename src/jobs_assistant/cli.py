@@ -33,7 +33,13 @@ from .application_preferences import (
     PreferenceValidationError,
     load_application_preferences,
 )
-from .backlog import count_backlog
+from .backlog import (
+    BacklogArchiveConflictError,
+    BacklogArchiveError,
+    MAX_ARCHIVE_JOB_IDS,
+    archive_queued_jobs,
+    count_backlog,
+)
 from .application_profiles import load_application_profile_preset
 from .db import (
     REASON_STATUS,
@@ -123,7 +129,9 @@ _PUBLIC_ERROR_MESSAGES = {
     "manifest_error": "review manifest is invalid",
     "annotation_error": "review annotation was rejected",
     "annotation_unavailable": "review annotation is unavailable",
-    "state_conflict": "review state conflict",
+    "backlog_archive_confirmation": "backlog archive requires explicit confirmation",
+    "backlog_archive_input": "backlog archive input was rejected",
+    "backlog_archive_conflict": "backlog archive state conflict",
 }
 
 
@@ -495,6 +503,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=argparse.SUPPRESS,
         help="SQLite database path (also accepted as the global option before the command)",
     )
+
     backlog_list.add_argument(
         "--status",
         choices=tuple(sorted(_BACKLOG_STATUSES)),
@@ -502,6 +511,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="backlog status to list",
     )
     backlog_list.add_argument("--limit", type=int, default=25, help="maximum jobs to list, 1-100")
+
+    backlog_archive = sub.add_parser(
+        "backlog-archive",
+        help="archive explicitly selected queued jobs without deleting them",
+    )
+    backlog_archive.add_argument(
+        "--db",
+        default=argparse.SUPPRESS,
+        help="SQLite database path (also accepted as the global option before the command)",
+    )
+    backlog_archive.add_argument(
+        "job_ids",
+        nargs="*",
+        type=int,
+        metavar="JOB_ID",
+        help=f"positive queued job IDs to archive, at most {MAX_ARCHIVE_JOB_IDS}",
+    )
+    backlog_archive.add_argument(
+        "--confirm",
+        action="store_true",
+        help="confirm this explicit queued-only archive",
+    )
     _add_source_profile_argument(preview)
     _add_theirstack_ats_argument(preview)
 
@@ -1025,6 +1056,42 @@ def _run_autofill(args: argparse.Namespace) -> list[dict[str, object]]:
         raise _CliFailure("artifact_root_error") from exc
 
 
+def _validate_backlog_archive_args(args: argparse.Namespace) -> None:
+    """Reject archive controls before opening SQLite."""
+    if not args.confirm:
+        raise _CliFailure("backlog_archive_confirmation")
+    job_ids = args.job_ids
+    if not job_ids:
+        raise _CliFailure("backlog_archive_input")
+    if len(job_ids) > MAX_ARCHIVE_JOB_IDS:
+        raise _CliFailure("backlog_archive_input")
+    if any(type(job_id) is not int or job_id <= 0 for job_id in job_ids):
+        raise _CliFailure("backlog_archive_input")
+    if len(set(job_ids)) != len(job_ids):
+        raise _CliFailure("backlog_archive_input")
+
+
+def _run_backlog_archive(args: argparse.Namespace) -> int:
+    connection = None
+    try:
+        try:
+            connection = connect(args.db)
+            init_db(connection)
+        except (PermissionError, OSError) as exc:
+            raise _CliFailure("database_privacy_error") from exc
+        try:
+            archived_ids = archive_queued_jobs(connection, args.job_ids)
+        except BacklogArchiveConflictError as exc:
+            raise _CliFailure("backlog_archive_conflict") from exc
+        except BacklogArchiveError as exc:
+            raise _CliFailure("backlog_archive_input") from exc
+        print(json.dumps({"archived": list(archived_ids), "count": len(archived_ids)}, sort_keys=True))
+        return 0
+    finally:
+        if connection is not None:
+            _close_database(connection)
+
+
 def _validate_backlog_list_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Reject backlog-list controls before opening SQLite."""
     if args.status not in _BACKLOG_STATUSES:
@@ -1079,6 +1146,9 @@ def _run_database_command(args: argparse.Namespace, parser: argparse.ArgumentPar
         if args.command == "backlog-list":
             _validate_backlog_list_args(parser, args)
             return _run_backlog_list(args)
+        if args.command == "backlog-archive":
+            _validate_backlog_archive_args(args)
+            return _run_backlog_archive(args)
         try:
             connection = connect(args.db)
             init_db(connection)

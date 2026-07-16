@@ -121,6 +121,7 @@ uv run --frozen jobs-assistant import-feed
 |---|---|
 | `init-db` | Initialize the SQLite jobs/sync database |
 | `backlog-list` | List backlog jobs without claiming or mutating them; opens an existing SQLite database read-only and fails with `database_error` without creating a missing path |
+| `backlog-archive` | Archive explicitly named queued job IDs without deleting rows; requires `--confirm` and never claims or requeues jobs |
 | `theirstack-preview` | Preview the unfiltered TheirStack total for a source profile without saving jobs; an ATS flag is descriptive only |
 | `theirstack-sync` | Paid-fetch full jobs, then filter pinned Greenhouse/Lever routes before upsert; requires `--paid-fetch` or `THEIRSTACK_ENABLE_PAID_FETCH=true` |
 | `job-scrape` | Compatibility wrapper for `theirstack-sync`; `--count` maps to TheirStack paid-fetch `limit`, and SQLite dedupe still removes duplicates by source job ID and canonical URL |
@@ -131,6 +132,8 @@ uv run --frozen jobs-assistant import-feed
 | `autofill-review retry` | Queue an explicit retry for a reviewed run |
 
 `backlog-list` accepts `--status {queued,in_progress,archived}` and `--limit 1-100`. It never initializes or writes the database, so a missing `--db` path remains absent.
+
+`backlog-archive JOB_ID... --confirm` accepts 1-100 positive, unique IDs. The command uses an all-or-nothing queued-only compare-and-set: missing, `in_progress`, or already archived IDs reject the entire request without changing any job row. URL-less queued rows are eligible. Its JSON output contains only the sorted archived IDs and count; `backlog-list` remains read-only and reports the updated pending count.
 
 ## Autofill flags and inputs
 

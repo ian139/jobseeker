@@ -72,12 +72,14 @@ class FakeSession:
     closes = 0
     tokens: list[str] = []
 
-    def __init__(self, manifest):
+    def __init__(self, manifest, screenshot_root=None):
         self.owner_pid = 1
         self.browser_pid = 2
         self.owner_identity = {"pid": 1, "pgid": 1, "birth": "fake"}
         self.browser_identity = {"pid": 2, "pgid": 2, "birth": "fake"}
         self.manifest = Path(manifest)
+        self.screenshot_root = Path(screenshot_root) if screenshot_root is not None else self.manifest.parent / "screenshots"
+        self.screenshot_slots: list[str] = []
 
     @classmethod
     def start(cls, **kwargs):
@@ -87,13 +89,36 @@ class FakeSession:
         cls.starts += 1
         if cls.starts == 2:
             raise RuntimeError("browser_start_error")
-        return cls(kwargs["session_manifest"])
+        return cls(kwargs["session_manifest"], kwargs.get("screenshot_root"))
 
     def goto(self, url, *, ats_policy=None):
         return {"url": url, "ats_policy": ats_policy}
 
     def observe(self):
         return _payload()
+
+    def screenshot(self, slot="final", *, full_page=False):
+        self.screenshot_slots.append(slot)
+        self.screenshot_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.screenshot_root.chmod(0o700)
+        payload = b"fixture screenshot"
+        digest = hashlib.sha256(payload).hexdigest()
+        path = self.screenshot_root / f"screenshot-{digest[:16]}.png"
+        deduplicated = path.exists()
+        if not deduplicated:
+            path.write_bytes(payload)
+            path.chmod(0o600)
+        return {
+            "path": path.name,
+            "reference": f"screenshot:{digest}",
+            "bytes": len(payload),
+            "sha256": digest,
+            "full_page": bool(full_page),
+            "truncated": False,
+            "pixel_width": 1280,
+            "pixel_height": 720,
+            "deduplicated": deduplicated,
+        }
 
     def prepare_handoff(self, **kwargs):
         return {"state": "prepared"}
@@ -109,6 +134,7 @@ class FakeSession:
 
     def close(self):
         type(self).closes += 1
+
 
 
 def test_handoff_manifest_accepts_only_single_sha256_token_hash(tmp_path):
@@ -169,6 +195,107 @@ def test_limit_two_claims_independent_handoffs_and_later_launch_failure(monkeypa
     assert finished[0]["artifact_dir"] != finished[1]["artifact_dir"]
     assert all(entry["ats"] == "greenhouse" for entry in result)
     assert [claim.run_id for claim in claims] == [13]
+
+
+def test_workflow_indexes_verified_private_screenshot_metadata(monkeypatch, tmp_path: Path):
+    class ScreenshotSession(FakeSession):
+        starts = 0
+
+    claims = [ApplicationClaim(
+        201,
+        {
+            "id": 201,
+            "canonical_url": "https://boards.greenhouse.io/a/jobs/201",
+            "title": "Screenshot fixture",
+        },
+    )]
+    monkeypatch.setattr(app, "PuppeteerSession", ScreenshotSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in (
+        "register_application_artifact",
+        "register_application_session",
+        "register_application_owner_process",
+        "register_application_browser_process",
+    ):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+
+    result = asyncio.run(app.run_application_workflow(
+        object(),
+        resume_file=resume,
+        artifact_root=root,
+        headed=True,
+    ))
+
+    assert result[0]["status"] == "review_ready"
+    run_dir = root / "run-201"
+    manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert set(manifest["screenshots"]) == {"initial", "final"}
+    assert (run_dir / "screenshots").stat().st_mode & 0o777 == 0o700
+    for slot, indexed in manifest["screenshots"].items():
+        assert indexed["path"].startswith("screenshots/")
+        screenshot_path = run_dir / indexed["path"]
+        assert screenshot_path.stat().st_mode & 0o777 == 0o600
+        screenshot_bytes = screenshot_path.read_bytes()
+        assert indexed["bytes"] == len(screenshot_bytes)
+        assert indexed["sha256"] == hashlib.sha256(screenshot_bytes).hexdigest()
+        assert indexed["reference"] == f"screenshot:{indexed['sha256']}"
+        artifact_index = manifest["artifacts"][f"screenshot_{slot}"]
+        assert artifact_index["path"] == indexed["path"]
+        assert artifact_index["sha256"] == indexed["sha256"]
+    assert json.loads((run_dir / "actions.json").read_text())["final_submit_calls"] == 0
+
+
+def test_screenshot_capture_failure_is_durable_and_unindexed(monkeypatch, tmp_path: Path):
+    class ScreenshotFailureSession(FakeSession):
+        starts = 0
+
+        def screenshot(self, slot="final", *, full_page=False):
+            raise app.BrowserAdapterError("artifact_budget")
+
+    claims = [ApplicationClaim(
+        202,
+        {
+            "id": 202,
+            "canonical_url": "https://boards.greenhouse.io/a/jobs/202",
+            "title": "Screenshot failure fixture",
+        },
+    )]
+    monkeypatch.setattr(app, "PuppeteerSession", ScreenshotFailureSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in (
+        "register_application_artifact",
+        "register_application_session",
+        "register_application_owner_process",
+        "register_application_browser_process",
+    ):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+
+    result = asyncio.run(app.run_application_workflow(
+        object(),
+        resume_file=resume,
+        artifact_root=root,
+    ))
+
+    assert result[0]["status"] == "failed"
+    assert result[0]["reason_code"] == "browser_error"
+    run_dir = root / "run-202"
+    failure = json.loads((run_dir / "browser_failure.json").read_text(encoding="utf-8"))
+    assert failure["stage"] == "observation"
+    assert failure["operation"] == "screenshot"
+    assert failure["code"] == "artifact_budget"
+    manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert manifest["screenshots"] == {}
+    assert "screenshot_initial" not in manifest["artifacts"]
+    indexed = manifest["artifacts"]["browser_failure"]
+    assert indexed["sha256"] == hashlib.sha256((run_dir / indexed["path"]).read_bytes()).hexdigest()
 
 def test_workflow_keeps_listing_description_separate_from_profile_summary(monkeypatch, tmp_path: Path):
     listing_description = "LISTING_SENTINEL"

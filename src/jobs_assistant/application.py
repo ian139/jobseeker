@@ -87,6 +87,10 @@ DEFAULT_LLM_THINK = "low"
 MAX_AUTOFILL_ITERATIONS = 100
 MAX_LLM_BYTES = 1024 * 1024
 MAX_REQUEST_BYTES = 512 * 1024
+MAX_SCREENSHOTS_PER_RUN = 10
+MAX_SCREENSHOT_BYTES = 20 * 1024 * 1024
+MAX_SCREENSHOT_TOTAL_BYTES = 50 * 1024 * 1024
+SCREENSHOT_SLOTS = frozenset({"initial", "after-reveal", "blocker", "final"})
 GREENHOUSE_ITERATION_PATH = (
     "claim_job", "observe", "resolve", "execute_one_safe_action", "persist_evidence", "commit_review_handoff"
 )
@@ -1577,6 +1581,175 @@ def _manifest_set_artifact(
     artifacts[key] = _manifest_artifact(result, relative_path, iteration=iteration, stage=stage)
 
 
+def _screenshot_payload(run: ArtifactRun, payload: Any) -> dict[str, Any]:
+    """Validate one browser screenshot response and its private file."""
+    if not isinstance(payload, Mapping):
+        raise BrowserAdapterError("protocol_invalid_response")
+    required = (
+        "path",
+        "reference",
+        "bytes",
+        "sha256",
+        "full_page",
+        "truncated",
+        "pixel_width",
+        "pixel_height",
+    )
+    if any(key not in payload for key in required):
+        raise BrowserAdapterError("protocol_invalid_response")
+    path = payload.get("path")
+    if (
+        not isinstance(path, str)
+        or not path
+        or len(path) > 256
+        or Path(path).name != path
+        or path in {".", ".."}
+        or "\\" in path
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,255}\.png", path)
+    ):
+        raise BrowserAdapterError("artifact_error")
+    reference = payload.get("reference")
+    digest = payload.get("sha256")
+    size = payload.get("bytes")
+    if (
+        not isinstance(reference, str)
+        or not isinstance(digest, str)
+        or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        or reference != f"screenshot:{digest}"
+        or type(size) is not int
+        or size < 0
+        or size > MAX_SCREENSHOT_BYTES
+    ):
+        raise BrowserAdapterError("protocol_invalid_response")
+    full_page = payload.get("full_page")
+    truncated = payload.get("truncated")
+    pixel_width = payload.get("pixel_width")
+    pixel_height = payload.get("pixel_height")
+    if (
+        type(full_page) is not bool
+        or type(truncated) is not bool
+        or type(pixel_width) is not int
+        or type(pixel_height) is not int
+        or pixel_width < 0
+        or pixel_height < 0
+    ):
+        raise BrowserAdapterError("protocol_invalid_response")
+    deduplicated = payload.get("deduplicated", False)
+    if type(deduplicated) is not bool:
+        raise BrowserAdapterError("protocol_invalid_response")
+    relative_path = f"screenshots/{path}"
+    try:
+        persisted = run.read_bytes(
+            relative_path,
+            max_bytes=MAX_SCREENSHOT_BYTES,
+            expected_sha256=digest,
+        )
+    except Exception:
+        raise BrowserAdapterError("artifact_error") from None
+    if len(persisted) != size:
+        raise BrowserAdapterError("artifact_error")
+    return {
+        "path": relative_path,
+        "reference": reference,
+        "bytes": size,
+        "sha256": digest,
+        "full_page": full_page,
+        "truncated": truncated,
+        "pixel_width": pixel_width,
+        "pixel_height": pixel_height,
+        "deduplicated": deduplicated,
+    }
+
+
+def _screenshot_index_state(payload: Mapping[str, Any]) -> tuple[dict[str, tuple[str, int]], int]:
+    raw = payload.get("screenshots", {})
+    if not isinstance(raw, dict):
+        raise BrowserAdapterError("artifact_error")
+    distinct: dict[str, tuple[str, int]] = {}
+    for slot, item in raw.items():
+        if slot not in SCREENSHOT_SLOTS or not isinstance(item, Mapping):
+            raise BrowserAdapterError("artifact_error")
+        path = item.get("path")
+        digest = item.get("sha256")
+        size = item.get("bytes")
+        reference = item.get("reference")
+        if (
+            not isinstance(path, str)
+            or not path.startswith("screenshots/")
+            or path.count("/") != 1
+            or not re.fullmatch(r"screenshots/[A-Za-z0-9][A-Za-z0-9._-]{0,255}\.png", path)
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or reference != f"screenshot:{digest}"
+            or type(size) is not int
+            or size < 0
+            or size > MAX_SCREENSHOT_BYTES
+        ):
+            raise BrowserAdapterError("artifact_error")
+        prior = distinct.get(digest)
+        if prior is not None and prior != (path, size):
+            raise BrowserAdapterError("artifact_error")
+        distinct[digest] = (path, size)
+    return distinct, sum(size for _, size in distinct.values())
+
+
+def _manifest_set_screenshot(
+    run: ArtifactRun,
+    payload: dict[str, Any],
+    slot: str,
+    screenshot: Mapping[str, Any],
+    *,
+    iteration: int,
+    stage: str,
+) -> None:
+    if slot not in SCREENSHOT_SLOTS:
+        raise BrowserAdapterError("artifact_error")
+    distinct, total_bytes = _screenshot_index_state(payload)
+    digest = screenshot["sha256"]
+    path = screenshot["path"]
+    size = screenshot["bytes"]
+    prior = distinct.get(digest)
+    if prior is not None and prior != (path, size):
+        raise BrowserAdapterError("artifact_error")
+    raw_screenshots = payload.get("screenshots", {})
+    if not isinstance(raw_screenshots, dict):
+        raise BrowserAdapterError("artifact_error")
+    existing_slot = raw_screenshots.get(slot)
+    if existing_slot is not None and (
+        not isinstance(existing_slot, Mapping)
+        or existing_slot.get("sha256") != digest
+    ):
+        raise BrowserAdapterError("artifact_error")
+    if prior is None and (
+        len(distinct) >= MAX_SCREENSHOTS_PER_RUN
+        or total_bytes + size > MAX_SCREENSHOT_TOTAL_BYTES
+    ):
+        raise BrowserAdapterError("artifact_error")
+    indexed = dict(screenshot)
+    indexed["iteration"] = iteration
+    indexed["stage"] = stage
+    screenshots = dict(raw_screenshots)
+    screenshots[slot] = indexed
+    raw_artifacts = payload.get("artifacts", {})
+    if not isinstance(raw_artifacts, dict):
+        raise BrowserAdapterError("artifact_error")
+    artifacts = dict(raw_artifacts)
+    artifacts[f"screenshot_{slot.replace('-', '_')}"] = {
+        "path": path,
+        "reference": screenshot["reference"],
+        "sha256": digest,
+        "bytes": size,
+        "iteration": iteration,
+        "stage": stage,
+    }
+    updated = dict(payload)
+    updated["screenshots"] = screenshots
+    updated["artifacts"] = artifacts
+    _write_run_manifest(run, updated)
+    payload.clear()
+    payload.update(updated)
+
+
 
 
 def _manifest_set_iteration(
@@ -1829,6 +2002,7 @@ async def run_application_workflow(
                     "stage": "claimed",
                     "commit_token_sha256": None,
                     "artifacts": {},
+                    "screenshots": {},
                     "inputs": {
                         "application_profile_preset": profile_provenance,
                         "application_profile_json": profile_json_provenance,
@@ -1886,6 +2060,7 @@ async def run_application_workflow(
                         raise RuntimeError("database_error")
                 start_kwargs: dict[str, Any] = {
                     "headless": not headed, "run_cwd": run_dir_path, "input_root": input_dir,
+                    "screenshot_root": run_dir_path / "screenshots",
                     "session_manifest": session_manifest, "staged_input": resume.basename,
                     "staged_sha256": resume.sha256, "staged_media_type": resume.media_type,
                     "session_id": session_id, "run_id": run_id, "job_id": int(job.get("id", 0)),
@@ -1895,6 +2070,8 @@ async def run_application_workflow(
                 accepts_kwargs = any(item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values())
                 if "ats_policy" not in parameters and not accepts_kwargs:
                     start_kwargs.pop("ats_policy", None)
+                if "screenshot_root" not in parameters and not accepts_kwargs:
+                    start_kwargs.pop("screenshot_root", None)
                 if "on_owner_identity" in parameters or accepts_kwargs:
                     start_kwargs["on_owner_identity"] = on_owner_identity
                 if "on_browser_identity" in parameters or accepts_kwargs:
@@ -1993,6 +2170,45 @@ async def run_application_workflow(
                     )
                     _write_run_manifest(run, manifest_payload)
                     return result
+                async def capture_screenshot(slot: str, stage: str, iteration: int) -> None:
+                    if run is None or manifest_payload is None:
+                        raise RuntimeError("manifest_error")
+                    try:
+                        response = await _invoke_browser(
+                            "screenshot",
+                            stage,
+                            iteration,
+                            lambda: session.screenshot(slot, full_page=False),
+                        )
+                    except _BrowserFailure:
+                        raise
+                    try:
+                        screenshot = _screenshot_payload(run, response)
+                        _manifest_set_screenshot(
+                            run,
+                            manifest_payload,
+                            slot,
+                            screenshot,
+                            iteration=iteration,
+                            stage=stage,
+                        )
+                    except BrowserAdapterError as exc:
+                        raise _BrowserFailure(
+                            stage,
+                            "screenshot",
+                            normalize_browser_error_code(str(exc)),
+                            iteration,
+                        ) from None
+                    except Exception:
+                        raise _BrowserFailure(
+                            stage,
+                            "screenshot",
+                            "artifact_error",
+                            iteration,
+                        ) from None
+
+                await capture_screenshot("initial", "observation", 1)
+
 
                 for iteration in range(1, MAX_AUTOFILL_ITERATIONS + 1):
                     latest_iteration = iteration
@@ -2063,6 +2279,7 @@ async def run_application_workflow(
                     if observation.blockers:
                         reason = _enum_reason(observation.blockers[0].code)
                         final_plan = AutofillPlan(status="manual", reason_code=reason)
+                        await capture_screenshot("blocker", "blocker", iteration)
                         break
                     if observation.errors:
                         reason = PublicReasonCode.page_validation_error
@@ -2429,6 +2646,11 @@ async def run_application_workflow(
                 reason = _enum_reason(final_plan.reason_code)
                 status = _status_for_reason(reason)
                 can_handoff = headed and status in {"review_ready", "manual", "blocked"} and reason not in {PublicReasonCode.unsupported_ats, PublicReasonCode.ats_mismatch, PublicReasonCode.invalid_application_url, PublicReasonCode.unsafe_network_attempt}
+                await capture_screenshot(
+                    "final",
+                    "handoff" if can_handoff else "final",
+                    final_iteration,
+                )
                 if can_handoff:
                     await _invoke_browser(
                         "prepare_handoff",
@@ -2523,6 +2745,7 @@ async def run_application_workflow(
                                 "ats_policy": adapter_name,
                                 "no_final_submit": True,
                                 "artifacts": {},
+                                "screenshots": {},
                                 "iterations": {},
                             }
                         manifest_payload["stage"] = "failed"

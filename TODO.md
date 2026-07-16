@@ -93,6 +93,8 @@ every future adapter and preference feature.
 
 - [x] Add validated paid TheirStack pagination with deterministic multi-page aggregation, envelope/metadata consistency checks, pinned ATS filtering before global dedupe, preview credit safety, and no partial return on malformed later pages. Coverage is in `tests/test_theirstack_sync.py`.
 
+- [x] Enforce the paid pagination safety cap deterministically when `total_results` is absent by counting successful page requests before issuing the next credit-consuming request. Coverage is in `tests/test_theirstack_sync.py`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

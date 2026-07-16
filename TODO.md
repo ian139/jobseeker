@@ -89,6 +89,10 @@ every future adapter and preference feature.
 
 - [x] Reject malformed field constraint types at the observation boundary while accepting typed nonnegative lengths and string constraint values. Coverage is in `tests/test_application_workflow.py`.
 
+- [x] Link each guarded action plan to a private, canonical observation snapshot with target-generation/selector fidelity, SHA-256 verification, and mutation-failure retention. Coverage is in `tests/test_application_workflow.py` and `tests/test_application_pipeline.py`.
+
+- [x] Add validated paid TheirStack pagination with deterministic multi-page aggregation, envelope/metadata consistency checks, pinned ATS filtering before global dedupe, preview credit safety, and no partial return on malformed later pages. Coverage is in `tests/test_theirstack_sync.py`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

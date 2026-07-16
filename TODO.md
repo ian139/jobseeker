@@ -101,6 +101,10 @@ every future adapter and preference feature.
 
 - [x] Allow runtime-backed non-final native submit continuations only through an explicit framed protocol flag, same-origin/no-form/no-navigation/no-sensitive gates, and final-target exclusion. Generic submit/input/role controls and final submission remain denied. Coverage is in `tests/test_application_workflow.py`, `tests/test_puppeteer_adapter.py`, and the Puppeteer smoke.
 
+- [x] Normalize TheirStack `external_id` and `source_job_id` aliases after existing ID precedence, enabling stable URL-less ingestion and dedupe while retaining transactional rejection for malformed records. Coverage is in `tests/test_theirstack_sync.py`.
+
+- [x] Permit guarded same-document Greenhouse/Lever SPA continuations only when approved route identity, HTTPS origin/frame chain, final-like exclusion, and zero post-click network activity all hold. Preserve distinct unsafe navigation/network failures and no-submit behavior. Coverage is in `tests/test_application_workflow.py` and `tests/test_puppeteer_adapter.py`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

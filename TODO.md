@@ -113,6 +113,8 @@ every future adapter and preference feature.
 
 - [x] Add exact, parameterized `--source` filtering to read-only `backlog-list`, with pre-connect validation, source-scoped counts, deterministic ordering, literal SQL-injection-safe matching, and unchanged no-source behavior. Coverage is in `tests/test_cli_smoke.py`; syntax and full package checks pass.
 
+- [x] Expose import-feed source provenance through validated `--source`, preserving the `job_source` default while keeping distinct feed sources filterable in the backlog. Coverage is in `tests/test_cli_smoke.py` and `tests/test_job_source.py`; default, invalid, and injection-like source cases pass.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

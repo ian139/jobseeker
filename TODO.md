@@ -95,6 +95,8 @@ every future adapter and preference feature.
 
 - [x] Enforce the paid pagination safety cap deterministically when `total_results` is absent by counting successful page requests before issuing the next credit-consuming request. Coverage is in `tests/test_theirstack_sync.py`.
 
+- [x] Complete configured resume uploads across valid re-observation, retaining the file without re-upload, resolving required-file state, and stopping review-ready with zero final submissions. Coverage is in `tests/test_application_workflow.py`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

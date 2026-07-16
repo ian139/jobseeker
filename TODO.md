@@ -71,6 +71,9 @@ every future adapter and preference feature.
       yield fewer eligible jobs than the raw limit, and repeats deduplicate
       without pagination. Preserve the legacy `auto` checkpoint behavior.
 
+- [x] Preserve normalized source location, remote status, and description metadata across feed normalization and backlog upserts, including supported aliases and malformed-value rejection. Coverage is in `tests/test_job_source.py`.
+- [x] Reject unframed browser protocol responses and poison the session after a bad length prefix; coverage is in `tests/test_puppeteer_adapter.py`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

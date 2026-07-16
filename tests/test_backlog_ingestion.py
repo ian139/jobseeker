@@ -1,6 +1,8 @@
 import sqlite3
 
-from jobs_assistant.backlog import canonicalize_url, count_backlog, next_queued_jobs, upsert_job
+import pytest
+
+from jobs_assistant.backlog import canonicalize_url, count_backlog, next_queued_jobs, upsert_job, upsert_jobs
 from jobs_assistant.contracts import JobInput
 from jobs_assistant.db import connect, init_db
 
@@ -46,3 +48,71 @@ def test_count_backlog_supports_raw_sqlite_connections():
     conn.execute("CREATE TABLE jobs (status TEXT)")
     conn.executemany("INSERT INTO jobs(status) VALUES (?)", [("queued",), ("done",)])
     assert count_backlog(conn) == {"total": 2, "pending": 1}
+
+
+def test_upsert_jobs_rolls_back_when_a_later_job_is_invalid():
+    conn = memory_db()
+
+    jobs = iter(
+        [
+            JobInput(source="feed", source_job_id="first", url="https://a.test/first", title="First", company="A"),
+            JobInput(source="feed", source_job_id=None, url=None, title="Invalid", company="A"),
+        ]
+    )
+    with pytest.raises(ValueError, match="source_job_id or url"):
+        upsert_jobs(conn, jobs)
+
+    assert count_backlog(conn) == {"total": 0, "pending": 0}
+    assert conn.in_transaction is False
+
+
+def test_upsert_jobs_reports_inserted_and_updated_counts():
+    conn = memory_db()
+    upsert_job(conn, JobInput(source="feed", source_job_id="existing", url="https://a.test/existing", title="Old", company="A"))
+
+    assert upsert_jobs(
+        conn,
+        [
+            JobInput(source="feed", source_job_id="existing", url="https://a.test/existing", title="New", company="A"),
+            JobInput(source="feed", source_job_id="new", url="https://a.test/new", title="New", company="B"),
+        ],
+    ) == (1, 1)
+    rows = conn.execute("SELECT source_job_id, title FROM jobs ORDER BY source_job_id").fetchall()
+    assert [(row["source_job_id"], row["title"]) for row in rows] == [("existing", "New"), ("new", "New")]
+
+
+def test_upsert_jobs_rollback_is_bounded_by_caller_transaction():
+    conn = memory_db()
+    conn.execute("CREATE TABLE caller_state (value TEXT NOT NULL)")
+    conn.commit()
+    conn.execute("BEGIN")
+    conn.execute("INSERT INTO caller_state(value) VALUES ('keep')")
+
+    with pytest.raises(ValueError, match="source_job_id or url"):
+        upsert_jobs(
+            conn,
+            [
+                JobInput(source="feed", source_job_id="first", url="https://a.test/first", title="First", company="A"),
+                JobInput(source="feed", source_job_id=None, url=None, title="Invalid", company="A"),
+            ],
+        )
+
+    assert conn.in_transaction is True
+    assert conn.execute("SELECT value FROM caller_state").fetchone()["value"] == "keep"
+    assert count_backlog(conn) == {"total": 0, "pending": 0}
+    conn.commit()
+
+
+def test_upsert_jobs_success_leaves_caller_transaction_open():
+    conn = memory_db()
+    conn.execute("SAVEPOINT caller_scope")
+
+    assert upsert_jobs(
+        conn,
+        [JobInput(source="feed", source_job_id="first", url="https://a.test/first", title="First", company="A")],
+    ) == (1, 0)
+    assert conn.in_transaction is True
+
+    conn.execute("ROLLBACK TO SAVEPOINT caller_scope")
+    conn.execute("RELEASE SAVEPOINT caller_scope")
+    assert count_backlog(conn) == {"total": 0, "pending": 0}

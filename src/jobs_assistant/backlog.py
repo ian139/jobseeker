@@ -15,7 +15,7 @@ class UpsertResult:
     updated: bool
 
 
-def upsert_job(conn: sqlite3.Connection, job: JobInput) -> UpsertResult:
+def _upsert_job(conn: sqlite3.Connection, job: JobInput) -> UpsertResult:
     canonical = canonicalize_url(job.url)
     if not job.source_job_id and not canonical:
         raise ValueError("job needs source_job_id or url")
@@ -33,7 +33,6 @@ def upsert_job(conn: sqlite3.Connection, job: JobInput) -> UpsertResult:
             """,
             (job.source, job.source_job_id, canonical, job.title, job.company, job.location, remote, job.posted_at, now, job.description, raw_json, now, now),
         )
-        conn.commit()
         return UpsertResult(int(cur.lastrowid), True, False)
     conn.execute(
         """
@@ -44,16 +43,39 @@ def upsert_job(conn: sqlite3.Connection, job: JobInput) -> UpsertResult:
         """,
         (job.source_job_id, canonical, job.title, job.company, job.location, remote, job.posted_at, job.description, raw_json, now, existing_id),
     )
-    conn.commit()
     return UpsertResult(existing_id, False, True)
+
+
+def upsert_job(conn: sqlite3.Connection, job: JobInput) -> UpsertResult:
+    result = _upsert_job(conn, job)
+    conn.commit()
+    return result
 
 
 def upsert_jobs(conn: sqlite3.Connection, jobs: Iterable[JobInput]) -> tuple[int, int]:
     inserted = updated = 0
-    for job in jobs:
-        result = upsert_job(conn, job)
-        inserted += int(result.inserted)
-        updated += int(result.updated)
+    owns_transaction = not conn.in_transaction
+    savepoint = "_jobs_assistant_upsert_jobs"
+    if owns_transaction:
+        conn.execute("BEGIN")
+    else:
+        conn.execute(f"SAVEPOINT {savepoint}")
+    try:
+        for job in jobs:
+            result = _upsert_job(conn, job)
+            inserted += int(result.inserted)
+            updated += int(result.updated)
+        if owns_transaction:
+            conn.commit()
+        else:
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+    except BaseException:
+        if owns_transaction:
+            conn.rollback()
+        else:
+            conn.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+            conn.execute(f"RELEASE SAVEPOINT {savepoint}")
+        raise
     return inserted, updated
 
 

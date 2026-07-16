@@ -321,6 +321,7 @@ def test_iteration_action_evidence_is_durable_before_mutation(monkeypatch, tmp_p
             assert evidence_path.exists()
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
             assert evidence["ats_policy"] == "greenhouse"
+            assert evidence["observation_id"] == "obs-1"
             assert evidence["no_final_submit"] is True
             assert evidence["planned"] == [{
                 "target_id": "safe-field",
@@ -1122,6 +1123,9 @@ def test_each_mutation_failure_is_diagnostic_and_not_retried(monkeypatch, tmp_pa
     assert payload["operation"] == operation
     assert payload["iteration"] == 1
     assert payload["code"] == "browser_command_failed"
+    evidence_path = run_dir / "iterations" / "0001" / "action_evidence.json"
+    evidence = json.loads(evidence_path.read_text())
+    assert evidence["observation_id"] == "obs-1"
     assert MutationFailureSession.calls[operation] == 1
     assert "SECRET_SENTINEL" not in json.dumps(payload)
 

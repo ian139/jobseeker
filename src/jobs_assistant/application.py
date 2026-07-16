@@ -1431,6 +1431,7 @@ def _manifest_set_iteration(
 def _action_evidence_payload(
     *,
     iteration: int,
+    observation_id: str,
     ats_policy: str,
     planned: list[dict[str, Any]],
     rejected: list[dict[str, Any]],
@@ -1438,6 +1439,7 @@ def _action_evidence_payload(
     return {
         "version": 1,
         "iteration": iteration,
+        "observation_id": observation_id,
         "ats_policy": ats_policy,
         "no_final_submit": True,
         "planned": planned,
@@ -1784,6 +1786,7 @@ async def run_application_workflow(
                 final_plan: AutofillPlan | None = None
                 def persist_iteration_action_evidence(
                     iteration: int,
+                    observation_id: str,
                     planned: list[dict[str, Any]],
                     rejected: list[dict[str, Any]],
                 ) -> Any:
@@ -1792,6 +1795,7 @@ async def run_application_workflow(
                     relative_path = f"iterations/{iteration:04d}/action_evidence.json"
                     evidence = _action_evidence_payload(
                         iteration=iteration,
+                        observation_id=observation_id,
                         ats_policy=adapter.name,
                         planned=planned,
                         rejected=rejected,
@@ -2056,6 +2060,7 @@ async def run_application_workflow(
                         planned = []
                     iteration_action_evidence = persist_iteration_action_evidence(
                         iteration,
+                        observation.observation_id,
                         planned,
                         rejected,
                     )

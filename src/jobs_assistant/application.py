@@ -391,6 +391,98 @@ def _observation_summary(observation: PageObservation) -> dict[str, Any]:
         "required_count": sum(1 for field in observation.fields if field.required), "final_marker_count": len(observation.final_submit_target_ids),
         "error_count": len(observation.errors), "blocker_codes": [blocker.code for blocker in observation.blockers],
     }
+def _observation_snapshot(observation: PageObservation) -> dict[str, Any]:
+    """Serialize the exact private observation that authorized one action."""
+    return {
+        "observation_id": observation.observation_id,
+        "url": observation.url,
+        "title": observation.title,
+        "site_markers": list(observation.site_markers),
+        "fields": [
+            {
+                "target_id": field.target_id,
+                "field_key": field.field_key,
+                "frame_id": field.frame_id,
+                "frame_url": field.frame_url,
+                "form_action_url": field.form_action_url,
+                "kind": field.kind,
+                "name": field.name,
+                "label": field.label,
+                "group_id": field.group_id,
+                "option_value": field.option_value,
+                "safety_descriptors": list(field.safety_descriptors),
+                "selector": field.selector,
+                "required": field.required,
+                "visible": field.visible,
+                "enabled": field.enabled,
+                "readonly": field.readonly,
+                "value": field.value,
+                "will_validate": field.will_validate,
+                "valid": field.valid,
+                "validity_flags": list(field.validity_flags),
+                "file_count": field.file_count,
+                "file_basenames": list(field.file_basenames),
+                "accept": list(field.accept),
+                "min_length": field.min_length,
+                "max_length": field.max_length,
+                "pattern": field.pattern,
+                "min_value": field.min_value,
+                "max_value": field.max_value,
+                "step": field.step,
+                "options": [
+                    {"value": option.value, "label": option.label, "enabled": option.enabled}
+                    for option in field.options
+                ],
+            }
+            for field in observation.fields
+        ],
+        "buttons": [
+            {
+                "target_id": button.target_id,
+                "frame_id": button.frame_id,
+                "frame_url": button.frame_url,
+                "click_key": button.click_key,
+                "element_id": button.element_id,
+                "element_kind": button.element_kind,
+                "text": button.text,
+                "selector": button.selector,
+                "button_type": button.button_type,
+                "name": button.name,
+                "value": button.value,
+                "target": button.target,
+                "download": button.download,
+                "effective_action_url": button.effective_action_url,
+                "effective_method": button.effective_method,
+                "href_url": button.href_url,
+                "href_attribute": button.href_attribute,
+                "visible": button.visible,
+                "enabled": button.enabled,
+                "safety_descriptors": list(button.safety_descriptors),
+            }
+            for button in observation.buttons
+        ],
+        "final_submit_target_ids": list(observation.final_submit_target_ids),
+        "errors": [
+            {"target_id": error.target_id, "text": error.text}
+            for error in observation.errors
+        ],
+        "blockers": [
+            {"code": blocker.code, "frame_id": blocker.frame_id, "text": blocker.text}
+            for blocker in observation.blockers
+        ],
+    }
+
+def _observation_snapshot_sha256(observation: PageObservation) -> str:
+    """Return the canonical digest of a private observation snapshot."""
+    encoded = json.dumps(
+        _observation_snapshot(observation),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+
 
 def _observation_semantic_signature(observation: PageObservation) -> tuple[Any, ...]:
     """Compare all planning-relevant state without generation IDs/selectors."""
@@ -1432,14 +1524,18 @@ def _action_evidence_payload(
     *,
     iteration: int,
     observation_id: str,
+    observation_artifact: str,
+    observation_sha256: str,
     ats_policy: str,
     planned: list[dict[str, Any]],
     rejected: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
-        "version": 1,
+        "version": 2,
         "iteration": iteration,
         "observation_id": observation_id,
+        "observation_artifact": observation_artifact,
+        "observation_sha256": observation_sha256,
         "ats_policy": ats_policy,
         "no_final_submit": True,
         "planned": planned,
@@ -1787,15 +1883,19 @@ async def run_application_workflow(
                 def persist_iteration_action_evidence(
                     iteration: int,
                     observation_id: str,
+                    observation_result: Any,
                     planned: list[dict[str, Any]],
                     rejected: list[dict[str, Any]],
                 ) -> Any:
                     if run is None or manifest_payload is None:
                         raise RuntimeError("manifest_error")
                     relative_path = f"iterations/{iteration:04d}/action_evidence.json"
+                    observation_path = f"iterations/{iteration:04d}/observation.json"
                     evidence = _action_evidence_payload(
                         iteration=iteration,
                         observation_id=observation_id,
+                        observation_artifact=observation_path,
+                        observation_sha256=observation_result.sha256,
                         ats_policy=adapter.name,
                         planned=planned,
                         rejected=rejected,
@@ -1806,6 +1906,12 @@ async def run_application_workflow(
                         iteration,
                         stage="action_planned",
                         artifacts={
+                            "observation": _manifest_artifact(
+                                observation_result,
+                                observation_path,
+                                iteration=iteration,
+                                stage="action_planned",
+                            ),
                             "action_evidence": _manifest_artifact(
                                 result,
                                 relative_path,
@@ -2058,9 +2164,21 @@ async def run_application_workflow(
                     if conflict:
                         plan = AutofillPlan(status="manual", reason_code=PublicReasonCode.preexisting_value_conflict, skipped_target_ids=plan.skipped_target_ids)
                         planned = []
+                    observation_path = f"iterations/{iteration:04d}/observation.json"
+                    iteration_observation = _write_json_verified(
+                        run,
+                        observation_path,
+                        _observation_snapshot(observation),
+                    )
+                    if not hmac.compare_digest(
+                        iteration_observation.sha256,
+                        _observation_snapshot_sha256(observation),
+                    ):
+                        raise RuntimeError("artifact_hash_mismatch")
                     iteration_action_evidence = persist_iteration_action_evidence(
                         iteration,
                         observation.observation_id,
+                        iteration_observation,
                         planned,
                         rejected,
                     )
@@ -2125,11 +2243,6 @@ async def run_application_workflow(
                             f"iterations/{iteration:04d}/action.json",
                             executed_action,
                         )
-                        iteration_observation = _write_json_verified(
-                            run,
-                            f"iterations/{iteration:04d}/observation.json",
-                            _observation_summary(observation),
-                        )
                         iteration_plan = _write_json_verified(
                             run,
                             f"iterations/{iteration:04d}/plan.json",
@@ -2150,7 +2263,7 @@ async def run_application_workflow(
                             artifacts={
                                 "action_evidence": _manifest_artifact(iteration_action_evidence, f"iterations/{iteration:04d}/action_evidence.json", iteration=iteration, stage=iteration_stage),
                                 "action": _manifest_artifact(iteration_action, f"iterations/{iteration:04d}/action.json", iteration=iteration, stage=iteration_stage),
-                                "observation": _manifest_artifact(iteration_observation, f"iterations/{iteration:04d}/observation.json", iteration=iteration, stage=iteration_stage),
+                                "observation": _manifest_artifact(iteration_observation, observation_path, iteration=iteration, stage=iteration_stage),
                                 "plan": _manifest_artifact(iteration_plan, f"iterations/{iteration:04d}/plan.json", iteration=iteration, stage=iteration_stage),
                                 "checkpoint": _manifest_artifact(iteration_checkpoint, f"iterations/{iteration:04d}/checkpoint.json", iteration=iteration, stage=iteration_stage),
                             },

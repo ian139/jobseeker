@@ -530,6 +530,18 @@ def test_action_evidence_allows_deterministic_canonical_answer():
     assert planned and planned[0]["target_id"] == item.target_id
     assert rejected == []
 
+def test_observation_snapshot_digest_includes_generation_and_selector_fields() -> None:
+    first = observation(field(target_id="generation-a"))
+    changed_generation = observation(field(target_id="generation-b"))
+    changed_selector = observation(replace(first.fields[0], selector="#generation-b"))
+
+    snapshot = app._observation_snapshot(first)
+    assert snapshot["observation_id"] == first.observation_id
+    assert snapshot["fields"][0]["target_id"] == "generation-a"
+    assert snapshot["fields"][0]["selector"] == "#ignored"
+    assert app._observation_snapshot_sha256(first) != app._observation_snapshot_sha256(changed_generation)
+    assert app._observation_snapshot_sha256(first) != app._observation_snapshot_sha256(changed_selector)
+
 def test_readiness_signature_rejects_validity_safety_and_enabled_changes() -> None:
     baseline = observation(field(valid=True, enabled=True, descriptors=("safe",)))
     disabled = observation(field(valid=True, enabled=False, descriptors=("safe",)))

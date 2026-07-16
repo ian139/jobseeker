@@ -338,6 +338,21 @@ def test_iteration_action_evidence_is_durable_before_mutation(monkeypatch, tmp_p
             manifest = json.loads((self.manifest.parent / "run.json").read_text(encoding="utf-8"))
             indexed = manifest["iterations"]["1"]["artifacts"]["action_evidence"]
             assert indexed["sha256"] == hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+            observation_path = self.manifest.parent / "iterations" / "0001" / "observation.json"
+            assert observation_path.exists()
+            snapshot = json.loads(observation_path.read_text(encoding="utf-8"))
+            assert snapshot["observation_id"] == "obs-1"
+            assert snapshot["fields"][0]["target_id"] == "safe-field"
+            assert snapshot["fields"][0]["selector"] == ""
+            assert snapshot["fields"][0]["frame_id"] == ""
+            observation_sha256 = hashlib.sha256(observation_path.read_bytes()).hexdigest()
+            assert observation_sha256 == app._observation_snapshot_sha256(app._observation_from_payload(snapshot))
+            assert evidence["observation_artifact"] == "iterations/0001/observation.json"
+            assert evidence["observation_sha256"] == observation_sha256
+            indexed_observation = manifest["iterations"]["1"]["artifacts"]["observation"]
+            assert indexed_observation["path"] == "iterations/0001/observation.json"
+            assert indexed_observation["sha256"] == observation_sha256
+            assert indexed_observation["sha256"] == evidence["observation_sha256"]
             assert manifest["no_final_submit"] is True
             self.filled = True
 
@@ -1126,6 +1141,17 @@ def test_each_mutation_failure_is_diagnostic_and_not_retried(monkeypatch, tmp_pa
     evidence_path = run_dir / "iterations" / "0001" / "action_evidence.json"
     evidence = json.loads(evidence_path.read_text())
     assert evidence["observation_id"] == "obs-1"
+    observation_path = run_dir / "iterations" / "0001" / "observation.json"
+    assert observation_path.exists()
+    snapshot = json.loads(observation_path.read_text())
+    assert snapshot["observation_id"] == evidence["observation_id"]
+    observation_sha256 = hashlib.sha256(observation_path.read_bytes()).hexdigest()
+    assert evidence["observation_artifact"] == "iterations/0001/observation.json"
+    assert evidence["observation_sha256"] == observation_sha256
+    manifest = json.loads((run_dir / "run.json").read_text())
+    indexed = manifest["iterations"]["1"]["artifacts"]
+    assert indexed["observation"]["sha256"] == observation_sha256
+    assert indexed["action_evidence"]["sha256"] == hashlib.sha256(evidence_path.read_bytes()).hexdigest()
     assert MutationFailureSession.calls[operation] == 1
     assert "SECRET_SENTINEL" not in json.dumps(payload)
 

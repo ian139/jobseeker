@@ -1,5 +1,6 @@
 import httpx
 import pytest
+from types import MappingProxyType
 
 from jobs_assistant.db import connect, init_db
 from jobs_assistant.job_source import fetch_source_jobs, import_source_jobs, normalize_source_job, source_job_to_input
@@ -120,6 +121,35 @@ def test_import_source_jobs_dedupes_by_external_id():
     assert conn.execute("SELECT title FROM jobs").fetchone()["title"] == "Dev II"
 
 
+def test_import_source_jobs_accepts_mapping_records():
+    conn = connect(":memory:")
+    init_db(conn)
+    record = MappingProxyType(
+        {"id": "mapping", "title": "Dev", "company": "Acme", "apply_url": "https://a.test/mapping"}
+    )
+
+    assert import_source_jobs(conn, [record]) == (1, 1, 0)
+
+
+def test_import_source_jobs_validates_all_records_before_upsert():
+    conn = connect(":memory:")
+    init_db(conn)
+    existing = {"id": "existing", "title": "Existing", "company": "Acme", "apply_url": "https://a.test/existing"}
+    assert import_source_jobs(conn, [existing]) == (1, 1, 0)
+
+    with pytest.raises(ValueError, match="object"):
+        import_source_jobs(
+            conn,
+            [
+                {"id": "new", "title": "New", "company": "Acme", "apply_url": "https://a.test/new"},
+                "private malformed record",
+            ],
+        )
+
+    rows = conn.execute("SELECT source_job_id, title FROM jobs ORDER BY id").fetchall()
+    assert [(row["source_job_id"], row["title"]) for row in rows] == [("existing", "Existing")]
+
+
 class _SourceClient:
     def __init__(self, payload):
         self.payload = payload
@@ -157,6 +187,7 @@ def test_fetch_source_jobs_accepts_supported_envelopes_and_empty_lists(payload):
         [{"id": "valid"}, "malformed"],
         {"data": [{"id": "valid"}, None]},
         {"jobs": [{"id": "valid"}], "data": {}},
+        {"jobs": [{"id": "valid"}], "data": [None]},
     ],
 )
 def test_fetch_source_jobs_rejects_malformed_envelopes_and_items(payload):

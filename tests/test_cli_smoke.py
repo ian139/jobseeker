@@ -530,6 +530,51 @@ def test_cli_import_feed_json_fixture_defaults_to_job_source(tmp_path: Path, cap
         connection.close()
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [{"id": "list-1", "title": "List Engineer", "company": "Acme", "apply_url": "https://jobs.example.com/list-1"}],
+        {"data": [{"id": "data-1", "title": "Data Engineer", "company": "Acme", "apply_url": "https://jobs.example.com/data-1"}]},
+    ],
+)
+def test_cli_import_feed_accepts_list_and_data_envelopes(tmp_path: Path, capsys, payload):
+    db = tmp_path / "jobs.sqlite3"
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert main(["--db", str(db), "import-feed", "--json-file", str(fixture)]) == 0
+    assert json.loads(capsys.readouterr().out) == {"inserted": 1, "seen": 1, "updated": 0}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        17,
+        "private raw payload",
+        {},
+        {"results": []},
+        {"jobs": {}},
+        {"data": None},
+        {"jobs": [{"id": "valid"}, "private malformed record"]},
+        {"data": [{"id": "valid"}, None]},
+        {"jobs": [{"id": "valid"}], "data": [None]},
+    ],
+)
+def test_cli_import_feed_rejects_malformed_payload_without_writes(tmp_path: Path, capsys, payload):
+    db = tmp_path / "jobs.sqlite3"
+    fixture = tmp_path / "private-feed.json"
+    fixture.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert main(["--db", str(db), "import-feed", "--json-file", str(fixture)]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == '{"error": {"code": "invalid_input", "message": "autofill input was rejected"}}\n'
+    assert str(fixture) not in captured.err
+    assert "private" not in captured.err
+    assert not db.exists()
+
+
 def test_cli_import_feed_keeps_distinct_sources_for_backlog_filters(tmp_path: Path, capsys, monkeypatch):
     db = tmp_path / "jobs.sqlite3"
     fixture = tmp_path / "jobs.json"

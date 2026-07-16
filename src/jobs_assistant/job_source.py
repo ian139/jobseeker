@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 import httpx
 
@@ -52,23 +53,60 @@ def _date_posted_value(raw: dict[str, Any]) -> str | None:
     return None
 
 
-def normalize_source_job(raw: dict[str, Any]) -> SourceJob:
-    external_id = raw.get("id") or raw.get("external_id") or raw.get("source_job_id")
-    title = raw.get("title") or raw.get("job_title")
-    company = raw.get("company") or raw.get("company_name")
+def _validated_job_records(raw_jobs: Iterable[Any]) -> list[dict[str, Any]]:
+    try:
+        records = list(raw_jobs)
+    except TypeError as exc:
+        raise ValueError("job source records must be iterable") from exc
+    validated: list[dict[str, Any]] = []
+    for item in records:
+        if not isinstance(item, Mapping):
+            raise ValueError("job source record must be an object")
+        validated.append(item if isinstance(item, dict) else dict(item))
+    return validated
+
+
+def extract_source_jobs(payload: Any) -> list[dict[str, Any]]:
+    """Validate a source response envelope and return its job records."""
+    if isinstance(payload, list):
+        return _validated_job_records(payload)
+    if not isinstance(payload, Mapping):
+        raise ValueError("job source returned unsupported JSON")
+    selected: list[dict[str, Any]] | None = None
+    for key in ("jobs", "data"):
+        if key not in payload:
+            continue
+        candidate = payload[key]
+        if not isinstance(candidate, list):
+            raise ValueError(f"job source response field {key!r} is not a list")
+        candidate_records = _validated_job_records(candidate)
+        if selected is None:
+            selected = candidate_records
+    if selected is None:
+        raise ValueError("job source response is missing a recognized job-list key")
+    return selected
+
+
+def normalize_source_job(raw: Mapping[str, Any]) -> SourceJob:
+    if not isinstance(raw, Mapping):
+        raise ValueError("job source record must be an object")
+    raw_record = raw if isinstance(raw, dict) else dict(raw)
+    external_id = raw_record.get("id") or raw_record.get("external_id") or raw_record.get("source_job_id")
+    title = raw_record.get("title") or raw_record.get("job_title")
+    company = raw_record.get("company") or raw_record.get("company_name")
     if isinstance(company, dict):
         company = company.get("name")
     return SourceJob(
         external_id=None if external_id is None else str(external_id),
         title=str(title or "Untitled role"),
         company=None if company is None else str(company),
-        listing_url=None if raw.get("listing_url") is None else str(raw.get("listing_url")),
-        apply_url=None if (raw.get("apply_url") or raw.get("url")) is None else str(raw.get("apply_url") or raw.get("url")),
-        date_posted=_date_posted_value(raw),
-        raw=raw,
-        location=_location_value(raw),
-        remote=_remote_value(raw),
-        description=_description_value(raw),
+        listing_url=None if raw_record.get("listing_url") is None else str(raw_record.get("listing_url")),
+        apply_url=None if (raw_record.get("apply_url") or raw_record.get("url")) is None else str(raw_record.get("apply_url") or raw_record.get("url")),
+        date_posted=_date_posted_value(raw_record),
+        raw=raw_record,
+        location=_location_value(raw_record),
+        remote=_remote_value(raw_record),
+        description=_description_value(raw_record),
     )
 
 
@@ -87,8 +125,9 @@ def source_job_to_input(source_job: SourceJob, *, source: str = "job_source") ->
     )
 
 
-def import_source_jobs(conn: Any, raw_jobs: Iterable[dict[str, Any]], *, source: str = "job_source") -> tuple[int, int, int]:
-    inputs = [source_job_to_input(normalize_source_job(raw), source=source) for raw in raw_jobs]
+def import_source_jobs(conn: Any, raw_jobs: Iterable[Mapping[str, Any]], *, source: str = "job_source") -> tuple[int, int, int]:
+    records = _validated_job_records(raw_jobs)
+    inputs = [source_job_to_input(normalize_source_job(raw), source=source) for raw in records]
     inserted, updated = upsert_jobs(conn, inputs)
     return len(inputs), inserted, updated
 
@@ -101,26 +140,4 @@ def fetch_source_jobs(base_url: str, *, api_key: str | None = None, client: http
     http = client or httpx.Client(timeout=30)
     response = http.get(url, headers=headers)
     response.raise_for_status()
-    payload = response.json()
-    if isinstance(payload, list):
-        items = payload
-    elif isinstance(payload, dict):
-        selected: list[dict[str, Any]] | None = None
-        for key in ("jobs", "data"):
-            if key not in payload:
-                continue
-            candidate = payload[key]
-            if not isinstance(candidate, list):
-                raise ValueError(f"job source response field {key!r} is not a list")
-            if any(not isinstance(item, dict) for item in candidate):
-                raise ValueError(f"job source response field {key!r} contains a non-object job")
-            if selected is None:
-                selected = candidate
-        if selected is None:
-            raise ValueError("job source response is missing a recognized job-list key")
-        items = selected
-    else:
-        raise ValueError("job source returned unsupported JSON")
-    if any(not isinstance(item, dict) for item in items):
-        raise ValueError("job source response contains a non-object job")
-    return items
+    return extract_source_jobs(response.json())

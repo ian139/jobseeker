@@ -58,7 +58,7 @@ from .db import (
     update_sync_run,
     utc_now,
 )
-from .job_source import fetch_source_jobs, import_source_jobs
+from .job_source import extract_source_jobs, fetch_source_jobs, import_source_jobs
 from .theirstack import (
     ATS_FILTER_NAMES,
     PROFILE_NAMES,
@@ -1294,6 +1294,7 @@ def _run_backlog_show(args: argparse.Namespace) -> int:
 
 def _run_database_command(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     connection = None
+    preloaded_jobs = None
     try:
         if args.command == "backlog-list":
             _validate_backlog_list_args(parser, args)
@@ -1306,6 +1307,13 @@ def _run_database_command(args: argparse.Namespace, parser: argparse.ArgumentPar
             return _run_backlog_archive(args)
         if args.command == "import-feed":
             _validate_import_feed_args(parser, args)
+            if args.json_file:
+                try:
+                    preloaded_jobs = extract_source_jobs(json.loads(Path(args.json_file).read_text()))
+                except (OSError, RecursionError, TypeError, ValueError) as exc:
+                    raise _CliFailure("invalid_input") from exc
+            elif not (args.base_url or os.environ.get("JOB_SOURCE_BASE_URL")):
+                parser.error("import-feed requires --json-file, --base-url, or JOB_SOURCE_BASE_URL")
         try:
             connection = connect(args.db)
             init_db(connection)
@@ -1316,12 +1324,9 @@ def _run_database_command(args: argparse.Namespace, parser: argparse.ArgumentPar
             return 0
         if args.command == "import-feed":
             if args.json_file:
-                payload = json.loads(Path(args.json_file).read_text())
-                raw_jobs = payload if isinstance(payload, list) else payload.get("jobs", payload.get("data", []))
+                raw_jobs = preloaded_jobs
             else:
                 base_url = args.base_url or os.environ.get("JOB_SOURCE_BASE_URL")
-                if not base_url:
-                    parser.error("import-feed requires --json-file, --base-url, or JOB_SOURCE_BASE_URL")
                 raw_jobs = fetch_source_jobs(base_url, api_key=os.environ.get("JOB_SOURCE_API_KEY"))
             seen, inserted, updated = import_source_jobs(connection, raw_jobs, source=args.source)
             print(json.dumps({"seen": seen, "inserted": inserted, "updated": updated}, sort_keys=True))

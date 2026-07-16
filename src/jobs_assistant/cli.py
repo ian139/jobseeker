@@ -36,11 +36,16 @@ from .application_preferences import (
     load_application_preferences,
 )
 from .backlog import (
+    BACKLOG_PUBLIC_FIELDS as _BACKLOG_PUBLIC_FIELDS,
+    BACKLOG_STATUSES as _BACKLOG_STATUSES,
     BacklogArchiveConflictError,
     BacklogArchiveError,
     MAX_ARCHIVE_JOB_IDS,
+    MAX_BACKLOG_LIMIT,
+    MAX_BACKLOG_OFFSET,
+    MAX_BACKLOG_SOURCE_CHARS,
     archive_queued_jobs,
-    count_backlog,
+    list_backlog_jobs,
 )
 from .application_profiles import load_application_profile_preset
 from .db import (
@@ -100,22 +105,6 @@ _REVIEW_PUBLIC_FIELDS = frozenset(
 _REVIEW_STATUSES = frozenset({"running", "review_ready", "manual", "blocked", "failed"})
 _REVIEW_OUTCOMES = frozenset({"submitted", "skipped", "retry"})
 _REVIEW_WINDOW_STATES = frozenset({"open", "starting", "prepared", "closed", "stale", "failed", "none", "unknown"})
-_BACKLOG_STATUSES = frozenset({"queued", "in_progress", "archived"})
-MAX_BACKLOG_SOURCE_CHARS = 128
-MAX_BACKLOG_OFFSET = 100_000
-_BACKLOG_PUBLIC_FIELDS = (
-    "id",
-    "source",
-    "source_job_id",
-    "canonical_url",
-    "title",
-    "company",
-    "location",
-    "remote",
-    "posted_at",
-    "discovered_at",
-    "status",
-)
 MAX_BACKLOG_DESCRIPTION_CHARS = 12_000
 
 
@@ -1187,8 +1176,8 @@ def _validate_backlog_list_args(parser: argparse.ArgumentParser, args: argparse.
     """Reject backlog-list controls before opening SQLite."""
     if args.status not in _BACKLOG_STATUSES:
         parser.error("backlog-list --status is unsupported")
-    if type(args.limit) is not int or not 1 <= args.limit <= 100:
-        parser.error("backlog-list --limit must be between 1 and 100")
+    if type(args.limit) is not int or not 1 <= args.limit <= MAX_BACKLOG_LIMIT:
+        parser.error(f"backlog-list --limit must be between 1 and {MAX_BACKLOG_LIMIT}")
     offset = getattr(args, "offset", 0)
     if type(offset) is not int or not 0 <= offset <= MAX_BACKLOG_OFFSET:
         parser.error(f"backlog-list --offset must be between 0 and {MAX_BACKLOG_OFFSET}")
@@ -1218,40 +1207,13 @@ def _run_backlog_list(args: argparse.Namespace) -> int:
         except (PermissionError, OSError) as exc:
             raise _CliFailure("database_privacy_error") from exc
         offset = getattr(args, "offset", 0)
-        if args.source is None:
-            counts = count_backlog(connection)
-            rows = connection.execute(
-                """
-                SELECT id, source, source_job_id, canonical_url, title, company,
-                       location, remote, posted_at, discovered_at, status
-                FROM jobs
-                WHERE status = ?
-                ORDER BY posted_at DESC NULLS LAST, first_seen_at ASC, id ASC
-                LIMIT ? OFFSET ?
-                """,
-                (args.status, args.limit, offset),
-            ).fetchall()
-        else:
-            count_row = connection.execute(
-                "SELECT COUNT(*) AS total, SUM(status = 'queued') AS pending FROM jobs WHERE source = ?",
-                (args.source,),
-            ).fetchone()
-            counts = {
-                "total": int(count_row["total"]),
-                "pending": int(count_row["pending"] or 0),
-            }
-            rows = connection.execute(
-                """
-                SELECT id, source, source_job_id, canonical_url, title, company,
-                       location, remote, posted_at, discovered_at, status
-                FROM jobs
-                WHERE status = ? AND source = ?
-                ORDER BY posted_at DESC NULLS LAST, first_seen_at ASC, id ASC
-                LIMIT ? OFFSET ?
-                """,
-                (args.status, args.source, args.limit, offset),
-            ).fetchall()
-        jobs = [{field: row[field] for field in _BACKLOG_PUBLIC_FIELDS} for row in rows]
+        jobs, counts = list_backlog_jobs(
+            connection,
+            status=args.status,
+            source=args.source,
+            limit=args.limit,
+            offset=offset,
+        )
         output: dict[str, object] = {
             "jobs": jobs,
             "limit": args.limit,

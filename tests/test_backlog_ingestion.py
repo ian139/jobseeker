@@ -3,12 +3,17 @@ import sqlite3
 import pytest
 
 from jobs_assistant.backlog import (
+    BACKLOG_PUBLIC_FIELDS,
+    MAX_BACKLOG_LIMIT,
+    MAX_BACKLOG_OFFSET,
+    MAX_BACKLOG_SOURCE_CHARS,
     MAX_ARCHIVE_JOB_IDS,
     BacklogArchiveConflictError,
     BacklogArchiveError,
     archive_queued_jobs,
     canonicalize_url,
     count_backlog,
+    list_backlog_jobs,
     next_queued_jobs,
     upsert_job,
     upsert_jobs,
@@ -52,6 +57,108 @@ def test_next_queued_jobs_returns_queued_jobs_without_applier_state():
     upsert_job(conn, JobInput(source="feed", source_job_id="1", url="https://a.test/apply", title="Dev", company="A", posted_at="2026-01-01"))
     assert [row["source_job_id"] for row in next_queued_jobs(conn, limit=1)] == ["1"]
 
+
+def _seed_backlog_query_rows(conn):
+    rows = (
+        ("feed", "queued-new", "2026-03-01", "2026-01-03", "queued"),
+        ("feed", "queued-tie-first", "2026-02-01", "2026-01-02", "queued"),
+        ("feed", "queued-tie-last", "2026-02-01", "2026-01-04", "queued"),
+        ("feed", "queued-null", None, "2026-01-05", "queued"),
+        ("feed", "in-progress", "2026-04-01", "2026-01-06", "in_progress"),
+        ("feed", "archived", "2026-05-01", "2026-01-07", "archived"),
+        ("other-feed", "other-queued", "2026-06-01", "2026-01-08", "queued"),
+    )
+    job_ids = {}
+    for source, source_job_id, posted_at, first_seen_at, status in rows:
+        result = upsert_job(
+            conn,
+            JobInput(
+                source=source,
+                source_job_id=source_job_id,
+                url=f"https://a.test/{source_job_id}",
+                title=source_job_id,
+                company="A",
+                posted_at=posted_at,
+            ),
+        )
+        job_ids[source_job_id] = result.job_id
+        conn.execute(
+            "UPDATE jobs SET status=?, first_seen_at=?, last_seen_at=? WHERE id=?",
+            (status, first_seen_at, first_seen_at, result.job_id),
+        )
+    conn.commit()
+    return job_ids
+
+
+def test_list_backlog_jobs_filters_all_statuses_and_orders_stably():
+    conn = memory_db()
+    _seed_backlog_query_rows(conn)
+
+    for status, expected in (
+        ("queued", ["queued-new", "queued-tie-first", "queued-tie-last", "queued-null"]),
+        ("in_progress", ["in-progress"]),
+        ("archived", ["archived"]),
+    ):
+        rows, counts = list_backlog_jobs(conn, status=status, source="feed", limit=10, offset=0)
+        assert [row["source_job_id"] for row in rows] == expected
+        assert counts == {"total": 6, "pending": 4}
+        assert [*rows[0]] == list(BACKLOG_PUBLIC_FIELDS)
+
+    page, counts = list_backlog_jobs(conn, status="queued", source="feed", limit=2, offset=1)
+    assert [row["source_job_id"] for row in page] == ["queued-tie-first", "queued-tie-last"]
+    assert counts == {"total": 6, "pending": 4}
+
+    literal, literal_counts = list_backlog_jobs(
+        conn,
+        status="queued",
+        source="feed' OR 1=1 --",
+        limit=10,
+        offset=0,
+    )
+    assert literal == []
+    assert literal_counts == {"total": 0, "pending": 0}
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"status": "done"}, "status"),
+        ({"status": None}, "status"),
+        ({"source": 1}, "source"),
+        ({"source": ""}, "source"),
+        ({"source": "   "}, "source"),
+        ({"source": "x" * (MAX_BACKLOG_SOURCE_CHARS + 1)}, "source"),
+        ({"limit": 0}, "limit"),
+        ({"limit": MAX_BACKLOG_LIMIT + 1}, "limit"),
+        ({"limit": True}, "limit"),
+        ({"offset": -1}, "offset"),
+        ({"offset": MAX_BACKLOG_OFFSET + 1}, "offset"),
+        ({"offset": True}, "offset"),
+    ],
+)
+def test_list_backlog_jobs_rejects_invalid_parameters_before_query(kwargs, message):
+    conn = sqlite3.connect(":memory:")
+    with pytest.raises(ValueError, match=message):
+        list_backlog_jobs(conn, **kwargs)
+
+
+def test_list_backlog_jobs_is_read_only_and_counts_full_unfiltered_backlog():
+    conn = memory_db()
+    _seed_backlog_query_rows(conn)
+    before = conn.execute("SELECT source_job_id, status FROM jobs ORDER BY id").fetchall()
+    conn.execute("BEGIN")
+    conn.execute("UPDATE jobs SET title='caller pending' WHERE source_job_id='queued-new'")
+    changes_after_caller_write = conn.total_changes
+
+    rows, counts = list_backlog_jobs(conn, status="queued", limit=1, offset=0)
+
+    assert [row["source_job_id"] for row in rows] == ["other-queued"]
+    assert counts == {"total": 7, "pending": 5}
+    assert conn.in_transaction is True
+    assert conn.total_changes == changes_after_caller_write
+    conn.rollback()
+    assert conn.execute("SELECT title FROM jobs WHERE source_job_id='queued-new'").fetchone()["title"] == "queued-new"
+    assert conn.execute("SELECT source_job_id, status FROM jobs ORDER BY id").fetchall() == before
 
 def test_count_backlog_supports_raw_sqlite_connections():
     conn = sqlite3.connect(":memory:")

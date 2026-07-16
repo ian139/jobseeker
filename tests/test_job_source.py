@@ -15,6 +15,17 @@ def test_source_job_normalization_stays_at_ingestion_boundary():
     assert job.url == "https://a.test/apply"
 
 
+def test_import_source_jobs_preserves_explicit_source_value():
+    conn = connect(":memory:")
+    init_db(conn)
+    source = "feed' OR 1=1 --"
+    raw_job = {"id": "source-value", "title": "Dev", "company": "Acme", "apply_url": "https://a.test/source-value"}
+
+    assert import_source_jobs(conn, [raw_job], source=source) == (1, 1, 0)
+    row = conn.execute("SELECT source, source_job_id FROM jobs").fetchone()
+    assert (row["source"], row["source_job_id"]) == (source, "source-value")
+
+
 
 def test_source_job_normalization_extracts_metadata_aliases():
     source = normalize_source_job(

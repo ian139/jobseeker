@@ -421,12 +421,94 @@ def test_job_scrape_corrupt_db_maps_generic_database_error(tmp_path: Path, capsy
     assert str(db) not in captured.err
     assert "Traceback" not in captured.err
 
-def test_cli_import_feed_json_fixture(tmp_path: Path, capsys):
+def test_cli_import_feed_json_fixture_defaults_to_job_source(tmp_path: Path, capsys):
     db = tmp_path / "jobs.sqlite3"
     fixture = tmp_path / "jobs.json"
     fixture.write_text('{"jobs":[{"id":"1","title":"Software Engineer","company":"Acme","apply_url":"https://jobs.example.com/1"}]}')
     assert main(["--db", str(db), "import-feed", "--json-file", str(fixture)]) == 0
     assert capsys.readouterr().out.strip() == '{"inserted": 1, "seen": 1, "updated": 0}'
+    connection = connect(db)
+    try:
+        assert connection.execute("SELECT source FROM jobs").fetchone()["source"] == "job_source"
+    finally:
+        connection.close()
+
+
+def test_cli_import_feed_keeps_distinct_sources_for_backlog_filters(tmp_path: Path, capsys, monkeypatch):
+    db = tmp_path / "jobs.sqlite3"
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text(
+        '{"jobs":[{"id":"json-1","title":"JSON Engineer","company":"Acme",'
+        '"apply_url":"https://jobs.example.com/json-1"}]}'
+    )
+
+    def fake_fetch_source_jobs(base_url: str, api_key: str | None = None):
+        assert base_url == "https://feed.example.test"
+        return [
+            {
+                "id": "feed-1",
+                "title": "Feed Engineer",
+                "company": "Acme",
+                "apply_url": "https://jobs.example.com/feed-1",
+            }
+        ]
+
+    monkeypatch.setattr(cli_mod, "fetch_source_jobs", fake_fetch_source_jobs)
+    assert main(
+        [
+            "--db",
+            str(db),
+            "import-feed",
+            "--json-file",
+            str(fixture),
+            "--source",
+            "json-fixture",
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out) == {"inserted": 1, "seen": 1, "updated": 0}
+    assert main(
+        [
+            "--db",
+            str(db),
+            "import-feed",
+            "--base-url",
+            "https://feed.example.test",
+            "--source",
+            "http-feed' OR 1=1 --",
+        ]
+    ) == 0
+    assert json.loads(capsys.readouterr().out) == {"inserted": 1, "seen": 1, "updated": 0}
+
+    assert main(["--db", str(db), "backlog-list", "--source", "json-fixture"]) == 0
+    json_backlog = json.loads(capsys.readouterr().out)
+    assert json_backlog["total"] == 1
+    assert json_backlog["pending"] == 1
+    assert [job["source"] for job in json_backlog["jobs"]] == ["json-fixture"]
+
+    assert main(["--db", str(db), "backlog-list", "--source", "http-feed' OR 1=1 --"]) == 0
+    feed_backlog = json.loads(capsys.readouterr().out)
+    assert feed_backlog["total"] == 1
+    assert feed_backlog["pending"] == 1
+    assert [job["source"] for job in feed_backlog["jobs"]] == ["http-feed' OR 1=1 --"]
+
+
+@pytest.mark.parametrize("source", ["", "   ", "x" * 129])
+def test_cli_import_feed_rejects_invalid_source_before_db_work(tmp_path: Path, monkeypatch, source: str):
+    def fail_connect(*args, **kwargs):
+        pytest.fail("database opened before import-feed source validation")
+
+    monkeypatch.setattr(cli_mod, "connect", fail_connect)
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "--db",
+                str(tmp_path / "jobs.sqlite3"),
+                "import-feed",
+                "--source",
+                source,
+            ]
+        )
+    assert exc.value.code == 2
 
 
 def test_cli_import_feed_uses_env_base_url(tmp_path: Path, capsys, monkeypatch):

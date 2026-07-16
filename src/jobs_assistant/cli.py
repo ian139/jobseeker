@@ -496,6 +496,11 @@ def build_parser() -> argparse.ArgumentParser:
     import_feed = sub.add_parser("import-feed", help="import normalized jobs from JSON file or GET /v1/jobs feed")
     import_feed.add_argument("--json-file", help="import jobs from a JSON file containing a list, jobs[], or data[]")
     import_feed.add_argument("--base-url", help="source feed base URL; defaults to JOB_SOURCE_BASE_URL when unset")
+    import_feed.add_argument(
+        "--source",
+        default="job_source",
+        help=f"exact source value to store, non-empty and at most {MAX_BACKLOG_SOURCE_CHARS} characters",
+    )
 
     preview = sub.add_parser("theirstack-preview", help="preview filtered TheirStack match count without persisting jobs")
     backlog_list = sub.add_parser("backlog-list", help="inspect backlog jobs without claiming or mutating them")
@@ -1097,6 +1102,18 @@ def _run_backlog_archive(args: argparse.Namespace) -> int:
             _close_database(connection)
 
 
+def _validate_import_feed_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject import-feed source controls before opening SQLite."""
+    if (
+        type(args.source) is not str
+        or not args.source.strip()
+        or len(args.source) > MAX_BACKLOG_SOURCE_CHARS
+    ):
+        parser.error(
+            f"import-feed --source must be a non-empty string of at most {MAX_BACKLOG_SOURCE_CHARS} characters"
+        )
+
+
 def _validate_backlog_list_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Reject backlog-list controls before opening SQLite."""
     if args.status not in _BACKLOG_STATUSES:
@@ -1183,6 +1200,8 @@ def _run_database_command(args: argparse.Namespace, parser: argparse.ArgumentPar
         if args.command == "backlog-archive":
             _validate_backlog_archive_args(args)
             return _run_backlog_archive(args)
+        if args.command == "import-feed":
+            _validate_import_feed_args(parser, args)
         try:
             connection = connect(args.db)
             init_db(connection)
@@ -1200,7 +1219,7 @@ def _run_database_command(args: argparse.Namespace, parser: argparse.ArgumentPar
                 if not base_url:
                     parser.error("import-feed requires --json-file, --base-url, or JOB_SOURCE_BASE_URL")
                 raw_jobs = fetch_source_jobs(base_url, api_key=os.environ.get("JOB_SOURCE_API_KEY"))
-            seen, inserted, updated = import_source_jobs(connection, raw_jobs)
+            seen, inserted, updated = import_source_jobs(connection, raw_jobs, source=args.source)
             print(json.dumps({"seen": seen, "inserted": inserted, "updated": updated}, sort_keys=True))
             return 0
         if args.command == "theirstack-preview":

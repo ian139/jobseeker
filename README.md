@@ -115,6 +115,8 @@ export JOB_SOURCE_API_KEY=your-key-if-needed
 uv run --frozen jobs-assistant import-feed
 ```
 
+Use `import-feed --source NAME` to record an exact source value for imported jobs. The value must be non-empty after trimming and at most 128 characters; omitted `--source` preserves the `job_source` default. `backlog-list --source NAME` filters and counts that source only.
+
 ## Commands
 
 | Command | Description |

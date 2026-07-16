@@ -117,6 +117,10 @@ every future adapter and preference feature.
 
 - [x] Add read-only `backlog-show JOB_ID` detail inspection with positive-ID pre-connect validation, deterministic parameterized lookup across statuses, bounded plain-text descriptions, raw-payload exclusion, and no mutation/network behavior. Coverage is in `tests/test_cli_smoke.py`; command safety is documented in `README.md`.
 
+- [x] Harden generic `import-feed` envelope and record validation with fixed redacted `invalid_input` failures, pre-connect local validation, all-record validation before transactional upsert, and unchanged valid/HTTP behavior. Coverage is in `tests/test_cli_smoke.py` and `tests/test_job_source.py`.
+
+- [x] Persist guarded private workflow screenshots at initial, blocker, and final/handoff stages with verified path/bytes/SHA metadata, bounded deduplication, durable failure handling, and unchanged no-submit behavior. Coverage is in `tests/test_application_workflow.py`; live adapter coverage remains environment-skipped.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

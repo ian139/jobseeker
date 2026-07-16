@@ -658,6 +658,155 @@ def test_workflow_dispatches_submit_continuation_through_offline_protocol(monkey
     assert SubmitContinuationSession.clicks == [("continue", True)]
     actions = json.loads((root / "run-73" / "actions.json").read_text(encoding="utf-8"))
     assert actions["final_submit_calls"] == 0
+
+
+def test_workflow_accepts_same_job_history_pushstate_submit_continuation(monkeypatch, tmp_path: Path) -> None:
+    url = "https://boards.greenhouse.io/a/jobs/73"
+    claims = [ApplicationClaim(731, {"id": 73, "canonical_url": url, "title": "Continuation"})]
+
+    class HistoryContinuationSession(FakeSession):
+        starts = 0
+        observations = 0
+        clicks: list[tuple[str, bool]] = []
+        current_url = url
+        final_submit_calls = 0
+
+        @classmethod
+        def start(cls, **kwargs):
+            return cls(kwargs["session_manifest"])
+
+        def observe(self):
+            type(self).observations += 1
+            payload = _payload()
+            payload["observation_id"] = f"obs-{self.observations}"
+            payload["url"] = type(self).current_url
+            if self.observations == 1:
+                payload["buttons"] = [{
+                    "target_id": "continue",
+                    "frame_id": "frame-0",
+                    "frame_url": type(self).current_url,
+                    "click_key": "continue-key",
+                    "element_kind": "button",
+                    "button_type": "submit",
+                    "text": "Continue",
+                    "visible": True,
+                    "enabled": True,
+                    "safety_descriptors": [],
+                }]
+            else:
+                payload["final_submit_target_ids"] = ["final-submit"]
+            return payload
+
+        def click_offline(self, target_id, continuation=False):
+            type(self).clicks.append((target_id, continuation))
+            assert continuation is True
+            type(self).current_url = f"{url}?gh_src=step-2"
+            return {"clicked": True, "counters": {}}
+
+    monkeypatch.setattr(app, "PuppeteerSession", HistoryContinuationSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in ("register_application_artifact", "register_application_session", "register_application_owner_process", "register_application_browser_process"):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+
+    def resolve(observation, *args, **kwargs):
+        if observation.observation_id == "obs-1":
+            return app.AutofillPlan(
+                safe_click_target_id="continue",
+                status="ready",
+                reason_code=app.PublicReasonCode.draft_ready,
+            )
+        return app.AutofillPlan()
+
+    monkeypatch.setattr(app, "resolve_with_llm", resolve)
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+    result = asyncio.run(app.run_application_workflow(object(), resume_file=resume, artifact_root=root))
+
+    assert result[0]["status"] == "review_ready"
+    assert HistoryContinuationSession.observations == 3
+    assert HistoryContinuationSession.clicks == [("continue", True)]
+    next_snapshot = json.loads((root / "run-731" / "iterations" / "0002" / "observation.json").read_text(encoding="utf-8"))
+    assert next_snapshot["url"] == f"{url}?gh_src=step-2"
+    final_observation = json.loads((root / "run-731" / "observation.json").read_text(encoding="utf-8"))
+    assert final_observation["url_host"] == "boards.greenhouse.io"
+    actions = json.loads((root / "run-731" / "actions.json").read_text(encoding="utf-8"))
+    assert actions["final_submit_calls"] == 0
+
+
+@pytest.mark.parametrize("transition", ("cross-job", "final-like"))
+def test_workflow_rejects_unsafe_history_submit_continuation(monkeypatch, tmp_path: Path, transition: str) -> None:
+    url = "https://boards.greenhouse.io/a/jobs/73"
+    claims = [ApplicationClaim(732, {"id": 73, "canonical_url": url, "title": "Continuation"})]
+
+    class RejectingContinuationSession(FakeSession):
+        starts = 0
+        observations = 0
+        final_submit_calls = 0
+        transition_url = None
+        @classmethod
+        def start(cls, **kwargs):
+            return cls(kwargs["session_manifest"])
+
+        def observe(self):
+            type(self).observations += 1
+            payload = _payload()
+            payload["url"] = url
+            payload["observation_id"] = "obs-1"
+            payload["buttons"] = [{
+                "target_id": "continue",
+                "frame_id": "frame-0",
+                "frame_url": url,
+                "click_key": "continue-key",
+                "element_kind": "button",
+                "button_type": "submit",
+                "text": "Continue",
+                "visible": True,
+                "enabled": True,
+                "safety_descriptors": [],
+            }]
+            return payload
+
+        def click_offline(self, target_id, continuation=False):
+            assert target_id == "continue"
+            assert continuation is True
+            type(self).transition_url = (
+                "https://boards.greenhouse.io/other/jobs/999"
+                if transition == "cross-job"
+                else f"{url}?gh_src=submit"
+            )
+            raise app.BrowserAdapterError("unsafe_navigation_target")
+
+    monkeypatch.setattr(app, "PuppeteerSession", RejectingContinuationSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in ("register_application_artifact", "register_application_session", "register_application_owner_process", "register_application_browser_process"):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        app,
+        "resolve_with_llm",
+        lambda *args, **kwargs: app.AutofillPlan(
+            safe_click_target_id="continue",
+            status="ready",
+            reason_code=app.PublicReasonCode.draft_ready,
+        ),
+    )
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+    result = asyncio.run(app.run_application_workflow(object(), resume_file=resume, artifact_root=root))
+
+    assert result[0]["status"] == "blocked"
+    assert result[0]["reason_code"] == "unsafe_navigation_target"
+    failure = json.loads((root / "run-732" / "browser_failure.json").read_text(encoding="utf-8"))
+    assert failure["code"] == "unsafe_navigation_target"
+    assert RejectingContinuationSession.transition_url.endswith(
+        "/other/jobs/999" if transition == "cross-job" else "?gh_src=submit"
+    )
+    assert RejectingContinuationSession.final_submit_calls == 0
+
+
 def test_frame_origin_unknown_ats_policy_denies_greenhouse_origin() -> None:
     assert app._frame_origin_allowed(
         "https://boards.greenhouse.io/acme/jobs/123",

@@ -48,8 +48,16 @@ SUBMIT_CONTINUATION_FIXTURE = b"""<!doctype html>
 <body>
 <button type="submit" id="continue-native">Continue</button>
 <button type="submit" id="submit-final">Submit Application</button>
-<script>document.getElementById("continue-native").addEventListener("click",()=>{document.body.dataset.continued="yes"});</script>
+<script>document.getElementById("continue-native").addEventListener("click",()=>{history.pushState({}, "", "/fixture/jobs/123?gh_src=step-2");document.body.dataset.continued="yes"});</script>
 </body></html>"""
+CROSS_JOB_CONTINUATION_FIXTURE = SUBMIT_CONTINUATION_FIXTURE.replace(
+    b"/fixture/jobs/123?gh_src=step-2",
+    b"/other/jobs/999",
+)
+FINAL_LIKE_CONTINUATION_FIXTURE = SUBMIT_CONTINUATION_FIXTURE.replace(
+    b"/fixture/jobs/123?gh_src=step-2",
+    b"/fixture/jobs/123?gh_src=submit",
+)
 BLOCKER_FIXTURE = b"""<!doctype html><form>
 <label>First Name <input name="first_name" required></label>
 <button type="button" id="offline">Continue</button>
@@ -139,6 +147,8 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
         body = (
             LEVER_FIXTURE.read_bytes()
             if logical.startswith("https://jobs.lever.co/")
+            else CROSS_JOB_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-cross-job")
+            else FINAL_LIKE_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-final")
             else SUBMIT_CONTINUATION_FIXTURE if self.path.startswith("/continue-native")
             else CLEAN_FIXTURE if self.path.startswith("/clean") else FIXTURE.read_bytes()
         )
@@ -542,10 +552,41 @@ def test_submit_typed_nonfinal_continuation_click_uses_framed_offline_protocol(f
         assert continuation["effective_action_url"] is None
         assert continuation["effective_method"] is None
         assert session.click_offline(continuation["target_id"], continuation=True)["clicked"] is True
+        next_observation = session.observe()
+        assert next_observation["url"] == "https://boards.greenhouse.io/fixture/jobs/123?gh_src=step-2"
 
         counters = session.network_counters()
         assert counters["finalLikeDenied"] == 0
-        assert counters["terminal_reason"] in {None, "unsafe_network_attempt"}
+        assert counters["terminal_reason"] is None
+        assert FixtureHandler.final_like_requests == 0
+        assert FixtureHandler.attacker_http_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+@pytest.mark.parametrize("endpoint", ("continue-native-cross-job", "continue-native-final"))
+def test_submit_continuation_rejects_cross_job_and_final_like_history(fixture_server, endpoint):
+    transport_url = fixture_server.replace("/clean", f"/{endpoint}")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id=f"session-{endpoint}",
+        run_id=3,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        continuation = next(
+            button
+            for button in observation["buttons"]
+            if button["button_type"] == "submit"
+            and button["target_id"] not in observation["final_submit_target_ids"]
+        )
+        with pytest.raises(BrowserAdapterError, match="unsafe_navigation_target"):
+            session.click_offline(continuation["target_id"], continuation=True)
+
+        counters = session.network_counters()
+        assert counters["terminal_reason"] == "unsafe_navigation_target"
         assert FixtureHandler.final_like_requests == 0
         assert FixtureHandler.attacker_http_requests == 0
 @BROWSER_INTEGRATION_SKIP

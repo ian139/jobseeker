@@ -2493,8 +2493,17 @@ async def run_application_workflow(
                 failed_current = True
                 browser_failure = exc if isinstance(exc, _BrowserFailure) else None
                 if browser_failure is not None:
-                    reason = PublicReasonCode.browser_error
-                    status = "failed"
+                    failure_code = browser_failure.code
+                    continuation_safety_codes = (
+                        PublicReasonCode.unsafe_navigation_target.value,
+                        PublicReasonCode.unsafe_network_attempt.value,
+                    )
+                    reason = (
+                        PublicReasonCode(failure_code)
+                        if failure_code in continuation_safety_codes
+                        else PublicReasonCode.browser_error
+                    )
+                    status = _status_for_reason(reason)
                     failure_payload = _browser_failure_payload(
                         browser_failure,
                         ats_policy=adapter_name,

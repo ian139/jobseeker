@@ -194,6 +194,7 @@ let reviewLedger = new Map();
 let reviewEpoch = null;
 const proxyPermitUrls = new Map();
 let pendingNetwork = 0;
+let networkRequestSequence = 0;
 let lastNetworkActivity = Date.now();
 let initialQuietReady = false;
 let launchHeadless = true;
@@ -1037,6 +1038,7 @@ async function installRequestGuards(targetPage) {
   const markStart = request => {
     if (trackedRequests.has(request)) return;
     trackedRequests.add(request);
+    networkRequestSequence += 1;
     pendingNetwork += 1;
     lastNetworkActivity = Date.now();
     request.once?.('error', () => {});
@@ -1654,7 +1656,7 @@ async function consumeTarget(command) {
     await selected.dispose().catch(() => {});
     throw new Error(liveClassification.sensitive ? 'sensitive_field' : 'target_not_actionable');
   }
-  return { selected, live };
+  return { selected, live, frame: entry.frame, frameChain: observedChain };
 }
 function hasForbiddenScalarCharacters(value, { multiline = false } = {}) {
   for (const char of value) {
@@ -1743,9 +1745,9 @@ function stageImmutableUpload(root, candidate, expectedHash) {
   }
 }
 async function action(command) {
-  const { selected, live } = await consumeTarget(command);
+  const { selected, live, frame, frameChain } = await consumeTarget(command);
   try {
-    if (live.isButton) return await buttonAction(selected, live, command);
+    if (live.isButton) return await buttonAction(selected, live, command, frame, frameChain);
     if (command.action === 'fill') {
       if (live.isFile || live.kind === 'select' || !validateCandidateValue(command.value, live)
           || !(await nativeCandidateValid(selected, command.value))) throw new Error('invalid_field_value');
@@ -1801,7 +1803,7 @@ async function action(command) {
     return { retained: true, counters: { ...networkCounters } };
   } finally { await selected.dispose().catch(() => {}); }
 }
-async function buttonAction(handle, info, command) {
+async function buttonAction(handle, info, command, frame, observedFrameChain) {
   if (Object.hasOwn(command, 'continuation') && typeof command.continuation !== 'boolean') {
     throw new Error('invalid_command_frame');
   }
@@ -1818,6 +1820,9 @@ async function buttonAction(handle, info, command) {
     throw new Error('final_or_anchor_not_automated');
   }
   const beforeUrl = page.url();
+  const beforeFrameUrl = frame?.url?.() || info.documentOrigin;
+  const beforeNetworkSequence = networkRequestSequence;
+  const frameChain = Array.isArray(observedFrameChain) ? observedFrameChain : frameAncestry(frame);
   const hit = await handle.evaluate(el => {
     const rect = el.getBoundingClientRect();
     const style = getComputedStyle(el);
@@ -1835,7 +1840,48 @@ async function buttonAction(handle, info, command) {
     click.call(el);
   });
   await settle();
-  if (page.url() !== beforeUrl) throw new Error('unsafe_navigation_target');
+  const afterUrl = page.url();
+  const afterFrameUrl = frame?.url?.() || '';
+  const urlChanged = afterUrl !== beforeUrl || afterFrameUrl !== beforeFrameUrl;
+  const networkAttempted = networkRequestSequence !== beforeNetworkSequence;
+  if (networkAttempted) {
+    const networkError = terminalReason === 'unsafe_navigation_target'
+      ? 'unsafe_navigation_target'
+      : 'unsafe_network_attempt';
+    terminalReason = networkError;
+    throw new Error(networkError);
+  }
+  if (urlChanged) {
+    if (!submitContinuation) {
+      terminalReason = 'unsafe_navigation_target';
+      throw new Error('unsafe_navigation_target');
+    }
+    const currentFrameChain = frame ? frameAncestry(frame) : [];
+    const frameStable = Boolean(frame)
+      && page.frames().includes(frame)
+      && currentFrameChain.length === frameChain.length
+      && currentFrameChain.every((entry, index) => (
+        entry.frame === frameChain[index].frame
+        && sameOrigin(entry.url, frameChain[index].url)
+      ));
+    let routeAllowed = false;
+    try {
+      const routeUrls = new Set([afterUrl, afterFrameUrl, ...currentFrameChain.map(entry => entry.url)]);
+      for (const routeUrl of routeUrls) {
+        validateDocumentNavigation(routeUrl, { redirectCount: documentRedirectCount });
+      }
+      routeAllowed = true;
+    } catch {}
+    const sameRouteOrigin = sameOrigin(beforeUrl, afterUrl)
+      && sameOrigin(info.documentOrigin, afterUrl)
+      && sameOrigin(beforeFrameUrl, afterFrameUrl)
+      && sameOrigin(afterFrameUrl, afterUrl);
+    const nonFinalLike = !isFinalLike(afterUrl) && !isFinalLike(afterFrameUrl);
+    if (!routeAllowed || !sameRouteOrigin || !frameStable || !nonFinalLike) {
+      terminalReason = 'unsafe_navigation_target';
+      throw new Error('unsafe_navigation_target');
+    }
+  }
   return { clicked: true, counters: { ...networkCounters } };
 }
 async function screenshot(command) {

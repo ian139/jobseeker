@@ -85,6 +85,10 @@ every future adapter and preference feature.
 
 - [x] Keep readiness and safe-click progress signatures generation-agnostic while retaining final-control membership, preventing stale semantic comparisons without treating re-observation IDs as progress. Coverage is in `tests/test_application_pipeline.py`.
 
+- [x] Persist per-iteration guarded action evidence before mutation, including planned/rejected actions, ATS policy, no-submit invariant, and the exact observation ID; cover mutation-failure durability. Coverage is in `tests/test_application_workflow.py`.
+
+- [x] Reject malformed field constraint types at the observation boundary while accepting typed nonnegative lengths and string constraint values. Coverage is in `tests/test_application_workflow.py`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

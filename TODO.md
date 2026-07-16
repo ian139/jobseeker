@@ -109,6 +109,8 @@ every future adapter and preference feature.
 
 - [x] Enforce `backlog-list` read-only SQLite access without creating missing databases, while preserving writable behavior for ingestion and application commands. Coverage is in `tests/test_cli_smoke.py` and `tests/test_application_claims.py`; command behavior is documented in `README.md`.
 
+- [x] Add explicit `backlog-archive JOB_ID... --confirm` for queued-only atomic compare-and-set archival, including URL-less rows, rollback on conflicts, fixed redacted results, and no deletion/claim/browser/network behavior. Coverage is in `tests/test_backlog_ingestion.py` and `tests/test_cli_smoke.py`; command safety is documented in `README.md`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

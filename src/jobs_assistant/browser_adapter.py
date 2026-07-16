@@ -896,15 +896,9 @@ class PuppeteerSession:
         del self._recv_buffer[: newline + 1]
         try:
             length = int(prefix.decode("ascii"))
-        except (UnicodeDecodeError, ValueError):
-            try:
-                decoded = json.loads(prefix.decode("utf-8"))
-            except Exception as exc:
-                self._poisoned = True
-                raise BrowserAdapterError("protocol_bad_length") from exc
-            if not isinstance(decoded, dict):
-                raise BrowserAdapterError("protocol_non_object")
-            return decoded
+        except (UnicodeDecodeError, ValueError) as exc:
+            self._poisoned = True
+            raise BrowserAdapterError("protocol_bad_length") from exc
         if length < 0 or length > MAX_OUT_FRAME:
             self._poisoned = True
             raise BrowserAdapterError("protocol_frame_too_large")

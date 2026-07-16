@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import signal
+import selectors
 import socket
 import socketserver
 import subprocess
@@ -936,6 +937,29 @@ def test_protocol_rejects_oversized_input_frame():
     assert frames[0]["ok"] is True
     assert frames[-1]["ok"] is False
     assert frames[-1]["error"] == "input_frame_too_large"
+
+def test_protocol_rejects_unframed_json_response() -> None:
+    read_fd, write_fd = os.pipe()
+    stream = os.fdopen(read_fd, "rb")
+    try:
+        os.write(write_fd, b'{"ok":true}\n')
+    finally:
+        os.close(write_fd)
+
+    session = object.__new__(PuppeteerSession)
+    session.process = type("FakeProcess", (), {"stdout": stream})()
+    session._selector = selectors.DefaultSelector()
+    session._selector.register(stream, selectors.EVENT_READ)
+    session._recv_buffer = bytearray()
+    session._poisoned = False
+    try:
+        with pytest.raises(BrowserAdapterError, match="protocol_bad_length"):
+            session.read_response(timeout=1)
+        assert session._poisoned is True
+    finally:
+        session._selector.close()
+        stream.close()
+
 
 
 @BROWSER_INTEGRATION_SKIP

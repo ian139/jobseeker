@@ -97,6 +97,8 @@ every future adapter and preference feature.
 
 - [x] Complete configured resume uploads across valid re-observation, retaining the file without re-upload, resolving required-file state, and stopping review-ready with zero final submissions. Coverage is in `tests/test_application_workflow.py`.
 
+- [x] Make batch backlog upserts atomic with caller-aware BEGIN/SAVEPOINT semantics, preserving public single-row commit behavior and rolling back earlier rows when a later item fails. Coverage is in `tests/test_backlog_ingestion.py`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

@@ -105,6 +105,8 @@ every future adapter and preference feature.
 
 - [x] Permit guarded same-document Greenhouse/Lever SPA continuations only when approved route identity, HTTPS origin/frame chain, final-like exclusion, and zero post-click network activity all hold. Preserve distinct unsafe navigation/network failures and no-submit behavior. Coverage is in `tests/test_application_workflow.py` and `tests/test_puppeteer_adapter.py`.
 
+- [x] Add read-only `backlog-list` inspection with validated status/limit filters, deterministic ordering, stable public JSON rows, total/pending counts, and no mutation/claim/network behavior. Coverage is in `tests/test_cli_smoke.py` and `tests/test_backlog_ingestion.py`.
+
 ## Reference-only history
 
 The older minimized applier snapshot is retained for historical comparison:

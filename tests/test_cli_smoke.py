@@ -257,6 +257,37 @@ def test_cli_backlog_list_filters_orders_and_limits_without_raw_json(tmp_path: P
     assert archived["jobs"][0]["status"] == "archived"
     assert archived["pending"] == 3
 
+
+def test_cli_backlog_list_offset_pages_are_disjoint_and_keep_full_counts(tmp_path: Path, capsys) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    _seed_cli_backlog(db)
+
+    pages = []
+    for offset in (0, 1, 2):
+        assert main(
+            [
+                "--db",
+                str(db),
+                "backlog-list",
+                "--status",
+                "queued",
+                "--limit",
+                "1",
+                "--offset",
+                str(offset),
+            ]
+        ) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert payload["offset"] == offset
+        assert payload["limit"] == 1
+        assert payload["total"] == 5
+        assert payload["pending"] == 3
+        pages.append(payload["jobs"])
+
+    page_ids = [{job["id"] for job in page} for page in pages]
+    assert page_ids == [{1}, {2}, {3}]
+    assert not (page_ids[0] & page_ids[1] or page_ids[0] & page_ids[2] or page_ids[1] & page_ids[2])
+
 def test_cli_backlog_list_source_filters_exactly_and_scopes_counts(tmp_path: Path, capsys) -> None:
     db = tmp_path / "jobs.sqlite3"
     _seed_cli_backlog(db)
@@ -287,7 +318,7 @@ def test_cli_backlog_list_source_filters_exactly_and_scopes_counts(tmp_path: Pat
     assert db.read_bytes() == before
 
     injection = "feed' OR 1=1 --"
-    assert main(["--db", str(db), "backlog-list", "--source", injection]) == 0
+    assert main(["--db", str(db), "backlog-list", "--source", injection, "--offset", "0"]) == 0
     literal = json.loads(capsys.readouterr().out)
     assert literal["jobs"] == []
     assert literal["total"] == 0
@@ -298,7 +329,7 @@ def test_cli_backlog_list_source_filters_exactly_and_scopes_counts(tmp_path: Pat
 def test_cli_backlog_list_source_missing_db_fails_without_creating_file(tmp_path: Path, capsys) -> None:
     db = tmp_path / "missing.sqlite3"
 
-    assert main(["--db", str(db), "backlog-list", "--source", "feed"]) == 1
+    assert main(["--db", str(db), "backlog-list", "--source", "feed", "--offset", "1"]) == 1
 
     captured = capsys.readouterr()
     assert captured.out == ""
@@ -322,6 +353,8 @@ def test_cli_backlog_list_rejects_invalid_source_before_db_work(tmp_path: Path, 
     [
         ["--limit", "0"],
         ["--limit", "101"],
+        ["--offset", "-1"],
+        ["--offset", str(cli_mod.MAX_BACKLOG_OFFSET + 1)],
         ["--status", "unsupported"],
     ],
 )
@@ -329,7 +362,7 @@ def test_cli_backlog_list_rejects_invalid_arguments_before_db_work(tmp_path: Pat
     def fail_connect(*args, **kwargs):
         pytest.fail("database opened before backlog-list argument validation")
 
-    monkeypatch.setattr(cli_mod, "connect", fail_connect)
+    monkeypatch.setattr(cli_mod, "connect_read_only", fail_connect)
     with pytest.raises(SystemExit) as exc:
         main(["--db", str(tmp_path / "jobs.sqlite3"), "backlog-list", *option])
     assert exc.value.code == 2

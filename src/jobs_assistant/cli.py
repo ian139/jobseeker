@@ -102,6 +102,7 @@ _REVIEW_OUTCOMES = frozenset({"submitted", "skipped", "retry"})
 _REVIEW_WINDOW_STATES = frozenset({"open", "starting", "prepared", "closed", "stale", "failed", "none", "unknown"})
 _BACKLOG_STATUSES = frozenset({"queued", "in_progress", "archived"})
 MAX_BACKLOG_SOURCE_CHARS = 128
+MAX_BACKLOG_OFFSET = 100_000
 _BACKLOG_PUBLIC_FIELDS = (
     "id",
     "source",
@@ -570,6 +571,12 @@ def build_parser() -> argparse.ArgumentParser:
     backlog_list.add_argument(
         "--source",
         help=f"exact source value to list, non-empty and at most {MAX_BACKLOG_SOURCE_CHARS} characters",
+    )
+    backlog_list.add_argument(
+        "--offset",
+        type=int,
+        default=argparse.SUPPRESS,
+        help=f"number of matching jobs to skip, 0-{MAX_BACKLOG_OFFSET}",
     )
     backlog_list.add_argument("--limit", type=int, default=25, help="maximum jobs to list, 1-100")
 
@@ -1182,6 +1189,9 @@ def _validate_backlog_list_args(parser: argparse.ArgumentParser, args: argparse.
         parser.error("backlog-list --status is unsupported")
     if type(args.limit) is not int or not 1 <= args.limit <= 100:
         parser.error("backlog-list --limit must be between 1 and 100")
+    offset = getattr(args, "offset", 0)
+    if type(offset) is not int or not 0 <= offset <= MAX_BACKLOG_OFFSET:
+        parser.error(f"backlog-list --offset must be between 0 and {MAX_BACKLOG_OFFSET}")
     if args.source is not None and (
         type(args.source) is not str
         or not args.source.strip()
@@ -1207,6 +1217,7 @@ def _run_backlog_list(args: argparse.Namespace) -> int:
             raise _CliFailure("database_error") from exc
         except (PermissionError, OSError) as exc:
             raise _CliFailure("database_privacy_error") from exc
+        offset = getattr(args, "offset", 0)
         if args.source is None:
             counts = count_backlog(connection)
             rows = connection.execute(
@@ -1216,9 +1227,9 @@ def _run_backlog_list(args: argparse.Namespace) -> int:
                 FROM jobs
                 WHERE status = ?
                 ORDER BY posted_at DESC NULLS LAST, first_seen_at ASC, id ASC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
-                (args.status, args.limit),
+                (args.status, args.limit, offset),
             ).fetchall()
         else:
             count_row = connection.execute(
@@ -1236,23 +1247,21 @@ def _run_backlog_list(args: argparse.Namespace) -> int:
                 FROM jobs
                 WHERE status = ? AND source = ?
                 ORDER BY posted_at DESC NULLS LAST, first_seen_at ASC, id ASC
-                LIMIT ?
+                LIMIT ? OFFSET ?
                 """,
-                (args.status, args.source, args.limit),
+                (args.status, args.source, args.limit, offset),
             ).fetchall()
         jobs = [{field: row[field] for field in _BACKLOG_PUBLIC_FIELDS} for row in rows]
-        print(
-            json.dumps(
-                {
-                    "jobs": jobs,
-                    "limit": args.limit,
-                    "pending": counts["pending"],
-                    "status": args.status,
-                    "total": counts["total"],
-                },
-                sort_keys=True,
-            )
-        )
+        output: dict[str, object] = {
+            "jobs": jobs,
+            "limit": args.limit,
+            "pending": counts["pending"],
+            "status": args.status,
+            "total": counts["total"],
+        }
+        if hasattr(args, "offset"):
+            output["offset"] = offset
+        print(json.dumps(output, sort_keys=True))
         return 0
     finally:
         if connection is not None:

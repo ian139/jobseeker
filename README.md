@@ -134,7 +134,7 @@ Use `import-feed --source NAME` to record an exact source value for imported job
 | `autofill-review complete` | Record the human's `submitted` or `skipped` decision |
 | `autofill-review retry` | Queue an explicit retry for a reviewed run |
 
-`backlog-list` accepts `--status {queued,in_progress,archived}`, `--limit 1-100`, and an optional exact `--source` value (non-empty, at most 128 characters). It never initializes or writes the database, so a missing `--db` path remains absent; source-filtered totals and pending counts are scoped to that source.
+`backlog-list` accepts `--status {queued,in_progress,archived}`, `--limit 1-100`, `--offset 0-100000`, and an optional exact `--source` value (non-empty, at most 128 characters). Offset is applied after the exact status/source filters using the stable `posted_at DESC NULLS LAST, first_seen_at ASC, id ASC` ordering; totals and pending counts still cover the full filtered backlog. It never initializes or writes the database, so a missing `--db` path remains absent. Omitting `--offset` preserves the existing JSON output shape.
 
 `backlog-show JOB_ID` requires a positive integer and reads one queued, in-progress, or archived row through the existing read-only SQLite connection. It returns the same allow-listed job fields as `backlog-list` plus a nullable description capped at 12,000 characters after plain-text conversion; `raw_json` and embedded metadata are never returned. Missing databases and unknown IDs use the fixed `database_error` response, and the command performs no claim, status change, archive, or network action.
 

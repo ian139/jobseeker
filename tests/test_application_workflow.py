@@ -249,6 +249,74 @@ def test_workflow_indexes_verified_private_screenshot_metadata(monkeypatch, tmp_
     assert json.loads((run_dir / "actions.json").read_text())["final_submit_calls"] == 0
 
 
+def test_blocker_observation_indexes_blocker_screenshot_without_submit(monkeypatch, tmp_path: Path):
+    class BlockerSession(FakeSession):
+        starts = 0
+        observations = 0
+
+        def observe(self):
+            type(self).observations += 1
+            payload = _payload()
+            payload["blockers"] = [{
+                "code": "captcha",
+                "frame_id": "frame-0",
+                "text": "captcha detected",
+            }]
+            return payload
+
+    claims = [ApplicationClaim(
+        203,
+        {
+            "id": 203,
+            "canonical_url": "https://boards.greenhouse.io/a/jobs/203",
+            "title": "Blocker screenshot fixture",
+        },
+    )]
+    monkeypatch.setattr(app, "PuppeteerSession", BlockerSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in (
+        "register_application_artifact",
+        "register_application_session",
+        "register_application_owner_process",
+        "register_application_browser_process",
+    ):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+
+    result = asyncio.run(app.run_application_workflow(
+        object(),
+        resume_file=resume,
+        artifact_root=root,
+        headed=True,
+    ))
+
+    assert result[0]["status"] == "blocked"
+    assert result[0]["reason_code"] == "captcha"
+    assert BlockerSession.observations == 1
+    run_dir = root / "run-203"
+    manifest = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    observation = json.loads((run_dir / "observation.json").read_text(encoding="utf-8"))
+    assert observation["blocker_codes"] == ["captcha"]
+    assert set(manifest["screenshots"]) == {"initial", "blocker", "final"}
+    indexed = manifest["screenshots"]["blocker"]
+    assert indexed["stage"] == "blocker"
+    assert indexed["iteration"] == 1
+    assert indexed["path"].startswith("screenshots/")
+    screenshot_path = run_dir / indexed["path"]
+    screenshot_bytes = screenshot_path.read_bytes()
+    assert indexed["bytes"] == len(screenshot_bytes)
+    assert indexed["sha256"] == hashlib.sha256(screenshot_bytes).hexdigest()
+    assert indexed["reference"] == f"screenshot:{indexed['sha256']}"
+    artifact_index = manifest["artifacts"]["screenshot_blocker"]
+    assert artifact_index["path"] == indexed["path"]
+    assert artifact_index["sha256"] == indexed["sha256"]
+    assert artifact_index["bytes"] == indexed["bytes"]
+    assert json.loads((run_dir / "actions.json").read_text(encoding="utf-8"))["final_submit_calls"] == 0
+
+
 def test_screenshot_capture_failure_is_durable_and_unindexed(monkeypatch, tmp_path: Path):
     class ScreenshotFailureSession(FakeSession):
         starts = 0

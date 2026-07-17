@@ -131,6 +131,8 @@ every future adapter and preference feature.
 
 - [x] Add read-only `import-feed --dry-run` preflight for JSON and HTTP feeds using disposable in-memory SQLite simulation of production normalization/deduplication. Missing databases stay absent, existing databases and sync audits remain byte/state unchanged, counts cover all input, and normalized preview output is allow-listed and capped at 100. Coverage is in `tests/test_cli_smoke.py`; full package, Puppeteer smoke, container smoke, lock, CLI, and direct smoke checks pass.
 
+- [x] Add read-only `autofill-review show RUN_ID` evidence inspection with positive-ID pre-connect validation, read-only SQLite, noncreating descriptor-relative artifact access, exact SHA-verified manifest filenames, producer-compatible staged evidence, strict bounded redacted projections, and no claim/review/browser/network mutation. Coverage is in `tests/test_cli_smoke.py`, `tests/test_application_claims.py`, and `tests/test_artifacts.py`; full package, Puppeteer smoke, container smoke, lock, CLI, and direct byte/state-invariance smoke checks pass.
+
 ## Open gaps and blockers
 
 - [ ] Native `<select multiple>` ATS autofill remains unsupported. A bounded cross-layer attempt was fully reverted after Python contract regressions and three native Puppeteer continuation failures; no partial representation or browser mutation path remains. Revisit only with an immutable multi-value contract and fixture-first whole-set validation that preserves scalar selects, generation/network gates, and zero final-submit calls.

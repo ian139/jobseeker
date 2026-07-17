@@ -264,6 +264,9 @@ uv run --frozen jobs-assistant --db /tmp/jobs.sqlite3 autofill-review \
   --artifact-root /tmp/jobs-assistant-artifacts list --limit 10
 
 uv run --frozen jobs-assistant --db /tmp/jobs.sqlite3 autofill-review \
+  --artifact-root /tmp/jobs-assistant-artifacts show 42
+
+uv run --frozen jobs-assistant --db /tmp/jobs.sqlite3 autofill-review \
   --artifact-root /tmp/jobs-assistant-artifacts complete \
   --run-id 42 --outcome submitted --confirm-window-closed \
   --annotation-file notes/run-42.txt
@@ -273,6 +276,8 @@ uv run --frozen jobs-assistant --db /tmp/jobs.sqlite3 autofill-review \
   --run-id 42 --confirm-window-closed \
   --annotation-file notes/retry-42.txt
 ```
+
+`show RUN_ID` validates a positive run ID before opening SQLite, uses a read-only database connection, and opens only the run directory already bound to that database row. It SHA-verifies exact manifest-indexed evidence filenames and returns a bounded redacted summary of the job, review state, ATS/stage metadata, observation, plan, actions, and optional browser failure. It never creates a missing database/artifact path, mutates review state, starts a browser, or exposes raw job/profile/resume/LLM/artifact values.
 
 `complete` requires `--run-id` and `--outcome {submitted,skipped}`. `retry` requires `--run-id`; both accept optional `--annotation-file` and `--confirm-window-closed`. A retry is explicit and latest-run guarded; it returns the job to the queue rather than silently rerunning a stale run.
 
@@ -426,6 +431,7 @@ uv run --frozen jobs-assistant application-preferences set-review-order --help
 uv run --frozen jobs-assistant application-preferences remove-review-order --help
 uv run --frozen jobs-assistant autofill-review --help
 uv run --frozen jobs-assistant autofill-review list --help
+uv run --frozen jobs-assistant autofill-review show --help
 uv run --frozen jobs-assistant autofill-review complete --help
 uv run --frozen jobs-assistant autofill-review retry --help
 uv run --frozen job-scrape --help

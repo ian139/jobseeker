@@ -702,6 +702,134 @@ def test_cli_import_feed_uses_env_base_url(tmp_path: Path, capsys, monkeypatch):
     assert capsys.readouterr().out.strip() == '{"inserted": 1, "seen": 1, "updated": 0}'
 
 
+def test_cli_import_feed_records_file_sync_audit_without_changing_stdout(tmp_path: Path, capsys):
+    db = tmp_path / "jobs.sqlite3"
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text(
+        '{"jobs":[{"id":"file-1","title":"Software Engineer","company":"Acme",'
+        '"apply_url":"https://jobs.example.com/file-1"}]}',
+        encoding="utf-8",
+    )
+
+    assert main(["--db", str(db), "import-feed", "--json-file", str(fixture), "--source", "file-feed"]) == 0
+    assert capsys.readouterr().out.strip() == '{"inserted": 1, "seen": 1, "updated": 0}'
+
+    connection = connect(db)
+    try:
+        run = connection.execute(
+            "SELECT source, mode, jobs_seen, jobs_returned, jobs_inserted, jobs_updated, finished_at, success, error "
+            "FROM sync_runs"
+        ).fetchone()
+        assert run["source"] == "file-feed"
+        assert run["mode"] == "json_file"
+        assert (run["jobs_seen"], run["jobs_returned"], run["jobs_inserted"], run["jobs_updated"]) == (1, 1, 1, 0)
+        assert run["finished_at"]
+        assert run["success"] == 1
+        assert run["error"] is None
+    finally:
+        connection.close()
+
+
+def test_cli_import_feed_records_http_sync_audit(tmp_path: Path, capsys, monkeypatch):
+    db = tmp_path / "jobs.sqlite3"
+
+    def fake_fetch_source_jobs(base_url: str, api_key: str | None = None):
+        assert base_url == "https://feed.example.test"
+        assert api_key == "private-token"
+        return [{"id": "http-1", "title": "Backend Engineer", "company": "Acme", "apply_url": "https://jobs.example.com/http-1"}]
+
+    monkeypatch.setenv("JOB_SOURCE_API_KEY", "private-token")
+    monkeypatch.setattr(cli_mod, "fetch_source_jobs", fake_fetch_source_jobs)
+
+    assert main(["--db", str(db), "import-feed", "--base-url", "https://feed.example.test", "--source", "http-feed"]) == 0
+    assert capsys.readouterr().out.strip() == '{"inserted": 1, "seen": 1, "updated": 0}'
+
+    connection = connect(db)
+    try:
+        run = connection.execute(
+            "SELECT source, mode, jobs_seen, jobs_returned, jobs_inserted, jobs_updated, finished_at, success, error "
+            "FROM sync_runs"
+        ).fetchone()
+        assert run["source"] == "http-feed"
+        assert run["mode"] == "http"
+        assert (run["jobs_seen"], run["jobs_returned"], run["jobs_inserted"], run["jobs_updated"]) == (1, 1, 1, 0)
+        assert run["finished_at"]
+        assert run["success"] == 1
+        assert run["error"] is None
+        assert "private-token" not in json.dumps(dict(run))
+    finally:
+        connection.close()
+
+
+def test_cli_import_feed_http_failure_audits_redacted_error_without_jobs(tmp_path: Path, capsys, monkeypatch):
+    db = tmp_path / "jobs.sqlite3"
+
+    def fail_fetch_source_jobs(base_url: str, api_key: str | None = None):
+        request = httpx.Request("GET", f"{base_url}/v1/jobs?token={api_key}")
+        raise httpx.ReadTimeout("private transport detail", request=request)
+
+    monkeypatch.setenv("JOB_SOURCE_API_KEY", "private-token")
+    monkeypatch.setattr(cli_mod, "fetch_source_jobs", fail_fetch_source_jobs)
+
+    assert main(["--db", str(db), "import-feed", "--base-url", "https://feed.example.test", "--source", "http-feed"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error": {"code": "invalid_input", "message": "autofill input was rejected"}
+    }
+    assert "private-token" not in captured.err
+    assert "feed.example.test" not in captured.err
+
+    connection = connect(db)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        run = connection.execute(
+            "SELECT source, mode, jobs_seen, jobs_returned, jobs_inserted, jobs_updated, finished_at, success, error "
+            "FROM sync_runs"
+        ).fetchone()
+        assert run["source"] == "http-feed"
+        assert run["mode"] == "http"
+        assert (run["jobs_seen"], run["jobs_returned"], run["jobs_inserted"], run["jobs_updated"]) == (0, 0, 0, 0)
+        assert run["finished_at"]
+        assert run["success"] == 0
+        assert run["error"] == "source request failed"
+    finally:
+        connection.close()
+
+
+def test_cli_import_feed_failure_rolls_back_jobs_but_audits_attempt(tmp_path: Path, capsys):
+    db = tmp_path / "jobs.sqlite3"
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text(
+        '{"jobs":[{"id":"valid","title":"Valid Engineer","company":"Acme",'
+        '"apply_url":"https://jobs.example.com/valid"},{"title":"Missing URL","company":"Acme"}]}',
+        encoding="utf-8",
+    )
+
+    assert main(["--db", str(db), "import-feed", "--json-file", str(fixture), "--source", "file-feed"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error": {"code": "invalid_input", "message": "autofill input was rejected"}
+    }
+
+    connection = connect(db)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        run = connection.execute(
+            "SELECT source, mode, jobs_seen, jobs_returned, jobs_inserted, jobs_updated, finished_at, success, error "
+            "FROM sync_runs"
+        ).fetchone()
+        assert run["source"] == "file-feed"
+        assert run["mode"] == "json_file"
+        assert (run["jobs_seen"], run["jobs_returned"], run["jobs_inserted"], run["jobs_updated"]) == (2, 2, 0, 0)
+        assert run["finished_at"]
+        assert run["success"] == 0
+        assert run["error"] == "source payload rejected"
+    finally:
+        connection.close()
+
+
 class FakeTheirStackClient:
     """Fake TheirStackClient that returns a canned response without HTTP."""
 

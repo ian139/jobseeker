@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import httpx
 import os
 import re
 import secrets
@@ -1171,6 +1172,71 @@ def _validate_import_feed_args(parser: argparse.ArgumentParser, args: argparse.N
             f"import-feed --source must be a non-empty string of at most {MAX_BACKLOG_SOURCE_CHARS} characters"
         )
 
+def _run_import_feed(connection, args: argparse.Namespace, preloaded_jobs: list[dict[str, object]] | None) -> int:
+    """Run one validated generic feed import and persist a redacted sync audit."""
+    mode = "json_file" if args.json_file else "http"
+    run_id = record_sync_run(connection, args.source, mode)
+    returned = 0
+    seen = 0
+
+    def finish_failure(error: str) -> None:
+        update_sync_run(
+            connection,
+            run_id,
+            finished_at=utc_now(),
+            success=False,
+            jobs_seen=seen,
+            jobs_returned=returned,
+            jobs_inserted=0,
+            jobs_updated=0,
+            error=error,
+        )
+
+    try:
+        if args.json_file:
+            raw_jobs = preloaded_jobs
+        else:
+            try:
+                base_url = args.base_url or os.environ.get("JOB_SOURCE_BASE_URL")
+                raw_jobs = fetch_source_jobs(base_url, api_key=os.environ.get("JOB_SOURCE_API_KEY"))
+            except (RecursionError, TypeError, ValueError) as exc:
+                finish_failure("source response rejected")
+                raise _CliFailure("invalid_input") from exc
+            except httpx.HTTPError as exc:
+                finish_failure("source request failed")
+                raise _CliFailure("invalid_input") from exc
+            except Exception as exc:
+                finish_failure("source import failed")
+                raise _CliFailure("workflow_error") from exc
+
+        if isinstance(raw_jobs, (list, tuple)):
+            returned = len(raw_jobs)
+            seen = returned
+        seen, inserted, updated = import_source_jobs(connection, raw_jobs, source=args.source)
+        update_sync_run(
+            connection,
+            run_id,
+            finished_at=utc_now(),
+            success=True,
+            jobs_seen=seen,
+            jobs_returned=seen,
+            jobs_inserted=inserted,
+            jobs_updated=updated,
+            error=None,
+        )
+        print(json.dumps({"seen": seen, "inserted": inserted, "updated": updated}, sort_keys=True))
+        return 0
+    except _CliFailure:
+        raise
+    except (RecursionError, TypeError, ValueError) as exc:
+        finish_failure("source payload rejected")
+        raise _CliFailure("invalid_input") from exc
+    except sqlite3.DatabaseError:
+        finish_failure("database operation failed")
+        raise
+    except Exception as exc:
+        finish_failure("source import failed")
+        raise _CliFailure("workflow_error") from exc
 
 def _validate_backlog_list_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Reject backlog-list controls before opening SQLite."""
@@ -1294,14 +1360,7 @@ def _run_database_command(args: argparse.Namespace, parser: argparse.ArgumentPar
             print(f"initialized {args.db}")
             return 0
         if args.command == "import-feed":
-            if args.json_file:
-                raw_jobs = preloaded_jobs
-            else:
-                base_url = args.base_url or os.environ.get("JOB_SOURCE_BASE_URL")
-                raw_jobs = fetch_source_jobs(base_url, api_key=os.environ.get("JOB_SOURCE_API_KEY"))
-            seen, inserted, updated = import_source_jobs(connection, raw_jobs, source=args.source)
-            print(json.dumps({"seen": seen, "inserted": inserted, "updated": updated}, sort_keys=True))
-            return 0
+            return _run_import_feed(connection, args, preloaded_jobs)
         if args.command == "theirstack-preview":
             client = _theirstack_client(paid_fetch=False)
             payload = build_preview_payload(args.source_profile)

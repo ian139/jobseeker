@@ -80,6 +80,30 @@ BLOCKER_FIXTURE = b"""<!doctype html><form>
 <button type="button" id="offline">Continue</button>
 <div id="blocker">CAPTCHA authentication assessment required</div>
 </form>"""
+INPUT_BUTTON_FIXTURE = b"""<!doctype html>
+<html><head><title>Input Button Fixture</title></head>
+<body><form>
+<label>First Name <input name="first_name" autocomplete="given-name" required></label>
+<input type="button" id="input-offline" value="Continue">
+<button type="submit" id="submit-final">Submit Application</button>
+</form>
+<script>document.getElementById("input-offline").addEventListener("click",()=>{const revealed=document.createElement("input");revealed.name="revealed_step";document.body.append(revealed)});</script>
+</body></html>"""
+INPUT_BUTTON_FINAL_LIKE_FIXTURE = b"""<!doctype html>
+<html><head><title>Input Button Final Like Fixture</title></head>
+<body><form>
+<input type="button" id="input-final" value="Submit Application">
+<button type="submit" id="submit-final">Submit Application</button>
+</form>
+<script>
+const finalInput = document.getElementById("input-final");
+Object.defineProperty(finalInput, "value", {
+  configurable: true,
+  get() { return "Continue"; },
+});
+finalInput.addEventListener("click",()=>{document.body.dataset.clicked="yes"});
+</script>
+</body></html>"""
 
 class FixtureHandler(http.server.SimpleHTTPRequestHandler):
     attacker_http_requests = 0
@@ -171,6 +195,8 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
             else CROSS_JOB_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-cross-job")
             else FINAL_LIKE_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-final")
             else SUBMIT_CONTINUATION_FIXTURE if self.path.startswith("/continue-native")
+            else INPUT_BUTTON_FINAL_LIKE_FIXTURE if self.path.startswith("/input-button-final")
+            else INPUT_BUTTON_FIXTURE if self.path.startswith("/input-button")
             else CLEAN_FIXTURE if self.path.startswith("/clean") else FIXTURE.read_bytes()
         )
         self.wfile.write(body)
@@ -744,6 +770,85 @@ def test_submit_continuation_rejects_cross_job_and_final_like_history(fixture_se
         assert counters["terminal_reason"] == "unsafe_navigation_target"
         assert FixtureHandler.final_like_requests == 0
         assert FixtureHandler.attacker_http_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_input_type_button_offline_click_with_form_is_allowed_and_reobserved(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/input-button")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-input-button",
+        run_id=5,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        offline = next(
+            button
+            for button in observation["buttons"]
+            if button["element_kind"] == "input" and button["button_type"] == "button"
+        )
+        assert offline["target_id"] not in observation["final_submit_target_ids"]
+        assert offline["effective_action_url"] is None
+        assert offline["effective_method"] is None
+        assert offline["value"] == "Continue"
+        before = session.network_counters()
+        result = session.click_offline(offline["target_id"])
+        assert result["clicked"] is True
+        next_observation = session.observe()
+        assert next_observation["url"] == logical_url
+        assert any(field["name"] == "revealed_step" for field in next_observation["fields"])
+        assert any(
+            button["element_kind"] == "input" and button["button_type"] == "button"
+            for button in next_observation["buttons"]
+        )
+        second = next(
+            button
+            for button in next_observation["buttons"]
+            if button["element_kind"] == "input" and button["button_type"] == "button"
+        )
+        with pytest.raises(BrowserAdapterError, match="final_or_anchor_not_automated"):
+            session.click_offline(second["target_id"], continuation=True)
+        counters = session.network_counters()
+        assert counters["terminal_reason"] is None
+        for name in ("allowed", "denied", "dnsLookups", "upstreamConnectAttempts", "upstreamHttpAttempts", "proxyRequests"):
+            assert counters[name] == before[name]
+        assert FixtureHandler.final_like_requests == 0
+        assert FixtureHandler.attacker_http_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_input_type_button_final_like_value_is_denied_and_kept_zero(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/input-button-final")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-input-button-final",
+        run_id=6,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        final_like = next(
+            button
+            for button in observation["buttons"]
+            if button["element_kind"] == "input" and button["button_type"] == "button"
+        )
+        assert final_like["value"] == "Submit Application"
+        assert final_like["target_id"] in observation["final_submit_target_ids"]
+        with pytest.raises(BrowserAdapterError, match="final_or_anchor_not_automated"):
+            session.click_offline(final_like["target_id"])
+        counters = session.network_counters()
+        assert counters["terminal_reason"] is None
+        assert FixtureHandler.final_like_requests == 0
+        assert FixtureHandler.attacker_http_requests == 0
+
+
+
+
 @BROWSER_INTEGRATION_SKIP
 def test_lever_session_uses_selected_policy_and_keeps_final_submit_manual(fixture_server):
     with PuppeteerSession.start(
@@ -1424,4 +1529,4 @@ def test_runner_request_guard_self_test() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr.decode()
-    assert _decode_frames(result.stdout) == [{"ok": True, "data": {"passed": 6}}]
+    assert _decode_frames(result.stdout) == [{"ok": True, "data": {"passed": 7}}]

@@ -912,10 +912,14 @@ def _safe_click_is_eligible(
     page_url: str | None = None,
 ) -> bool:
     button_type = str(button.button_type).lower()
+    element_kind = button.element_kind.lower()
+    is_native_offline = (
+        (element_kind == "button" and button_type in {"button", "submit"})
+        or (element_kind == "input" and button_type == "button")
+    )
     common = bool(
         button.target_id not in final_submit_target_ids
-        and button.element_kind.lower() == "button"
-        and button_type in {"button", "submit"}
+        and is_native_offline
         and isinstance(button.click_key, str)
         and bool(button.click_key)
         and _frame_origin_allowed(button.frame_url, ats_policy)

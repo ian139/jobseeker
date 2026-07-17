@@ -123,6 +123,44 @@ def observation(*fields, final=(), buttons=(), url="https://boards.greenhouse.io
     return PageObservation("obs-1", url, "Apply", (), tuple(fields), tuple(buttons), tuple(final), (), ())
 
 
+def input_button(
+    target_id: str = "input-button-continue",
+    *,
+    frame_url: str = "https://boards.greenhouse.io/fixture/jobs/123",
+    text: str = "Continue",
+    value: str | None = None,
+    click_key: str = "click-continue",
+    button_type: str = "button",
+    visible: bool = True,
+    enabled: bool = True,
+    effective_action_url: str | None = None,
+    effective_method: str | None = None,
+    descriptors: tuple[str, ...] = (),
+) -> ObservedButton:
+    return ObservedButton(
+        target_id=target_id,
+        frame_id="frame-0",
+        frame_url=frame_url,
+        click_key=click_key,
+        element_id=None,
+        element_kind="input",
+        text=text,
+        selector=f"#{target_id}",
+        button_type=button_type,
+        name=None,
+        value=value if value is not None else text,
+        target=None,
+        download=False,
+        effective_action_url=effective_action_url,
+        effective_method=effective_method,
+        href_url=None,
+        href_attribute=None,
+        visible=visible,
+        enabled=enabled,
+        safety_descriptors=descriptors,
+    )
+
+
 
 
 def test_exact_llm_schema_and_kind_validation():
@@ -233,6 +271,56 @@ def test_button_only_lever_inference_is_resolved(monkeypatch) -> None:
     assert len(calls) == 1
     assert calls[0]["fields"] == []
     assert calls[0]["buttons"][0]["target_id"] == safe.target_id
+
+
+def test_input_type_button_eligibility_and_descriptor_rejection() -> None:
+    safe = input_button(target_id="input-safe")
+    submit_input = input_button(target_id="input-submit", button_type="submit", text="Continue")
+    final_like = input_button(target_id="input-final", descriptors=("submit",))
+    hidden = input_button(target_id="input-hidden", visible=False)
+    wrong_origin = input_button(target_id="input-origin", frame_url="https://evil.example/jobs/123")
+    with_form_meta = input_button(target_id="input-meta", effective_action_url="https://boards.greenhouse.io/fixture/jobs/123", effective_method="post")
+    final = button(target_id="final", click_key="click-final")
+    observed = observation(
+        buttons=(safe, submit_input, final_like, hidden, wrong_origin, with_form_meta, final),
+        final=("final", "input-final"),
+        url="https://boards.greenhouse.io/fixture/jobs/123",
+    )
+    eligible_ids = [
+        b.target_id
+        for b in observed.buttons
+        if app._safe_click_is_eligible(
+            b,
+            observed.final_submit_target_ids,
+            ats_policy="greenhouse",
+            page_url=observed.url,
+        )
+    ]
+    assert eligible_ids == [safe.target_id]
+    request = build_inference_request(
+        observed,
+        job={"title": "Engineer"},
+        resume_text="resume",
+        profile_facts={},
+        ats_policy="greenhouse",
+    )
+    assert [item["target_id"] for item in request["buttons"]] == [safe.target_id]
+
+
+def test_input_type_button_value_does_not_pollute_field_descriptors() -> None:
+    text_field = field(name="first_name", label="First Name", value="Ada")
+    input_btn = input_button(value="Submit")
+    observed = observation(text_field, buttons=(input_btn,))
+    request = build_inference_request(
+        observed,
+        job={"title": "Engineer"},
+        resume_text="resume",
+        profile_facts={"first_name": "Ada"},
+        ats_policy="greenhouse",
+    )
+    assert [item["target_id"] for item in request["buttons"]] == [input_btn.target_id]
+    assert "Submit" not in json.dumps(request["fields"])
+    assert "Ada" not in json.dumps(request["fields"])
 
 
 def test_inference_request_is_target_scoped_and_redacted():

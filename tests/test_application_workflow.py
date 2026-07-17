@@ -1103,6 +1103,72 @@ def test_workflow_rejects_post_click_cross_job_route_during_reobserve(monkeypatc
     assert RouteDriftSession.final_submit_calls == 0
 
 
+def test_workflow_dispatches_input_type_button_offline_with_no_continuation_permit(monkeypatch, tmp_path: Path) -> None:
+    claims = [ApplicationClaim(75, {"id": 75, "canonical_url": "https://boards.greenhouse.io/a/jobs/75", "title": "Input Button"})]
+
+    class InputButtonSession(FakeSession):
+        observations = 0
+        clicks: list[tuple[str, bool]] = []
+
+        @classmethod
+        def start(cls, **kwargs):
+            return cls(kwargs["session_manifest"])
+
+        def observe(self):
+            type(self).observations += 1
+            payload = _payload()
+            payload["url"] = "https://boards.greenhouse.io/a/jobs/75"
+            if self.observations == 1:
+                payload["buttons"] = [{
+                    "target_id": "input-continue",
+                    "frame_id": "frame-0",
+                    "frame_url": payload["url"],
+                    "click_key": "input-continue-key",
+                    "element_kind": "input",
+                    "button_type": "button",
+                    "text": "Continue",
+                    "value": "Continue",
+                    "visible": True,
+                    "enabled": True,
+                    "safety_descriptors": [],
+                }]
+            else:
+                payload["buttons"] = []
+            return payload
+
+        def click_offline(self, target_id, continuation=False):
+            type(self).clicks.append((target_id, continuation))
+            return {"clicked": True, "counters": {}}
+
+    monkeypatch.setattr(app, "PuppeteerSession", InputButtonSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in ("register_application_artifact", "register_application_session", "register_application_owner_process", "register_application_browser_process"):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        app,
+        "resolve_with_llm",
+        lambda *args, **kwargs: app.AutofillPlan(
+            safe_click_target_id="input-continue",
+            status="ready",
+            reason_code=app.PublicReasonCode.draft_ready,
+        ),
+    )
+
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+    result = asyncio.run(app.run_application_workflow(object(), resume_file=resume, artifact_root=root))
+
+    assert result[0]["status"] == "review_ready"
+    assert InputButtonSession.clicks == [("input-continue", False)]
+    actions = json.loads((root / "run-75" / "actions.json").read_text(encoding="utf-8"))
+    assert actions["actions"][0]["continuation"] is False
+    assert actions["final_submit_calls"] == 0
+    evidence = json.loads((root / "run-75" / "iterations" / "0001" / "action_evidence.json").read_text(encoding="utf-8"))
+    assert evidence["continuation_permit"] is False
+
+
 
 
 def test_frame_origin_unknown_ats_policy_denies_greenhouse_origin() -> None:

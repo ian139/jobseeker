@@ -1399,7 +1399,9 @@ function reviewClickKey(frameUrl, info) {
   const origin = safeUrl(frameUrl)?.origin || frameUrl;
   const identity = info.id || info.name || '';
   const text = String(info.text || '').replace(/\s+/g, ' ').trim();
-  return hash([origin, info.isAnchor ? 'a' : 'button', identity, text].join('\u001f')).slice(0, 24);
+  const buttonLikeInput = info.tag === 'input' && ['submit', 'button', 'reset', 'image'].includes(String(info.kind || '').toLowerCase());
+  const value = (buttonLikeInput && !text) ? String(info.buttonValue || '').replace(/\s+/g, ' ').trim() : text;
+  return hash([origin, info.isAnchor ? 'a' : 'button', identity, value].join('\u001f')).slice(0, 24);
 }
 async function consumeRealmReviewPermit(request) {
   if (!page || request.frame() !== page.mainFrame() || !request.isNavigationRequest()) return false;
@@ -1444,17 +1446,24 @@ async function safeElementInfo(handle) {
     if (described) for (const id of described.split(/\s+/)) { const item = el.ownerDocument.getElementById(id); if (item) labels.push(item.textContent || ''); }
     const parentLabel = el.closest('label,fieldset'); if (parentLabel) labels.push(parentLabel.textContent || '');
     // Field values are applicant data, never descriptor material. Button values
-    // are control metadata needed for final-submit classification.
-    const scalarValue = input && ['checkbox', 'radio'].includes(type) ? Boolean(el.checked)
-      : input && type === 'file' ? null : String(el.value ?? '');
+    // are control metadata needed for final-submit classification. Read native
+    // accessors so an element-level getter cannot mask the live control value.
+    const valueDescriptor = input ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')
+      : textarea ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')
+        : button ? Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'value') : null;
+    const checkedDescriptor = input ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked') : null;
+    const nativeValue = valueDescriptor && typeof valueDescriptor.get === 'function' ? valueDescriptor.get.call(el) : null;
+    const nativeChecked = checkedDescriptor && typeof checkedDescriptor.get === 'function' ? checkedDescriptor.get.call(el) : null;
+    const scalarValue = input && ['checkbox', 'radio'].includes(type) ? Boolean(nativeChecked)
+      : input && type === 'file' ? null
+        : (input || textarea || button) ? String(nativeValue ?? '') : String(el.value ?? '');
     const buttonValue = (button || input) && ['submit', 'button', 'reset', 'image'].includes(type)
-      ? String(el.value ?? '') : '';
+      ? String(nativeValue ?? '') : '';
     const text = (button || anchor) ? String(el.innerText || el.textContent || '').trim() : '';
-    const descriptors = [...own, ...labels, ...(button || anchor ? [text, buttonValue] : [])].map(value => String(value).trim()).filter(Boolean);
+    const buttonLikeInput = input && ['submit', 'button', 'reset', 'image'].includes(type);
+    const descriptors = [...own, ...labels, ...(button || anchor || buttonLikeInput ? [text, buttonValue] : [])].map(value => String(value).trim()).filter(Boolean);
     const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : { width: 0, height: 0 };
     const style = typeof getComputedStyle === 'function' ? getComputedStyle(el) : null;
-    const valueDescriptor = input ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value') : textarea ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value') : null;
-    const checkedDescriptor = input ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked') : null;
     const options = select ? Array.from(el.options || []).map(option => ({ value: String(option.value || ''), label: String(option.label || option.text || ''), enabled: !option.disabled })) : [];
     const label = String(el.getAttribute('aria-label') || labels.join(' ').replace(/\s+/g, ' ').trim() || el.getAttribute('placeholder') || el.getAttribute('name') || el.id || '').slice(0, 2048);
     const name = el.getAttribute('name') || el.id || null;
@@ -1469,18 +1478,28 @@ async function safeElementInfo(handle) {
       return token;
     })() : null;
     const groupId = input && ['checkbox', 'radio'].includes(type) && name ? `${form ? (form.action || '') : ''}\u001f${name}` : null;
-    const flat = [...finalOwn, ...labels, ...(button || anchor ? [text, buttonValue] : []), name, action, el.getAttribute('href')].filter(Boolean).join(' ');
+    const flat = [...finalOwn, ...labels, ...(button || anchor || buttonLikeInput ? [text, buttonValue] : []), name, action, el.getAttribute('href')].filter(Boolean).join(' ');
     const finalLike = finalTokens.some(token => new Set((flat.toLowerCase().match(/[a-z0-9]+/g) || [])).has(String(token).toLowerCase()));
+    const valueAccessPoisoned = (input || textarea || button) && (
+      !valueDescriptor
+      || typeof valueDescriptor.get !== 'function'
+      || ((input || textarea) && typeof valueDescriptor.set !== 'function')
+    );
+    const checkedAccessPoisoned = input && ['checkbox', 'radio'].includes(type) && (
+      !checkedDescriptor
+      || typeof checkedDescriptor.get !== 'function'
+      || typeof checkedDescriptor.set !== 'function'
+    );
     return {
       id: el.id || null,
       tag,
       isField: (input || textarea || select) && !['hidden', 'submit', 'button', 'reset', 'image'].includes(type),
       isButton: button || anchor || el.getAttribute('role') === 'button' || (input && ['submit', 'button', 'reset', 'image'].includes(type)),
-      isNativeOfflineButton: button && type === 'button',
+      isNativeOfflineButton: (button && type === 'button') || (input && type === 'button'),
       isNativeContinuationButton: button && type === 'submit' && !form,
       isAnchor: anchor, isFile: input && type === 'file', isCustomElement: tag.includes('-'),
-      prototypePoisoned: (input || textarea) && (!valueDescriptor || typeof valueDescriptor.set !== 'function') || (input && ['checkbox', 'radio'].includes(type) && (!checkedDescriptor || typeof checkedDescriptor.set !== 'function')),
-      kind: textarea ? 'textarea' : select ? 'select' : type, name, label, groupId, formIdentity, formToken, optionValue: input && ['checkbox', 'radio'].includes(type) ? String(el.value || '') : null, descriptors, selector: el.id ? `#${CSS.escape(el.id)}` : name ? `${tag}[name="${String(name).replaceAll('"', '\\"')}"]` : tag,
+      prototypePoisoned: valueAccessPoisoned || checkedAccessPoisoned,
+      kind: textarea ? 'textarea' : select ? 'select' : type, name, label, groupId, formIdentity, formToken, optionValue: input && ['checkbox', 'radio'].includes(type) ? String(nativeValue || '') : null, descriptors, selector: el.id ? `#${CSS.escape(el.id)}` : name ? `${tag}[name="${String(name).replaceAll('"', '\\"')}"]` : tag,
       required: Boolean(el.required || el.getAttribute('aria-required') === 'true'), visible: Boolean(rect.width && rect.height && (!style || (style.visibility !== 'hidden' && style.display !== 'none'))), enabled: !el.disabled, readonly: Boolean(el.readOnly),
       value: scalarValue, buttonValue, willValidate: Boolean(el.willValidate), valid: Boolean(el.validity ? el.validity.valid : true),
       validityFlags: el.validity ? ['valueMissing', 'typeMismatch', 'patternMismatch', 'tooLong', 'tooShort', 'rangeUnderflow', 'rangeOverflow', 'stepMismatch', 'badInput', 'customError'].filter(flag => Boolean(el.validity[flag])) : [],
@@ -1539,7 +1558,8 @@ function toObservedField(targetId, frameId, frameUrl, info, key, sensitive) {
   return { target_id: targetId, field_key: key, frame_id: frameId, frame_url: frameUrl, form_action_url: info.formActionUrl, kind: info.kind, name: info.name, label: info.label, group_id: info.groupId || null, option_value: info.optionValue || null, safety_descriptors: info.descriptors, selector: info.selector, required: info.required, visible: info.visible, enabled: info.enabled, readonly: info.readonly, value: info.value, will_validate: info.willValidate, valid: info.valid, validity_flags: [...info.validityFlags, ...(sensitive ? ['sensitive_field'] : [])], file_count: info.fileCount, file_basenames: info.fileBasenames, accept: info.accept, min_length: info.minLength, max_length: info.maxLength, pattern: info.pattern, min_value: info.minValue, max_value: info.maxValue, step: info.step, options: info.options };
 }
 function toObservedButton(targetId, frameId, frameUrl, info, clickKey, sensitive) {
-  return { target_id: targetId, frame_id: frameId, frame_url: frameUrl, click_key: info.finalLike || sensitive || info.collision ? null : clickKey, collision_count: Number(info.collisionCount || 0), element_id: info.id || null, element_kind: info.isAnchor ? 'a' : info.tag, text: info.text, selector: info.selector, button_type: info.buttonType, name: info.name, value: info.buttonValue || null, target: info.target, download: info.download, effective_action_url: info.formActionUrl, effective_method: info.effectiveMethod, href_url: info.hrefUrl, href_attribute: info.hrefAttribute, visible: info.visible, enabled: info.enabled, safety_descriptors: info.descriptors };
+  const nativeOffline = Boolean(info.isNativeOfflineButton);
+  return { target_id: targetId, frame_id: frameId, frame_url: frameUrl, click_key: info.finalLike || sensitive || info.collision ? null : clickKey, collision_count: Number(info.collisionCount || 0), element_id: info.id || null, element_kind: info.isAnchor ? 'a' : info.tag, text: info.text, selector: info.selector, button_type: info.buttonType, name: info.name, value: info.buttonValue || null, target: info.target, download: info.download, effective_action_url: nativeOffline ? null : info.formActionUrl, effective_method: nativeOffline ? null : info.effectiveMethod, href_url: info.hrefUrl, href_attribute: info.hrefAttribute, visible: info.visible, enabled: info.enabled, safety_descriptors: info.descriptors };
 }
 function assertPage() { if (!page) throw new Error('Puppeteer page is not initialized'); }
 async function trustedFrame(frame) {
@@ -1935,7 +1955,7 @@ async function buttonAction(handle, info, command, frame, observedFrameChain) {
   }
   const continuation = command.continuation === true;
   const buttonType = String(info.buttonType || '').toLowerCase();
-  const noAction = !info.formActionUrl && !info.effectiveMethod
+  const noAction = (info.isNativeOfflineButton || (!info.formActionUrl && !info.effectiveMethod))
     && info.target == null && !info.download && !info.hrefUrl && !info.hrefAttribute;
   const sameDocumentOrigin = sameOrigin(page.url(), info.documentOrigin);
   const ordinary = !continuation && info.isNativeOfflineButton && buttonType === 'button';
@@ -2463,9 +2483,22 @@ function runRequestGuardSelfTest() {
     'https://boards.greenhouse.io/example/jobs/123',
     documentRouteIdentity,
   )) throw new Error('request_guard_self_test_failed');
+  const inputButton = {
+    tag: 'input',
+    kind: 'button',
+    id: 'continue',
+    name: 'continue',
+    text: '',
+    buttonValue: 'Continue',
+    isAnchor: false,
+  };
+  if (reviewClickKey('https://boards.greenhouse.io/acme/jobs/123', inputButton)
+      === reviewClickKey('https://boards.greenhouse.io/acme/jobs/123', { ...inputButton, buttonValue: 'Cancel' })) {
+    throw new Error('request_guard_self_test_failed');
+  }
   documentRouteIdentity = null;
   if (vectors.some(([actual, expected]) => actual !== expected)) throw new Error('request_guard_self_test_failed');
-  return { passed: vectors.length + 2 };
+  return { passed: vectors.length + 3 };
 }
 if (process.argv.includes('--error-code-self-test')) runErrorCodeSelfTest().then(send).then(() => process.exit(0)).catch(async error => { await fail(error, 'protocol'); process.exit(1); });
 else if (process.argv.includes('--request-guard-self-test')) Promise.resolve(runRequestGuardSelfTest()).then(send).then(() => process.exit(0)).catch(async error => { await fail(error, 'protocol'); process.exit(1); });

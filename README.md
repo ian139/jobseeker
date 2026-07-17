@@ -441,9 +441,12 @@ Focused smoke checks:
 
 ```bash
 npm run puppeteer-smoke
+npm run puppeteer-verify
 uv run --frozen --extra dev python -m pytest tests/test_cli_smoke.py
 sh scripts/container-smoke.sh
 ```
+
+The host-only `puppeteer-verify` command runs every automated browser-adapter check, including the headed local diagnostic on supported hosts, and deselects only the physical headed review-window survival check. It preserves terminal attribution for post-mutation fetch, WebSocket, and popup traffic while treating only Chromium's exact implicit same-origin `/favicon.ico` request as ambient; detached-test cleanup validates and removes both owner and browser process groups. Use `scripts/container-smoke.sh`, not this headed-capable command, for container verification.
 
 For the complete Python gate, run `uv run --frozen --extra dev python -m pytest`; headed survival is a manual host check requiring a physical benign click/tab close. The review workflow has no final-submit automation, no user-facing timer, and no CDP attach/reconnect path.
 

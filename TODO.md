@@ -133,11 +133,15 @@ every future adapter and preference feature.
 
 - [x] Add read-only `autofill-review show RUN_ID` evidence inspection with positive-ID pre-connect validation, read-only SQLite, noncreating descriptor-relative artifact access, exact SHA-verified manifest filenames, producer-compatible staged evidence, strict bounded redacted projections, and no claim/review/browser/network mutation. Coverage is in `tests/test_cli_smoke.py`, `tests/test_application_claims.py`, and `tests/test_artifacts.py`; full package, Puppeteer smoke, container smoke, lock, CLI, and direct byte/state-invariance smoke checks pass.
 
+- [x] Close the runnable browser-adapter verification gate with final action-time network quiet/revalidation, CDP-attributed post-mutation fetch/WebSocket/popup denial, exact implicit-favicon suppression, and independently verified detached owner/browser test cleanup. The host-only `npm run puppeteer-verify` gate runs every automated adapter check (including the supported-host headed diagnostic) and deselects only the physical headed review-window survival check; full package, Puppeteer smoke, container smoke, lock, and CLI checks pass.
+
 ## Open gaps and blockers
 
 - [ ] Native `<select multiple>` ATS autofill remains unsupported. A bounded cross-layer attempt was fully reverted after Python contract regressions and three native Puppeteer continuation failures; no partial representation or browser mutation path remains. Revisit only with an immutable multi-value contract and fixture-first whole-set validation that preserves scalar selects, generation/network gates, and zero final-submit calls.
 
 - [ ] Native `<input type="button">` ATS continuation support remains unimplemented. The attempted lane was fully reverted after `RUN_PUPPETEER_INTEGRATION=1` browser coverage did not pass for the safe input-button click. Revisit only with a clean browser fixture; preserve existing hostile-listener, transport-token, no-network, final-like, and no-submit assertions.
+
+- [ ] Physical headed review-window survival remains a manual host gate requiring a benign human click and tab/window close. It is intentionally excluded by exact test name from `npm run puppeteer-verify`; no code path automates the physical action.
 
 ## Reference-only history
 

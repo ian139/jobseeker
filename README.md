@@ -117,6 +117,8 @@ uv run --frozen jobs-assistant import-feed
 
 Use `import-feed --source NAME` to record an exact source value for imported jobs. The value must be non-empty after trimming and at most 128 characters; omitted `--source` preserves the `job_source` default. `backlog-list --source NAME` filters and counts that source only.
 
+Each database-backed `import-feed` attempt records a redacted sync audit with the source, `json_file` or `http` mode, item counts, completion state, and a fixed failure reason. Imported jobs and the terminal success audit commit atomically; a failed import rolls back job changes before recording its failure audit.
+
 ## Commands
 
 | Command | Description |

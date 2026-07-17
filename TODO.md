@@ -127,6 +127,8 @@ every future adapter and preference feature.
 
 - [x] Promote validated read-only backlog listing query into a typed domain API (`list_backlog_jobs`) with exact status/source/limit/offset validation, deterministic ordering, stable counts, and no duplicate CLI SQL. Coverage is in `tests/test_backlog_ingestion.py` and `tests/test_cli_smoke.py`.
 
+- [x] Audit database-backed generic `import-feed` runs with source/mode/count/completion metadata and fixed redacted failures. Job upserts and terminal success metadata commit atomically; rollback, audit-write, rollback-failure, and post-commit output fault injection preserve truthful durable state. Coverage is in `tests/test_cli_smoke.py`; full package, Puppeteer smoke, container smoke, lock, and CLI checks pass.
+
 ## Open gaps and blockers
 
 - [ ] Native `<input type="button">` ATS continuation support remains unimplemented. The attempted lane was fully reverted after `RUN_PUPPETEER_INTEGRATION=1` browser coverage did not pass for the safe input-button click. Revisit only with a clean browser fixture; preserve existing hostile-listener, transport-token, no-network, final-like, and no-submit assertions.

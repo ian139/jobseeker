@@ -1046,6 +1046,247 @@ class FakeTheirStackClient:
         return self._response
 
 
+def test_cli_import_feed_dry_run_missing_db_remains_absent(tmp_path: Path, capsys) -> None:
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text(
+        '{"jobs":[{"id":"dry-1","title":"Dry Engineer","company":"Acme",'
+        '"apply_url":"https://jobs.example.com/dry-1","description":"secret"}]}',
+        encoding="utf-8",
+    )
+    db = tmp_path / "missing.sqlite3"
+
+    assert main(["--db", str(db), "import-feed", "--json-file", str(fixture), "--dry-run"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["seen"] == 1
+    assert output["would_insert"] == 1
+    assert output["would_update"] == 0
+    assert output["preview_truncated"] is False
+    assert len(output["preview"]) == 1
+    preview = output["preview"][0]
+    assert set(preview) == {
+        "source_job_id",
+        "canonical_url",
+        "title",
+        "company",
+        "location",
+        "remote",
+        "posted_at",
+    }
+    assert preview["source_job_id"] == "dry-1"
+    assert preview["title"] == "Dry Engineer"
+    assert "description" not in output
+    assert "raw" not in output
+    assert "source" not in preview
+    assert not db.exists()
+
+
+def test_cli_import_feed_dry_run_existing_db_unchanged_and_counts_updates(
+    tmp_path: Path, capsys
+) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text(
+        '{"jobs":[{"id":"dry-1","title":"Dry Engineer","company":"Acme",'
+        '"apply_url":"https://jobs.example.com/dry-1"}]}',
+        encoding="utf-8",
+    )
+
+    assert main(["--db", str(db), "import-feed", "--json-file", str(fixture), "--source", "dry-src"]) == 0
+    capsys.readouterr()
+    before = db.read_bytes()
+
+    connection = connect(db)
+    try:
+        sync_before = connection.execute("SELECT COUNT(*) FROM sync_runs").fetchone()[0]
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+    finally:
+        connection.close()
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "import-feed",
+                "--json-file",
+                str(fixture),
+                "--source",
+                "dry-src",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert output["seen"] == 1
+    assert output["would_insert"] == 0
+    assert output["would_update"] == 1
+    assert output["preview_truncated"] is False
+    assert len(output["preview"]) == 1
+    assert db.read_bytes() == before
+
+    connection = connect(db)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM sync_runs").fetchone()[0] == sync_before
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+    finally:
+        connection.close()
+
+
+def test_cli_import_feed_dry_run_counts_duplicate_records(tmp_path: Path, capsys) -> None:
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text(
+        json.dumps(
+            {
+                "jobs": [
+                    {"id": "dup-1", "title": "First", "company": "Acme", "apply_url": "https://jobs.example.com/dup-1"},
+                    {"id": "dup-1", "title": "Second", "company": "Acme", "apply_url": "https://jobs.example.com/dup-1"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    db = tmp_path / "missing.sqlite3"
+
+    assert main(["--db", str(db), "import-feed", "--json-file", str(fixture), "--dry-run"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["seen"] == 2
+    assert output["would_insert"] == 1
+    assert output["would_update"] == 1
+    assert output["preview_truncated"] is False
+    assert not db.exists()
+
+
+def test_cli_import_feed_dry_run_preview_truncates_at_101(tmp_path: Path, capsys) -> None:
+    jobs = [
+        {
+            "id": str(i),
+            "title": f"Job {i}",
+            "company": "Acme",
+            "apply_url": f"https://jobs.example.com/{i}",
+        }
+        for i in range(101)
+    ]
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text(json.dumps({"jobs": jobs}), encoding="utf-8")
+    db = tmp_path / "missing.sqlite3"
+
+    assert main(["--db", str(db), "import-feed", "--json-file", str(fixture), "--dry-run"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output["seen"] == 101
+    assert output["would_insert"] == 101
+    assert output["would_update"] == 0
+    assert len(output["preview"]) == 100
+    assert output["preview_truncated"] is True
+    assert not db.exists()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        17,
+        "private raw payload",
+        {},
+        {"results": []},
+        {"jobs": {}},
+        {"data": None},
+        {"jobs": [{"id": "valid"}, "private malformed record"]},
+    ],
+)
+def test_cli_import_feed_dry_run_rejects_malformed_payload_without_db(
+    tmp_path: Path, capsys, payload
+) -> None:
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text(json.dumps(payload), encoding="utf-8")
+    db = tmp_path / "missing.sqlite3"
+
+    assert main(["--db", str(db), "import-feed", "--json-file", str(fixture), "--dry-run"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error": {"code": "invalid_input", "message": "autofill input was rejected"}
+    }
+    assert not db.exists()
+
+
+def test_cli_import_feed_dry_run_http_fetches_without_persisting(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    db = tmp_path / "missing.sqlite3"
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_fetch_source_jobs(base_url: str, api_key: str | None = None):
+        calls.append((base_url, api_key))
+        return [
+            {
+                "id": "http-dry-1",
+                "title": "HTTP Dry Engineer",
+                "company": "Acme",
+                "apply_url": "https://jobs.example.com/http-dry-1",
+            }
+        ]
+
+    monkeypatch.setattr(cli_mod, "fetch_source_jobs", fake_fetch_source_jobs)
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "import-feed",
+                "--base-url",
+                "https://feed.example.test",
+                "--source",
+                "http-dry",
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert output["seen"] == 1
+    assert output["would_insert"] == 1
+    assert output["would_update"] == 0
+    assert calls[0][0] == "https://feed.example.test"
+    assert not db.exists()
+
+
+def test_cli_import_feed_dry_run_http_failure_is_redacted_without_db(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    db = tmp_path / "missing.sqlite3"
+
+    def fail_fetch_source_jobs(base_url: str, api_key: str | None = None):
+        request = httpx.Request("GET", f"{base_url}/v1/jobs")
+        raise httpx.ConnectError("private transport detail", request=request)
+
+    monkeypatch.setattr(cli_mod, "fetch_source_jobs", fail_fetch_source_jobs)
+
+    assert (
+        main(
+            [
+                "--db",
+                str(db),
+                "import-feed",
+                "--base-url",
+                "https://feed.example.test",
+                "--source",
+                "http-dry",
+                "--dry-run",
+            ]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error": {"code": "invalid_input", "message": "autofill input was rejected"}
+    }
+    assert "private" not in captured.err
+    assert not db.exists()
+
+
 def test_cli_theirstack_preview_prints_total_results(tmp_path: Path, capsys, monkeypatch):
     """theirstack-preview prints profile, total_results, and credit_safe flag."""
     db = tmp_path / "jobs.sqlite3"

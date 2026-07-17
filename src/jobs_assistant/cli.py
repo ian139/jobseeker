@@ -51,6 +51,7 @@ from .backlog import (
 from .application_profiles import load_application_profile_preset
 from .db import (
     REASON_STATUS,
+    canonicalize_url,
     complete_review,
     connect,
     connect_read_only,
@@ -64,7 +65,13 @@ from .db import (
     update_sync_run,
     utc_now,
 )
-from .job_source import extract_source_jobs, fetch_source_jobs, import_source_jobs
+from .job_source import (
+    extract_source_jobs,
+    fetch_source_jobs,
+    import_source_jobs,
+    normalize_source_job,
+    source_job_to_input,
+)
 from .theirstack import (
     ATS_FILTER_NAMES,
     PROFILE_NAMES,
@@ -542,6 +549,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--source",
         default="job_source",
         help=f"exact source value to store, non-empty and at most {MAX_BACKLOG_SOURCE_CHARS} characters",
+    )
+    import_feed.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="simulate the import without persisting jobs or recording a sync run",
     )
 
     preview = sub.add_parser("theirstack-preview", help="preview filtered TheirStack match count without persisting jobs")
@@ -1161,6 +1173,80 @@ def _run_backlog_archive(args: argparse.Namespace) -> int:
             _close_database(connection)
 
 
+def _run_import_feed_dry_run(
+    args: argparse.Namespace, preloaded_jobs: list[dict[str, object]] | None
+) -> int:
+    """Simulate an import-feed run against a disposable in-memory database snapshot.
+
+    The source envelope is fetched/validated exactly as a normal import would.
+    If the configured persistent database exists, it is opened read-only and
+    backed up into memory; if absent, an empty in-memory database is used.
+    The upsert simulation uses production dedupe/upsert semantics but never
+    writes the configured database or records a sync run.
+    """
+    raw_jobs: list[dict[str, object]]
+    if args.json_file:
+        raw_jobs = preloaded_jobs  # type: ignore[assignment]
+    else:
+        try:
+            base_url = args.base_url or os.environ.get("JOB_SOURCE_BASE_URL")
+            raw_jobs = fetch_source_jobs(base_url, api_key=os.environ.get("JOB_SOURCE_API_KEY"))
+        except (RecursionError, TypeError, ValueError) as exc:
+            raise _CliFailure("invalid_input") from exc
+        except httpx.HTTPError as exc:
+            raise _CliFailure("invalid_input") from exc
+        except Exception as exc:
+            raise _CliFailure("workflow_error") from exc
+
+    db_path = Path(args.db)
+    snapshot = sqlite3.connect(":memory:")
+    snapshot.row_factory = sqlite3.Row
+    try:
+        if db_path.exists():
+            ro_conn = connect_read_only(str(db_path))
+            try:
+                ro_conn.backup(snapshot)
+            finally:
+                _close_database(ro_conn)
+        init_db(snapshot)
+        seen, would_insert, would_update = import_source_jobs(snapshot, raw_jobs, source=args.source)
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise _CliFailure("invalid_input") from exc
+    except sqlite3.DatabaseError as exc:
+        raise _CliFailure("database_error") from exc
+    except Exception as exc:
+        raise _CliFailure("workflow_error") from exc
+    finally:
+        _close_database(snapshot)
+
+    preview: list[dict[str, object]] = []
+    for raw in raw_jobs:
+        if len(preview) >= 100:
+            break
+        job = source_job_to_input(normalize_source_job(raw), source=args.source)
+        preview.append(
+            {
+                "source_job_id": job.source_job_id,
+                "canonical_url": canonicalize_url(job.url),
+                "title": job.title,
+                "company": job.company,
+                "location": job.location,
+                "remote": job.remote,
+                "posted_at": job.posted_at,
+            }
+        )
+
+    output: dict[str, object] = {
+        "seen": seen,
+        "would_insert": would_insert,
+        "would_update": would_update,
+        "preview": preview,
+        "preview_truncated": len(raw_jobs) > 100,
+    }
+    print(json.dumps(output, sort_keys=True))
+    return 0
+
+
 def _validate_import_feed_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Reject import-feed source controls before opening SQLite."""
     if (
@@ -1376,6 +1462,8 @@ def _run_database_command(args: argparse.Namespace, parser: argparse.ArgumentPar
                     raise _CliFailure("invalid_input") from exc
             elif not (args.base_url or os.environ.get("JOB_SOURCE_BASE_URL")):
                 parser.error("import-feed requires --json-file, --base-url, or JOB_SOURCE_BASE_URL")
+            if args.dry_run:
+                return _run_import_feed_dry_run(args, preloaded_jobs)
         try:
             connection = connect(args.db)
             init_db(connection)

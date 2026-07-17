@@ -192,8 +192,21 @@ def fixture_server():
 def field_by_name(observation: dict, name: str) -> dict:
     return next(field for field in observation["fields"] if field.get("name") == name)
 
-def _validated_emergency_cleanup(identities: dict, manifest: Path) -> None:
-    """Kill only the released owner group after matching its recorded identities."""
+def _validated_emergency_cleanup(identities: dict, manifest: Path) -> bool:
+    """Kill only verified released owner and browser process groups."""
+    def matches(identity: dict) -> bool:
+        try:
+            return _capture_process_identity(identity["pid"]) == identity
+        except BrowserAdapterError:
+            return False
+    def group_exists(pgid: int) -> bool:
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+
+
     try:
         current = json.loads(manifest.read_text(encoding="utf-8"))
         owner = identities["owner"]
@@ -201,29 +214,46 @@ def _validated_emergency_cleanup(identities: dict, manifest: Path) -> None:
         fields = {"pid", "pgid", "birth"}
         for identity in (owner, browser):
             if not isinstance(identity, dict) or set(identity) != fields:
-                return
+                return False
             if type(identity["pid"]) is not int or identity["pid"] <= 0:
-                return
+                return False
             if type(identity["pgid"]) is not int or identity["pgid"] <= 0:
-                return
+                return False
+            if identity["pid"] != identity["pgid"]:
+                return False
             if type(identity["birth"]) is not str or not identity["birth"] or len(identity["birth"]) > 256:
-                return
+                return False
         if current.get("state") != "open_guarded":
-            return
+            return False
         if current.get("owner_identity") != owner or current.get("browser_identity") != browser:
-            return
-        if owner["pid"] == os.getpid() or owner["pgid"] == os.getpgrp() or owner["pgid"] != browser["pgid"]:
-            return
-        if _capture_process_identity(owner["pid"]) != owner:
-            return
-        if _capture_process_identity(browser["pid"]) != browser:
-            return
-        os.killpg(owner["pgid"], signal.SIGTERM)
+            return False
+        current_pid = os.getpid()
+        current_pgid = os.getpgrp()
+        if any(identity["pid"] == current_pid or identity["pgid"] == current_pgid for identity in (owner, browser)):
+            return False
+        if not matches(owner) or not matches(browser):
+            return False
+        groups = {browser["pgid"], owner["pgid"]}
+        for pgid in groups:
+            try:
+                os.killpg(pgid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
         time.sleep(0.25)
-        if _capture_process_identity(owner["pid"]) == owner:
-            os.killpg(owner["pgid"], signal.SIGKILL)
+        for pgid in groups:
+            if group_exists(pgid):
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if all(not group_exists(pgid) for pgid in groups):
+                return True
+            time.sleep(0.05)
+        return all(not group_exists(pgid) for pgid in groups)
     except (KeyError, TypeError, ValueError, OSError, AttributeError, json.JSONDecodeError):
-        return
+        return False
 
 BROWSER_INTEGRATION_SKIP = pytest.mark.skipif(
     os.environ.get("RUN_PUPPETEER_INTEGRATION") != "1"
@@ -752,7 +782,7 @@ finally:
         assert len(heartbeat_values) >= 2, "released owner did not emit a second heartbeat"
     finally:
         if identities is not None:
-            _validated_emergency_cleanup(identities, manifest)
+            assert _validated_emergency_cleanup(identities, manifest)
 
 @pytest.mark.skipif(
     os.environ.get("RUN_PUPPETEER_HEADED_SMOKE") != "1",

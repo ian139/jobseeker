@@ -23,6 +23,7 @@ from jobs_assistant.db import (
     complete_review,
     connect,
     finish_application_run,
+    get_application_review_details,
     initialize_database,
     list_application_reviews,
     mark_application_spawn_attempted,
@@ -1819,4 +1820,634 @@ def test_spawn_attempted_false_reconciles_pre_spawn_handoff_failure(tmp_path: Pa
         "SELECT status FROM jobs WHERE id=?",
         (refused.job["id"],),
     ).fetchone()["status"] == before_job
+    root.close()
+
+
+_ARTIFACT_KEY_PATHS = {
+    "observation": "observation.json",
+    "plan": "plan.json",
+    "actions": "actions.json",
+    "browser_failure": "browser_failure.json",
+}
+
+
+def _valid_observation(blocker_codes: list[str] | None = None) -> dict[str, object]:
+    return {
+        "field_count": 5,
+        "button_count": 1,
+        "required_count": 2,
+        "final_marker_count": 1,
+        "error_count": 0,
+        "blocker_codes": list(blocker_codes or []),
+    }
+
+
+def _valid_plan() -> dict[str, object]:
+    return {
+        "status": "ready",
+        "reason_code": "draft_ready",
+        "answer_count": 3,
+        "skipped_target_count": 0,
+        "resume_upload": False,
+        "safe_click": False,
+    }
+
+
+def _valid_actions() -> dict[str, object]:
+    return {
+        "mutation_count": 0,
+        "actions": [],
+        "final_submit_calls": 0,
+    }
+
+
+def _valid_browser_failure(*, ats_policy: str = "greenhouse") -> dict[str, object]:
+    return {
+        "version": 1,
+        "stage": "observation",
+        "operation": "observe",
+        "code": "browser_command_failed",
+        "iteration": 1,
+        "ats_policy": ats_policy,
+        "no_final_submit": True,
+        "protocol": "length-prefixed-json-v1",
+    }
+
+
+def _review_details_run(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+    *,
+    status: str = "review_ready",
+    reason_code: str | None = "draft_ready",
+    outcome: str | None = None,
+    reviewed_at: str | None = None,
+    finished_at: str | None = "2026-07-10T00:01:00Z",
+    manifest_stage: str = "finished",
+    manifest: dict[str, object] | None = None,
+    artifacts: dict[str, object] | None = None,
+) -> tuple[ArtifactRoot, int, int]:
+    job_id = _job(conn)
+    conn.execute(
+        """
+        INSERT INTO application_runs (
+            job_id, apply_url, status, owner, started_at, finished_at,
+            reason_code, artifact_dir, outcome, reviewed_at
+        ) VALUES (?, ?, ?, 'owner', '2026-07-10T00:00:00Z',
+                  ?, ?, 'run-1', ?, ?)
+        """,
+        (
+            job_id,
+            "https://greenhouse.example.test/jobs/1",
+            status,
+            finished_at,
+            reason_code,
+            outcome,
+            reviewed_at,
+        ),
+    )
+    conn.commit()
+    run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    root = ArtifactRoot.open(tmp_path / "artifacts", cwd=tmp_path)
+    run = root.create_run_dir(run_id)
+    artifact_descriptors: dict[str, object] = {}
+    for key, payload in (artifacts or {}).items():
+        rel_path = _ARTIFACT_KEY_PATHS[key]
+        result = run.write_json(rel_path, payload)
+        artifact_descriptors[key] = {
+            "path": rel_path,
+            "sha256": result.sha256,
+            "iteration": 1,
+            "stage": manifest_stage,
+        }
+    final_manifest = dict(manifest or {})
+    final_manifest.setdefault("run_id", run_id)
+    final_manifest.setdefault("job_id", job_id)
+    final_manifest.setdefault("ats_policy", "greenhouse")
+    final_manifest.setdefault("no_final_submit", True)
+    final_manifest.setdefault("stage", manifest_stage)
+    final_manifest.setdefault("latest_iteration", 1)
+    final_manifest.setdefault("latest_stage", manifest_stage)
+    final_manifest.setdefault("latest", {"iteration": 1, "stage": manifest_stage})
+    final_manifest.setdefault("commit_token_sha256", None)
+    final_manifest["artifacts"] = artifact_descriptors
+    run.write_json("run.json", final_manifest)
+    run.close()
+    conn.execute(
+        "UPDATE application_runs SET artifact_dir=? WHERE id=?",
+        (f"run-{run_id}", run_id),
+    )
+    conn.commit()
+    return root, run_id, job_id
+
+
+def _minimal_review_db(tmp_path: Path) -> tuple[sqlite3.Connection, ArtifactRoot]:
+    """Return an in-memory DB and bound artifact root with relaxed constraints.
+
+    This lets us exercise the public-output validators for values that the
+    real schema's CHECK constraints would otherwise reject.
+    """
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        """
+        CREATE TABLE jobs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            source_job_id TEXT,
+            canonical_url TEXT,
+            title TEXT NOT NULL,
+            company TEXT NOT NULL,
+            description TEXT,
+            discovered_at TEXT NOT NULL,
+            raw_json TEXT NOT NULL DEFAULT '{}',
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'queued'
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE application_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            apply_url TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reason_code TEXT,
+            owner TEXT NOT NULL,
+            started_at TEXT NOT NULL,
+            finished_at TEXT,
+            outcome TEXT,
+            reviewed_at TEXT,
+            observation_json TEXT,
+            artifact_dir TEXT,
+            session_id TEXT,
+            owner_pid INTEGER,
+            browser_pid INTEGER
+        )
+        """
+    )
+    root = ArtifactRoot.open(tmp_path / "artifacts", cwd=tmp_path)
+    db_module._bind_artifact_root(conn, root, create=True)
+    return conn, root
+
+
+def _insert_minimal_review_run(
+    conn: sqlite3.Connection,
+    root: ArtifactRoot,
+    tmp_path: Path,
+    *,
+    status: str = "review_ready",
+    reason_code: str | None = "draft_ready",
+    job_status: str = "in_progress",
+    title: str = "Engineer",
+    company: str = "Acme",
+    started_at: str = "2026-07-10T00:00:00Z",
+    finished_at: str | None = "2026-07-10T00:01:00Z",
+    manifest_stage: str = "finished",
+) -> tuple[int, int]:
+    conn.execute(
+        """
+        INSERT INTO jobs (
+            source, source_job_id, canonical_url, title, company, discovered_at,
+            raw_json, first_seen_at, last_seen_at, status
+        ) VALUES (
+            'fixture', '1', 'https://greenhouse.example.test/jobs/1', ?, ?, '2026-07-10T00:00:00Z',
+            '{}', '2026-07-10T00:00:00Z', '2026-07-10T00:00:00Z', ?
+        )
+        """,
+        (title, company, job_status),
+    )
+    conn.commit()
+    job_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO application_runs (
+            job_id, apply_url, status, owner, started_at, finished_at,
+            reason_code, artifact_dir
+        ) VALUES (?, ?, ?, 'owner', ?, ?, ?, 'run-1')
+        """,
+        (job_id, "https://greenhouse.example.test/jobs/1", status, started_at, finished_at, reason_code),
+    )
+    conn.commit()
+    run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    run = root.create_run_dir(run_id)
+    manifest = {
+        "run_id": run_id,
+        "job_id": job_id,
+        "ats_policy": "greenhouse",
+        "no_final_submit": True,
+        "stage": manifest_stage,
+        "latest": {"iteration": 1, "stage": manifest_stage},
+        "artifacts": {},
+    }
+    run.write_json("run.json", manifest)
+    run.close()
+    return run_id, job_id
+
+
+def test_review_details_finished_run_returns_all_summaries(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    root, run_id, job_id = _review_details_run(
+        conn,
+        tmp_path,
+        status="review_ready",
+        reason_code="draft_ready",
+        manifest_stage="finished",
+        artifacts={
+            "observation": _valid_observation(),
+            "plan": _valid_plan(),
+            "actions": _valid_actions(),
+        },
+    )
+    result = get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    assert result["run_id"] == run_id
+    assert result["job_id"] == job_id
+    assert result["status"] == "review_ready"
+    assert result["reason_code"] == "draft_ready"
+    assert result["ats"] == "greenhouse"
+    assert result["evidence"]["stage"] == "finished"
+    assert result["observation"] is not None
+    assert result["plan"] is not None
+    assert result["actions"] is not None
+    assert result["browser_failure"] is None
+    root.close()
+
+
+def test_review_details_early_failed_run_with_only_browser_failure(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    root, run_id, job_id = _review_details_run(
+        conn,
+        tmp_path,
+        status="failed",
+        reason_code="browser_error",
+        manifest_stage="failed",
+        artifacts={"browser_failure": _valid_browser_failure()},
+    )
+    result = get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    assert result["run_id"] == run_id
+    assert result["job_id"] == job_id
+    assert result["status"] == "failed"
+    assert result["reason_code"] == "browser_error"
+    assert result["observation"] is None
+    assert result["plan"] is None
+    assert result["actions"] is None
+    assert result["browser_failure"] == {
+        "stage": "observation",
+        "operation": "observe",
+        "code": "browser_command_failed",
+        "iteration": 1,
+        "ats": "greenhouse",
+        "no_final_submit": True,
+    }
+    root.close()
+
+
+def test_review_details_failed_run_without_failure_artifact(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="failed",
+        reason_code="browser_error",
+        manifest_stage="failed",
+        artifacts={},
+    )
+    result = get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    assert result["status"] == "failed"
+    assert result["reason_code"] == "browser_error"
+    assert result["observation"] is None
+    assert result["plan"] is None
+    assert result["actions"] is None
+    assert result["browser_failure"] is None
+    root.close()
+
+
+def test_review_details_claimed_and_running_runs_are_publicly_queryable(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="running",
+        reason_code=None,
+        manifest_stage="claimed",
+        artifacts={},
+        finished_at=None,
+    )
+    result = get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    assert result["status"] == "running"
+    assert result["reason_code"] is None
+    assert result["observation"] is None
+    assert result["plan"] is None
+    assert result["actions"] is None
+    assert result["browser_failure"] is None
+    root.close()
+
+
+def test_review_details_finished_run_missing_required_artifact_rejected(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="review_ready",
+        reason_code="draft_ready",
+        manifest_stage="finished",
+        artifacts={
+            "observation": _valid_observation(),
+            "plan": _valid_plan(),
+            # actions intentionally omitted
+        },
+    )
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+def test_review_details_invalid_status_rejected(tmp_path: Path) -> None:
+    conn, root = _minimal_review_db(tmp_path)
+    run_id, _ = _insert_minimal_review_run(
+        conn, root, tmp_path, status="bogus"
+    )
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+def test_review_details_invalid_job_status_rejected(tmp_path: Path) -> None:
+    conn, root = _minimal_review_db(tmp_path)
+    run_id, _ = _insert_minimal_review_run(
+        conn, root, tmp_path, job_status="bogus"
+    )
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+def test_review_details_reason_code_mismatch_rejected(tmp_path: Path) -> None:
+    conn, root = _minimal_review_db(tmp_path)
+    run_id, _ = _insert_minimal_review_run(
+        conn, root, tmp_path, status="failed", reason_code="draft_ready"
+    )
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+@pytest.mark.parametrize(
+    ("column", "table", "value"),
+    [
+        ("title", "jobs", ""),
+        ("company", "jobs", ""),
+        ("started_at", "application_runs", ""),
+    ],
+)
+def test_review_details_empty_db_text_rejected(
+    tmp_path: Path, column: str, table: str, value: str
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="review_ready",
+        reason_code="draft_ready",
+        manifest_stage="finished",
+        artifacts={
+            "observation": _valid_observation(),
+            "plan": _valid_plan(),
+            "actions": _valid_actions(),
+        },
+    )
+    conn.execute(f"UPDATE {table} SET {column}=? WHERE id=(SELECT job_id FROM application_runs WHERE id=?)" if table == "jobs" else f"UPDATE {table} SET {column}=? WHERE id=?", (value, run_id))
+    conn.commit()
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+def test_review_details_oversized_title_rejected(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="review_ready",
+        reason_code="draft_ready",
+        manifest_stage="finished",
+        artifacts={
+            "observation": _valid_observation(),
+            "plan": _valid_plan(),
+            "actions": _valid_actions(),
+        },
+    )
+    conn.execute("UPDATE jobs SET title=? WHERE id=(SELECT job_id FROM application_runs WHERE id=?)", ("x" * 513, run_id))
+    conn.commit()
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+def test_review_details_control_char_in_company_rejected(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="review_ready",
+        reason_code="draft_ready",
+        manifest_stage="finished",
+        artifacts={
+            "observation": _valid_observation(),
+            "plan": _valid_plan(),
+            "actions": _valid_actions(),
+        },
+    )
+    conn.execute("UPDATE jobs SET company=? WHERE id=(SELECT job_id FROM application_runs WHERE id=?)", ("bad\x00company", run_id))
+    conn.commit()
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+def test_review_details_oversized_timestamp_rejected(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="review_ready",
+        reason_code="draft_ready",
+        manifest_stage="finished",
+        artifacts={
+            "observation": _valid_observation(),
+            "plan": _valid_plan(),
+            "actions": _valid_actions(),
+        },
+    )
+    conn.execute(
+        "UPDATE application_runs SET started_at=? WHERE id=?",
+        ("x" * 65, run_id),
+    )
+    conn.commit()
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+def test_review_details_browser_failure_ats_mismatch_rejected(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    failure = _valid_browser_failure(ats_policy="lever")
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="failed",
+        reason_code="browser_error",
+        manifest_stage="failed",
+        artifacts={"browser_failure": failure},
+    )
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+def test_review_details_browser_failure_no_final_submit_false_rejected(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    failure = _valid_browser_failure()
+    failure["no_final_submit"] = False
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="failed",
+        reason_code="browser_error",
+        manifest_stage="failed",
+        artifacts={"browser_failure": failure},
+    )
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+def test_review_details_browser_failure_unsafe_code_rejected(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    failure = _valid_browser_failure()
+    failure["code"] = "not_a_safe_code"
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="failed",
+        reason_code="browser_error",
+        manifest_stage="failed",
+        artifacts={"browser_failure": failure},
+    )
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+@pytest.mark.parametrize(
+    ("stage", "operation"),
+    [
+        ("not_a_stage", "observe"),
+        ("observation", "not_an_operation"),
+    ],
+)
+def test_review_details_browser_failure_invalid_stage_operation_rejected(
+    tmp_path: Path, stage: str, operation: str
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    failure = _valid_browser_failure()
+    failure["stage"] = stage
+    failure["operation"] = operation
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="failed",
+        reason_code="browser_error",
+        manifest_stage="failed",
+        artifacts={"browser_failure": failure},
+    )
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+def test_review_details_invalid_observation_blocker_code_rejected(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    observation = _valid_observation(blocker_codes=["not_allowed"])
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="review_ready",
+        reason_code="draft_ready",
+        manifest_stage="finished",
+        artifacts={
+            "observation": observation,
+            "plan": _valid_plan(),
+            "actions": _valid_actions(),
+        },
+    )
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+def test_review_details_manifest_observation_path_mismatch_rejected(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="review_ready",
+        reason_code="draft_ready",
+        manifest_stage="finished",
+        artifacts={
+            "observation": _valid_observation(),
+            "plan": _valid_plan(),
+            "actions": _valid_actions(),
+        },
+    )
+    run_dir = tmp_path / "artifacts" / f"run-{run_id}"
+    manifest_path = run_dir / "run.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # Point the observation descriptor at a producer iteration artifact path
+    # that exists and hashes correctly; the show endpoint must still reject it.
+    manifest["artifacts"]["observation"]["path"] = "iterations/0001/observation.json"
+    with root.open_run_dir(run_id) as run:
+        result = run.write_json("iterations/0001/observation.json", _valid_observation())
+        manifest["artifacts"]["observation"]["sha256"] = result.sha256
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+def test_review_details_observation_blocker_codes_allowlisted(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    codes = ["captcha", "authentication_required", "assessment_required", "unsupported_frame", "page_validation_error", "observation_too_large"]
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="review_ready",
+        reason_code="draft_ready",
+        manifest_stage="finished",
+        artifacts={
+            "observation": _valid_observation(blocker_codes=codes),
+            "plan": _valid_plan(),
+            "actions": _valid_actions(),
+        },
+    )
+    result = get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    assert result["observation"]["blocker_codes"] == codes
     root.close()

@@ -16,6 +16,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from . import artifacts as _artifacts
 from .artifacts import ArtifactRoot, ArtifactSecurityError
 from .contracts import ApplicationClaim, PublicReasonCode, StoredJobInfo
+from .browser_adapter import SAFE_BROWSER_ERROR_CODES
 from .safety import SUPPORTED_ATS_POLICIES
 
 
@@ -2105,6 +2106,56 @@ def list_application_reviews(
 _REVIEW_STAGES = frozenset(
     {"claimed", "action_planned", "action_applied", "prepared", "finished", "failed"}
 )
+_REVIEW_EVIDENCE_REQUIRED_STAGES = frozenset({"prepared", "finished"})
+_PUBLIC_BLOCKER_CODES = frozenset(
+    {
+        "captcha",
+        "authentication_required",
+        "assessment_required",
+        "unsupported_frame",
+        "page_validation_error",
+        "observation_too_large",
+    }
+)
+_BROWSER_FAILURE_STAGES = frozenset(
+    {
+        "startup",
+        "navigation",
+        "observation",
+        "blocker",
+        "mutation",
+        "handoff",
+        "final",
+        "cleanup",
+    }
+)
+_BROWSER_FAILURE_OPERATIONS = frozenset(
+    {
+        "start",
+        "goto",
+        "screenshot",
+        "observe",
+        "route",
+        "click_offline",
+        "upload",
+        "select",
+        "check",
+        "fill",
+        "prepare_handoff",
+        "commit_handoff",
+        "close",
+    }
+)
+_REVIEW_ARTIFACT_PATHS = {
+    "observation": "observation.json",
+    "plan": "plan.json",
+    "actions": "actions.json",
+    "browser_failure": "browser_failure.json",
+}
+_JOB_STATUSES = ("queued", "in_progress", "archived")
+_MAX_PUBLIC_TITLE_LENGTH = 512
+_MAX_PUBLIC_COMPANY_LENGTH = 512
+_MAX_PUBLIC_TIMESTAMP_LENGTH = 64
 _MAX_REVIEW_MANIFEST_BYTES = 128 * 1024
 _MAX_REVIEW_ARTIFACT_BYTES = 1024 * 1024
 _MAX_REVIEW_ITERATION = 100
@@ -2112,6 +2163,43 @@ _MAX_REVIEW_ITERATION = 100
 
 def _review_manifest_error() -> RuntimeError:
     return RuntimeError("manifest_error")
+
+
+def _require_public_manifest_code(value: Any, choices: tuple[str, ...]) -> str:
+    if type(value) is not str or value not in choices:
+        raise _review_manifest_error()
+    return value
+
+
+def _require_public_manifest_optional_code(
+    value: Any, choices: tuple[str, ...]
+) -> str | None:
+    if value is None:
+        return None
+    return _require_public_manifest_code(value, choices)
+
+
+def _require_public_positive_int(value: Any) -> int:
+    if type(value) is not int or value <= 0:
+        raise _review_manifest_error()
+    return value
+
+
+def _require_public_text(value: Any, *, max_length: int) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > max_length
+        or any(ord(c) < 32 for c in value)
+    ):
+        raise _review_manifest_error()
+    return value
+
+
+def _require_public_optional_text(value: Any, *, max_length: int) -> str | None:
+    if value is None:
+        return None
+    return _require_public_text(value, max_length=max_length)
 
 
 def _require_manifest_string(value: Any, *, max_length: int = 256) -> str:
@@ -2209,6 +2297,9 @@ def _read_manifest_artifact(
     _require_manifest_string(stage, max_length=64)
     if stage not in _REVIEW_STAGES:
         raise _review_manifest_error()
+    expected_path = _REVIEW_ARTIFACT_PATHS.get(key)
+    if expected_path is not None and path != expected_path:
+        raise _review_manifest_error()
     try:
         _artifacts._validate_relative_artifact_path(path)
     except _artifacts.ArtifactSecurityError:
@@ -2239,7 +2330,10 @@ def _review_observation_summary(value: Any) -> dict[str, Any]:
     blocker_codes = value["blocker_codes"]
     if not isinstance(blocker_codes, list) or len(blocker_codes) > 100:
         raise _review_manifest_error()
-    if any(type(code) is not str or not code or len(code) > 128 for code in blocker_codes):
+    if any(
+        type(code) is not str or code not in _PUBLIC_BLOCKER_CODES
+        for code in blocker_codes
+    ):
         raise _review_manifest_error()
     return {
         "field_count": field_count,
@@ -2297,20 +2391,30 @@ def _review_actions_summary(value: Any) -> dict[str, Any]:
     }
 
 
-def _review_browser_failure_summary(value: Any) -> dict[str, Any]:
+def _review_browser_failure_summary(
+    value: Any, *, manifest_ats_policy: str
+) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise _review_manifest_error()
     required_keys = {"stage", "operation", "code", "iteration", "ats_policy", "no_final_submit"}
     if not required_keys.issubset(value):
         raise _review_manifest_error()
     stage = _require_manifest_string(value["stage"], max_length=64)
-    operation = _require_manifest_string(value["operation"], max_length=128)
+    if stage not in _BROWSER_FAILURE_STAGES:
+        raise _review_manifest_error()
+    operation = _require_manifest_string(value["operation"], max_length=64)
+    if operation not in _BROWSER_FAILURE_OPERATIONS:
+        raise _review_manifest_error()
     code = _require_manifest_string(value["code"], max_length=128)
+    if code not in SAFE_BROWSER_ERROR_CODES:
+        raise _review_manifest_error()
     iteration = _require_manifest_int(value["iteration"], max_value=_MAX_REVIEW_ITERATION)
     ats_policy = _require_manifest_string(value["ats_policy"], max_length=64)
-    if ats_policy not in SUPPORTED_ATS_POLICIES:
+    if ats_policy != manifest_ats_policy:
         raise _review_manifest_error()
     no_final_submit = _require_manifest_bool(value["no_final_submit"])
+    if not no_final_submit:
+        raise _review_manifest_error()
     return {
         "stage": stage,
         "operation": operation,
@@ -2354,47 +2458,96 @@ def get_application_review_details(
     except (TypeError, ValueError):
         raise _review_manifest_error() from None
 
+    job_id = _require_public_positive_int(row["job_id"])
+    status = _require_public_manifest_code(row["status"], APPLICATION_STATUSES)
+    job_status = _require_public_manifest_code(row["job_status"], _JOB_STATUSES)
+    reason_code = _require_public_manifest_optional_code(
+        row["reason_code"], PUBLIC_REASON_CODES
+    )
+    if reason_code is not None:
+        try:
+            _require_reason_status(status, reason_code, allow_legacy=True)
+        except ValueError:
+            raise _review_manifest_error() from None
+    outcome = _require_public_manifest_optional_code(
+        row["outcome"], APPLICATION_OUTCOMES
+    )
+    title = _require_public_text(
+        row["title"], max_length=_MAX_PUBLIC_TITLE_LENGTH
+    )
+    company = _require_public_text(
+        row["company"], max_length=_MAX_PUBLIC_COMPANY_LENGTH
+    )
+    started_at = _require_public_text(
+        row["started_at"], max_length=_MAX_PUBLIC_TIMESTAMP_LENGTH
+    )
+    finished_at = _require_public_optional_text(
+        row["finished_at"], max_length=_MAX_PUBLIC_TIMESTAMP_LENGTH
+    )
+    reviewed_at = _require_public_optional_text(
+        row["reviewed_at"], max_length=_MAX_PUBLIC_TIMESTAMP_LENGTH
+    )
+
     try:
         run = artifact_root.open_artifact_ref(artifact_ref, run_id=run_id)
     except OSError as exc:
         raise ArtifactSecurityError("artifact run is unavailable") from exc
     with run:
-        manifest = _read_review_run_manifest(run, run_id, int(row["job_id"]))
-        observation = _read_manifest_artifact(run, manifest, "observation")
-        plan = _read_manifest_artifact(run, manifest, "plan")
-        actions = _read_manifest_artifact(run, manifest, "actions")
-        failure = _read_manifest_artifact(run, manifest, "browser_failure", required=False)
+        manifest = _read_review_run_manifest(run, run_id, job_id)
+        manifest_stage = _require_manifest_string(manifest["stage"], max_length=64)
+        manifest_ats = _require_manifest_string(
+            manifest["ats_policy"], max_length=64
+        )
+        evidence_required = manifest_stage in _REVIEW_EVIDENCE_REQUIRED_STAGES
+        observation = _read_manifest_artifact(
+            run, manifest, "observation", required=evidence_required
+        )
+        plan = _read_manifest_artifact(
+            run, manifest, "plan", required=evidence_required
+        )
+        actions = _read_manifest_artifact(
+            run, manifest, "actions", required=evidence_required
+        )
+        failure = _read_manifest_artifact(
+            run, manifest, "browser_failure", required=False
+        )
 
-    observation_summary = _review_observation_summary(observation)
-    plan_summary = _review_plan_summary(plan)
-    actions_summary = _review_actions_summary(actions)
+    observation_summary = (
+        _review_observation_summary(observation) if observation is not None else None
+    )
+    plan_summary = _review_plan_summary(plan) if plan is not None else None
+    actions_summary = _review_actions_summary(actions) if actions is not None else None
 
     latest = manifest.get("latest")
     evidence_latest: dict[str, Any] | None = None
     if isinstance(latest, dict):
         evidence_latest = {
-            "iteration": int(latest["iteration"]),
-            "stage": str(latest["stage"]),
+            "iteration": _require_manifest_int(
+                latest["iteration"], max_value=_MAX_REVIEW_ITERATION
+            ),
+            "stage": _require_manifest_string(latest["stage"], max_length=64),
         }
 
     result: dict[str, Any] = {
         "run_id": run_id,
-        "job_id": int(row["job_id"]),
-        "status": str(row["status"]),
-        "reason_code": None if row["reason_code"] is None else str(row["reason_code"]),
-        "started_at": row["started_at"],
-        "finished_at": row["finished_at"],
-        "outcome": None if row["outcome"] is None else str(row["outcome"]),
-        "reviewed_at": None if row["reviewed_at"] is None else str(row["reviewed_at"]),
-        "title": str(row["title"]),
-        "company": str(row["company"]),
-        "job_status": str(row["job_status"]),
-        "ats": str(manifest["ats_policy"]),
+        "job_id": job_id,
+        "status": status,
+        "reason_code": reason_code,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "outcome": outcome,
+        "reviewed_at": reviewed_at,
+        "title": title,
+        "company": company,
+        "job_status": job_status,
+        "ats": manifest_ats,
         "artifact_ref": artifact_ref,
-        "window_state": review_window_state(connection, run_id=run_id, artifact_root=artifact_root),
+        "window_state": review_window_state(
+            connection, run_id=run_id, artifact_root=artifact_root
+        ),
         "evidence": {
-            "ats": str(manifest["ats_policy"]),
-            "stage": str(manifest["stage"]),
+            "ats": manifest_ats,
+            "stage": manifest_stage,
             "latest": evidence_latest,
             "no_final_submit": True,
         },
@@ -2404,7 +2557,9 @@ def get_application_review_details(
         "browser_failure": None,
     }
     if failure is not None:
-        result["browser_failure"] = _review_browser_failure_summary(failure)
+        result["browser_failure"] = _review_browser_failure_summary(
+            failure, manifest_ats_policy=manifest_ats
+        )
     return result
 
 

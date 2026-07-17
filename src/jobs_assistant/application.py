@@ -28,6 +28,7 @@ from .ats import (
     ResumeContext,
     SUPPORTED_ATS,
     _canonical_field_identity as _ats_canonical_field_identity,
+    _canonicalize_select_value,
     _configured_answer_for_field as _ats_configured_answer_for_field,
     field_accepts_resume,
     is_greenhouse_interactive_origin,
@@ -56,6 +57,7 @@ from .contracts import (
     ApplicationContext,
     AutofillPlan,
     FieldAnswer,
+    FieldValue,
     JsonValue,
     ObservedBlocker,
     ObservedButton,
@@ -203,32 +205,40 @@ def validate_inference_privacy(plan: AutofillPlan, *, protected_values: tuple[st
         tuple(source_tokens[index:index + 12])
         for index in range(max(0, len(source_tokens) - 11))
     }
+    normalized_protected = {
+        _normal(item)
+        for item in protected_values
+        if isinstance(item, str) and item.strip()
+    }
     for answer in plan.answers:
-        if answer.source != "inference" or not isinstance(answer.value, str):
+        if answer.source != "inference":
             continue
-        value = answer.value
-        variants = {
-            _normal(value),
-            _compact(value),
-            value,
-            hashlib.sha256(value.encode()).hexdigest(),
-            base64.b64encode(value.encode()).decode(),
-        }
-        for candidate in variants:
-            if candidate and candidate in protected:
+        if isinstance(answer.value, str):
+            values = (answer.value,)
+        elif type(answer.value) is tuple:
+            if any(type(item) is not str for item in answer.value):
                 return False
-        normalized = _normal(value)
-        normalized_protected = {
-            _normal(item)
-            for item in protected_values
-            if isinstance(item, str) and item.strip()
-        }
-        if normalized and normalized in normalized_protected:
-            return False
-        tokens = normalized.split()
-        if len(tokens) >= 12 and copied_spans:
-            if any(tuple(tokens[index:index + 12]) in copied_spans for index in range(len(tokens) - 11)):
+            values = answer.value
+        else:
+            continue
+        for value in values:
+            variants = {
+                _normal(value),
+                _compact(value),
+                value,
+                hashlib.sha256(value.encode()).hexdigest(),
+                base64.b64encode(value.encode()).decode(),
+            }
+            for candidate in variants:
+                if candidate and candidate in protected:
+                    return False
+            normalized = _normal(value)
+            if normalized and normalized in normalized_protected:
                 return False
+            tokens = normalized.split()
+            if len(tokens) >= 12 and copied_spans:
+                if any(tuple(tokens[index:index + 12]) in copied_spans for index in range(len(tokens) - 11)):
+                    return False
     return True
 
 
@@ -280,10 +290,69 @@ def _observation_from_payload(payload: Mapping[str, Any]) -> PageObservation:
             ("frame_id", "frame_url", "form_action_url", "name", "label", "group_id", "option_value", "selector"),
         ):
             return False
-        if not all(key not in raw or type(raw[key]) is bool for key in ("required", "visible", "enabled", "readonly", "will_validate", "valid")):
+        if not all(key not in raw or type(raw[key]) is bool for key in ("required", "visible", "enabled", "readonly", "will_validate", "valid", "multiple")):
             return False
-        value = raw.get("value")
-        if "value" in raw and value is not None and type(value) not in (str, bool):
+        multiple = raw.get("multiple", False)
+        if type(multiple) is not bool:
+            return False
+        kind = raw["kind"]
+        if kind != kind.lower() or kind != kind.strip():
+            return False
+        if kind not in {
+            "text", "email", "tel", "url", "number", "date", "textarea", "select",
+            "checkbox", "radio", "file", "password", "search", "color", "range",
+            "month", "week", "time", "datetime-local",
+        }:
+            return False
+        if kind != "select" and multiple:
+            return False
+        options = raw.get("options")
+        if kind == "select" and (
+            "options" not in raw
+            or type(options) is not list
+            or any(
+                not isinstance(item, Mapping)
+                or type(item.get("value")) is not str
+                or type(item.get("label")) is not str
+                or type(item.get("enabled")) is not bool
+                for item in options
+            )
+        ):
+            return False
+        if kind == "select":
+            validity_flags = raw.get("validity_flags", ())
+            options_ambiguous = (
+                raw.get("valid") is False
+                and type(validity_flags) is list
+                and "options_ambiguous" in validity_flags
+            )
+            invalid_selection = (
+                raw.get("valid") is False
+                and type(validity_flags) is list
+                and ("invalid_selected_option" in validity_flags or "options_ambiguous" in validity_flags)
+            )
+            option_values = [item["value"] for item in options]
+            if len(option_values) != len(set(option_values)) and not options_ambiguous:
+                return False
+            enabled_values = {item["value"] for item in options if item["enabled"]}
+            if "value" not in raw:
+                return False
+            value = raw["value"]
+            if multiple:
+                if type(value) is not list or any(type(item) is not str for item in value):
+                    return False
+                if not invalid_selection:
+                    if len(value) != len(set(value)) or any(item not in enabled_values for item in value):
+                        return False
+                    observed_order = [
+                        item["value"] for item in options
+                        if item["enabled"] and item["value"] in enabled_values and item["value"] in value
+                    ]
+                    if value != observed_order:
+                        return False
+            elif type(value) is not str or (value and value not in enabled_values and not invalid_selection):
+                return False
+        elif "value" in raw and raw["value"] is not None and type(raw["value"]) not in (str, bool):
             return False
         if "file_count" in raw and (type(raw["file_count"]) is not int or raw["file_count"] < 0):
             return False
@@ -297,7 +366,6 @@ def _observation_from_payload(payload: Mapping[str, Any]) -> PageObservation:
             return False
         if not _string_lists(raw, ("safety_descriptors", "validity_flags", "file_basenames", "accept")):
             return False
-        options = raw.get("options")
         if "options" in raw and (
             type(options) is not list
             or any(
@@ -346,13 +414,16 @@ def _observation_from_payload(payload: Mapping[str, Any]) -> PageObservation:
         or any(not _valid_error(raw) for raw in payload["errors"])
     ):
         raise BrowserAdapterError("protocol_invalid_response")
-
-
     def option(raw: Mapping[str, Any]) -> ObservedOption:
-        return ObservedOption(str(raw.get("value", "")), str(raw.get("label", "")), bool(raw.get("enabled", True)))
+        return ObservedOption(raw["value"], raw["label"], raw["enabled"])
+
 
     fields: list[ObservedField] = []
     for raw in payload["fields"]:
+        raw_value = raw.get("value")
+        value: str | bool | tuple[str, ...] | None = raw_value
+        if isinstance(raw_value, list):
+            value = tuple(raw_value)
         fields.append(ObservedField(
             target_id=str(raw.get("target_id", "")), field_key=str(raw.get("field_key", "")),
             frame_id=str(raw.get("frame_id", "")), frame_url=str(raw.get("frame_url", "")),
@@ -360,13 +431,14 @@ def _observation_from_payload(payload: Mapping[str, Any]) -> PageObservation:
             name=raw.get("name"), label=str(raw.get("label", "")), group_id=raw.get("group_id"),
             option_value=raw.get("option_value"), safety_descriptors=tuple(str(x) for x in raw.get("safety_descriptors", ())),
             selector=str(raw.get("selector", "")), required=bool(raw.get("required", False)), visible=bool(raw.get("visible", False)),
-            enabled=bool(raw.get("enabled", False)), readonly=bool(raw.get("readonly", False)), value=raw.get("value"),
+            enabled=bool(raw.get("enabled", False)), readonly=bool(raw.get("readonly", False)), value=value,
             will_validate=bool(raw.get("will_validate", False)), valid=bool(raw.get("valid", True)),
             validity_flags=tuple(str(x) for x in raw.get("validity_flags", ())), file_count=int(raw.get("file_count", 0) or 0),
             file_basenames=tuple(str(x) for x in raw.get("file_basenames", ())), accept=tuple(str(x) for x in raw.get("accept", ())),
             min_length=raw.get("min_length"), max_length=raw.get("max_length"), pattern=raw.get("pattern"),
             min_value=raw.get("min_value"), max_value=raw.get("max_value"), step=raw.get("step"),
-            options=tuple(option(x) for x in raw.get("options", ()) if isinstance(x, Mapping)),
+            options=tuple(option(x) for x in raw.get("options", ())),
+            multiple=raw.get("multiple", False),
         ))
     buttons: list[ObservedButton] = []
     for raw in payload["buttons"]:
@@ -421,6 +493,7 @@ def _observation_snapshot(observation: PageObservation) -> dict[str, Any]:
                 "enabled": field.enabled,
                 "readonly": field.readonly,
                 "value": field.value,
+                "multiple": field.multiple,
                 "will_validate": field.will_validate,
                 "valid": field.valid,
                 "validity_flags": list(field.validity_flags),
@@ -506,6 +579,7 @@ def _observation_semantic_signature(observation: PageObservation) -> tuple[Any, 
             field.visible,
             field.enabled,
             field.readonly,
+            field.multiple,
             field.value,
             field.will_validate,
             field.valid,
@@ -574,8 +648,9 @@ def _answer_payload(field: ObservedField, protected: tuple[str, ...] = ()) -> di
         "kind": field.kind,
         "label": redact(_target_label(field)),
         "descriptors": [redact(item) for item in field.safety_descriptors],
+        "multiple": field.multiple,
         "options": [
-            {"value": redact(option.value), "label": redact(option.label)}
+            {"value": redact(option.value), "label": redact(option.label), "enabled": option.enabled}
             for option in field.options
         ],
         "required": field.required,
@@ -640,12 +715,10 @@ def build_inference_request(
     profile_facts: Mapping[str, Any],
     job_description: str | None = None,
     applicant_description: str = "",
-    configured_values: tuple[str, ...] = (),
+    configured_values: tuple[FieldValue, ...] = (),
     ats_policy: str = "greenhouse",
 ) -> dict[str, Any]:
-    protected = _flatten_strings(profile_facts) + tuple(
-        value for value in configured_values if isinstance(value, str)
-    )
+    protected = _flatten_strings(profile_facts) + _flatten_strings(configured_values)
     resolved_job_description = str(job_description or str(job.get("description") or ""))
     resolved_applicant_description = str(applicant_description or "")
     if any(
@@ -656,7 +729,7 @@ def build_inference_request(
     fields = [
         field
         for field in observation.fields
-        if _field_is_llm_eligible(field) and field.value in (None, "", False)
+        if _field_is_llm_eligible(field) and field.value in (None, "", False, ())
     ]
     buttons = _eligible_inference_buttons(
         observation,
@@ -691,9 +764,18 @@ def build_inference_request(
 
 def _validate_llm_answer(field: ObservedField, item: Mapping[str, Any]) -> bool:
     value = item.get("value")
-    if type(value) is not str and field.kind not in {"checkbox", "radio"}:
-        return False
-    if field.kind in {"checkbox", "radio"} and type(value) is not bool:
+    if field.kind in {"checkbox", "radio"}:
+        if type(value) is not bool:
+            return False
+    elif field.kind == "select":
+        if field.multiple:
+            if isinstance(value, list):
+                value = tuple(value)
+            elif not isinstance(value, (tuple, str)) or isinstance(value, bool):
+                return False
+        elif not isinstance(value, str) or isinstance(value, bool):
+            return False
+    elif type(value) is not str:
         return False
     return validate_answer_value(field, value, kind=field.kind)
 
@@ -721,7 +803,7 @@ def _field_is_llm_eligible(field: ObservedField) -> bool:
 
 
 def _field_has_existing_value(field: ObservedField) -> bool:
-    return field.value is not None and field.value != "" and field.value is not False
+    return field.value is not None and field.value != "" and field.value is not False and field.value != ()
 
 
 def _field_existing_value_resolved(field: ObservedField) -> bool:
@@ -838,7 +920,17 @@ def parse_llm_plan(payload: Any, observation: PageObservation, *, ats_policy: st
         if not isinstance(item.get("reason"), str) or len(item["reason"]) > 2000:
             return AutofillPlan(status="manual", reason_code=PublicReasonCode.invalid_llm_response)
         seen.add(target_id)
-        answers.append(FieldAnswer(target_id, item["value"], float(confidence), item["reason"], "inference"))
+        answer_value: str | bool | tuple[str, ...]
+        if field.kind == "select":
+            canonical_value = _canonicalize_select_value(field, item["value"])
+            if canonical_value is None:
+                return AutofillPlan(status="manual", reason_code=PublicReasonCode.invalid_llm_response)
+            answer_value = canonical_value
+        elif field.kind in {"checkbox", "radio"}:
+            answer_value = bool(item["value"])
+        else:
+            answer_value = str(item["value"])
+        answers.append(FieldAnswer(target_id, answer_value, float(confidence), item["reason"], "inference"))
     click = payload.get("safe_click_target_id")
     if click is not None:
         eligible = {
@@ -1121,7 +1213,6 @@ class _PinnedAddressTransport(httpx.BaseTransport):
         self._hostname = hostname
         self._port = port
         self._transport = httpx.HTTPTransport(retries=0, verify=True)
-
     def handle_request(self, request: httpx.Request) -> httpx.Response:
         request.extensions = dict(request.extensions)
         request.extensions["sni_hostname"] = self._hostname
@@ -1151,14 +1242,10 @@ def resolve_with_llm(
     if mutated:
         return AutofillPlan(status="manual", reason_code=PublicReasonCode.no_deterministic_next_step)
     profile_facts: Mapping[str, Any]
-    configured_values: tuple[str, ...] = ()
+    configured_values: tuple[FieldValue, ...] = ()
     if isinstance(profile_context, ApplicationProfile):
         profile_facts = thaw_json(profile_context.facts)
-        configured_values = tuple(
-            answer.value
-            for answer in profile_context.field_answers
-            if isinstance(answer.value, str)
-        )
+        configured_values = _flatten_strings(tuple(answer.value for answer in profile_context.field_answers))
     else:
         profile_facts = profile_context or {}
     text = resume_context.text if isinstance(resume_context, ResumeContext) else str(resume_context or "")
@@ -1266,7 +1353,18 @@ def _configured_and_profile_plan(
     resume: ResumeContext,
     preferences: ApplicationPreferences | None = None,
 ) -> AutofillPlan:
-    if any(field.valid is False for field in observation.fields):
+    if any(
+        field.valid is False
+        and not (
+            field.visible
+            and field.enabled
+            and field.required
+            and not field.readonly
+            and field.value in (None, "", False, ())
+            and field.validity_flags == ("valueMissing",)
+        )
+        for field in observation.fields
+    ):
         return AutofillPlan(status="manual", reason_code=PublicReasonCode.page_validation_error)
     deterministic = adapter.deterministic_answers(
         observation,
@@ -1332,13 +1430,17 @@ def _configured_and_profile_plan(
     )
 
 
-def _same_value(field: ObservedField, value: str | bool) -> bool:
+def _same_value(field: ObservedField, value: str | bool | tuple[str, ...]) -> bool:
+    if type(value) is tuple or type(field.value) is tuple:
+        return type(value) is tuple and type(field.value) is tuple and value == field.value
     if type(value) is bool or type(field.value) is bool:
         return type(value) is bool and type(field.value) is bool and value == field.value
     return _normal(str(field.value or "")) == _normal(str(value or ""))
 
 
-def _retained_value_equal(field: ObservedField, expected: str | bool) -> bool:
+def _retained_value_equal(field: ObservedField, expected: str | bool | tuple[str, ...]) -> bool:
+    if type(expected) is tuple or type(field.value) is tuple:
+        return type(expected) is tuple and type(field.value) is tuple and expected == field.value
     if type(expected) is bool or type(field.value) is bool:
         return type(expected) is bool and type(field.value) is bool and expected == field.value
     return type(field.value) is str and type(expected) is str and field.value == expected
@@ -1403,7 +1505,7 @@ def plan_action_evidence(
                     "action": _action_for(field),
                     "kind": field.kind,
                     "source": answer.source,
-                    "value_length": len(answer.value) if isinstance(answer.value, str) else None,
+                    "value_length": len(answer.value) if isinstance(answer.value, (str, tuple)) else None,
                 }
             )
     if plan.resume_upload_target_id:
@@ -2311,7 +2413,18 @@ async def run_application_workflow(
                             final_plan = AutofillPlan(status="manual", reason_code=PublicReasonCode.field_value_not_retained)
                             reason = PublicReasonCode.field_value_not_retained
                             break
-                    if any(field.valid is False for field in observation.fields):
+                    if any(
+                        field.valid is False
+                        and not (
+                            field.visible
+                            and field.enabled
+                            and field.required
+                            and not field.readonly
+                            and field.value in (None, "", False, ())
+                            and field.validity_flags == ("valueMissing",)
+                        )
+                        for field in observation.fields
+                    ):
                         final_plan = AutofillPlan(status="manual", reason_code=PublicReasonCode.page_validation_error)
                         reason = PublicReasonCode.page_validation_error
                         break
@@ -2388,7 +2501,7 @@ async def run_application_workflow(
                         field
                         for field in observation.fields
                         if _field_is_llm_eligible(field)
-                        and field.value in (None, "", False)
+                        and field.value in (None, "", False, ())
                         and (field.field_key, field.kind) not in cached_inference_target_ids
                     )
                     eligible_inference_buttons = tuple(
@@ -2518,7 +2631,11 @@ async def run_application_workflow(
                         reason_code=deterministic.reason_code if deterministic.reason_code != PublicReasonCode.no_deterministic_next_step else llm.reason_code,
                         skipped_target_ids=tuple(sorted(blocked_targets)),
                     )
-                    protected_sources = _flatten_strings(profile.facts) + _flatten_strings(resume.facts.facts) + tuple(answer.value for answer in profile.field_answers if isinstance(answer.value, str))
+                    protected_sources = (
+                        _flatten_strings(profile.facts)
+                        + _flatten_strings(resume.facts.facts)
+                        + _flatten_strings(tuple(answer.value for answer in profile.field_answers))
+                    )
                     if not validate_inference_privacy(plan, protected_values=protected_sources, source_text=resume.text):
                         plan = AutofillPlan(status="manual", reason_code=PublicReasonCode.inference_privacy_violation)
                     planned, rejected = plan_action_evidence(observation, plan, ats_policy=adapter.name)
@@ -2610,7 +2727,7 @@ async def run_application_workflow(
                             )
                         else:
                             field = next(item for item in observation.fields if item.target_id == action["target_id"])
-                            expected_value: str | bool = resume.basename if action["action"] == "upload" else next(item.value for item in plan.answers if item.target_id == field.target_id)
+                            expected_value: FieldValue | None = resume.basename if action["action"] == "upload" else next(item.value for item in plan.answers if item.target_id == field.target_id)
                             cached_inference.pop((field.field_key, field.kind), None)
                             attempted_mutation = (field.field_key, field.kind, expected_value)
                             if action["action"] == "upload":
@@ -2626,7 +2743,7 @@ async def run_application_workflow(
                                     "select",
                                     "mutation",
                                     iteration,
-                                    lambda: session.select(field.target_id, str(answer.value)),
+                                    lambda: session.select(field.target_id, answer.value),
                                 )
                             elif action["action"] == "check":
                                 answer = next(item for item in plan.answers if item.target_id == field.target_id)

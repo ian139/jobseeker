@@ -6,6 +6,8 @@ from types import MappingProxyType
 from typing import Any, Literal, Mapping, TypeAlias
 
 ATSFilter: TypeAlias = Literal["auto", "greenhouse", "lever"]
+FieldValue: TypeAlias = str | bool | tuple[str, ...]
+
 
 
 JsonScalar: TypeAlias = str | int | float | bool | None
@@ -115,7 +117,7 @@ class ObservedField:
     visible: bool
     enabled: bool
     readonly: bool
-    value: str | bool | None
+    value: FieldValue | None
     will_validate: bool
     valid: bool
     validity_flags: tuple[str, ...]
@@ -129,6 +131,7 @@ class ObservedField:
     max_value: str | None
     step: str | None
     options: tuple[ObservedOption, ...]
+    multiple: bool = False
 
 
 @dataclass(frozen=True)
@@ -220,7 +223,7 @@ class PublicReasonCode(str, Enum):
 @dataclass(frozen=True)
 class FieldAnswer:
     target_id: str
-    value: str | bool
+    value: FieldValue
     confidence: float
     reason: str
     source: Literal["configured", "profile", "inference"]

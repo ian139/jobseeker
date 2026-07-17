@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
-from .ats import SUPPORTED_ATS, validate_answer_value
-from .contracts import FieldAnswer, ObservedField, ObservedOption
+from .ats import SUPPORTED_ATS, _canonicalize_select_value, validate_answer_value
+from .contracts import FieldAnswer, FieldValue, ObservedField, ObservedOption
 from .safety import DescriptorSafety, classify_descriptors
 
 APPLICATION_PREFERENCES_SCHEMA_VERSION = 1
@@ -72,11 +72,15 @@ class PreferenceMapping:
     name: str | None
     label: str | None
     kind: str
-    value: str | bool
+    value: FieldValue
 
     def __post_init__(self) -> None:
         ats, name, label, kind = _validate_matcher(self.ats, self.name, self.label, self.kind)
         _validate_scalar_value(self.value, kind)
+        value: FieldValue = self.value
+        if isinstance(value, (list, tuple)):
+            value = tuple(value)
+        object.__setattr__(self, "value", value)
         object.__setattr__(self, "ats", ats)
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "label", label)
@@ -181,7 +185,8 @@ class ObservedFieldDescriptor:
     kind: str
     required: bool
     safety_descriptors: tuple[str, ...] = ()
-    options: tuple[tuple[str, str], ...] = ()
+    options: tuple[tuple[str, str, bool], ...] = ()
+    multiple: bool = False
 
     def __post_init__(self) -> None:
         if type(self.target_id) is not str or not self.target_id or len(self.target_id) > 512:
@@ -189,10 +194,36 @@ class ObservedFieldDescriptor:
         ats, name, label, kind = _validate_observed_identity(self.ats, self.name, self.label, self.kind)
         if type(self.required) is not bool:
             raise PreferenceValidationError("field required flag is invalid")
+        if type(self.multiple) is not bool:
+            raise PreferenceValidationError("field multiple flag is invalid")
+        if type(self.options) not in (tuple, list):
+            raise PreferenceValidationError("field options are invalid")
         descriptors = tuple(self.safety_descriptors)
-        options = tuple(self.options)
+        normalized_options: list[tuple[str, str, bool]] = []
+        for item in self.options:
+            if isinstance(item, ObservedOption):
+                if type(item.value) is not str or type(item.label) is not str or type(item.enabled) is not bool:
+                    raise PreferenceValidationError("field options are invalid")
+                normalized_options.append((item.value, item.label, item.enabled))
+                continue
+            if isinstance(item, (tuple, list)):
+                if len(item) == 2:
+                    if self.multiple:
+                        raise PreferenceValidationError("multi-select descriptor requires option enabled triples")
+                    value, option_label = item
+                    if type(value) is str and type(option_label) is str:
+                        normalized_options.append((value, option_label, True))
+                        continue
+                if len(item) == 3:
+                    value, option_label, enabled = item
+                    if type(value) is str and type(option_label) is str and type(enabled) is bool:
+                        normalized_options.append((value, option_label, enabled))
+                        continue
+            raise PreferenceValidationError("field options are invalid")
+        options = tuple(normalized_options)
         try:
-            safety = classify_descriptors(descriptors, field_kind=kind, options=options)
+            pair_options = tuple((option[0], option[1]) for option in options)
+            safety = classify_descriptors(descriptors, field_kind=kind, options=pair_options)
         except Exception as exc:
             raise PreferenceValidationError("field descriptors exceed safety limits") from exc
         if safety is not DescriptorSafety.SAFE:
@@ -203,6 +234,7 @@ class ObservedFieldDescriptor:
         object.__setattr__(self, "kind", kind)
         object.__setattr__(self, "safety_descriptors", descriptors)
         object.__setattr__(self, "options", options)
+        object.__setattr__(self, "multiple", self.multiple)
 
     @property
     def matcher(self) -> PreferenceMatcher:
@@ -344,7 +376,14 @@ def mapping_answer(
     mapping = matching_mapping(preferences, field, ats=descriptor.ats)
     if mapping is None:
         return None
-    return FieldAnswer(descriptor.target_id, mapping.value, 1.0, "application preference", "configured")
+    value: FieldValue = mapping.value
+    if mapping.kind == "select":
+        validation_field = field if isinstance(field, ObservedField) else _descriptor_as_observed_field(descriptor)
+        canonical = _canonicalize_select_value(validation_field, mapping.value)
+        if canonical is None:
+            return None
+        value = canonical
+    return FieldAnswer(descriptor.target_id, value, 1.0, "application preference", "configured")
 
 
 def normalize_field_descriptor(
@@ -357,7 +396,7 @@ def normalize_field_descriptor(
     if isinstance(field, ObservedFieldDescriptor):
         return field
     if isinstance(field, ObservedField):
-        options = tuple((option.value, option.label) for option in field.options)
+        options = tuple((option.value, option.label, option.enabled) for option in field.options)
         return ObservedFieldDescriptor(
             field.target_id,
             ats,
@@ -367,9 +406,21 @@ def normalize_field_descriptor(
             field.required,
             tuple(field.safety_descriptors),
             options,
+            field.multiple,
         )
     if isinstance(field, Mapping):
         target_id = field.get("target_id")
+        raw_options = field.get("options", ())
+        if type(raw_options) not in (list, tuple):
+            raise PreferenceValidationError("field options are invalid")
+        normalized_options: list[Any] = []
+        for item in raw_options:
+            if isinstance(item, ObservedOption):
+                normalized_options.append(item)
+            elif isinstance(item, (tuple, list)):
+                normalized_options.append(tuple(item))
+            else:
+                raise PreferenceValidationError("field options are invalid")
         return ObservedFieldDescriptor(
             target_id,
             field.get("ats", ats),
@@ -378,7 +429,8 @@ def normalize_field_descriptor(
             field.get("kind", ""),
             field.get("required", False),
             tuple(field.get("safety_descriptors", ())),
-            tuple(field.get("options", ())),
+            tuple(normalized_options),
+            field.get("multiple", False),
         )
     raise PreferenceValidationError("unsupported observed field descriptor")
 
@@ -387,11 +439,20 @@ def _descriptor_as_observed_field(descriptor: ObservedFieldDescriptor) -> Observ
     options: list[ObservedOption] = []
     for item in descriptor.options:
         if isinstance(item, ObservedOption):
+            if type(item.value) is not str or type(item.label) is not str or type(item.enabled) is not bool:
+                raise PreferenceValidationError("field options are invalid")
             options.append(item)
             continue
+        if isinstance(item, (tuple, list)) and len(item) == 3:
+            value, label, enabled = item
+            if type(value) is str and type(label) is str and type(enabled) is bool:
+                options.append(ObservedOption(value, label, enabled))
+                continue
         if isinstance(item, (tuple, list)) and len(item) == 2:
+            if descriptor.multiple:
+                raise PreferenceValidationError("multi-select descriptor requires option enabled triples")
             value, label = item
-            if isinstance(value, str) and isinstance(label, str):
+            if type(value) is str and type(label) is str:
                 options.append(ObservedOption(value, label, True))
                 continue
         raise PreferenceValidationError("field options are invalid")
@@ -426,6 +487,7 @@ def _descriptor_as_observed_field(descriptor: ObservedFieldDescriptor) -> Observ
         max_value=None,
         step=None,
         options=tuple(options),
+        multiple=descriptor.multiple,
     )
 
 
@@ -667,6 +729,22 @@ def _validate_scalar_value(value: Any, kind: str) -> None:
         if type(value) is not bool:
             raise PreferenceValidationError("checkbox/radio mappings require boolean values")
         return
+    if kind == "select":
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                if type(item) is not str or not item:
+                    raise PreferenceValidationError("select mapping list values must be non-empty strings")
+                if len(item) > MAX_PREFERENCES_STRING_CHARS:
+                    raise PreferenceValidationError("select mapping value is too long")
+                if any(unicodedata.category(char) in {"Cc", "Cf"} for char in item):
+                    raise PreferenceValidationError("select mapping value contains forbidden controls")
+            try:
+                safety = classify_descriptors(tuple(value), field_kind=kind)
+            except Exception as exc:
+                raise PreferenceValidationError("mapping value exceeds safety limits") from exc
+            if safety is not DescriptorSafety.SAFE:
+                raise PreferenceValidationError("sensitive mapping value is forbidden")
+            return
     if type(value) is not str:
         raise PreferenceValidationError("safe mappings require string scalar values")
     if not value or len(value) > MAX_PREFERENCES_STRING_CHARS:

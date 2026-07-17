@@ -20,6 +20,7 @@ from .contracts import (
     ApplicationContext,
     AutofillPlan,
     FieldAnswer,
+    FieldValue,
     JsonValue,
     ObservedField,
     PageObservation,
@@ -152,7 +153,15 @@ class ConfiguredFieldAnswer:
     name: str | None
     label: str | None
     kind: str
-    value: str | bool
+    value: FieldValue
+
+    def __post_init__(self) -> None:
+        if isinstance(self.value, (list, tuple)):
+            if any(type(item) is not str for item in self.value):
+                raise ValueError("configured multi-select values must be strings")
+            object.__setattr__(self, "value", tuple(self.value))
+        elif type(self.value) not in (str, bool):
+            raise ValueError("configured field values have an unsupported type")
 
 
 @dataclass(frozen=True, init=False)
@@ -527,6 +536,13 @@ def _parse_configured_answers(raw_answers: Any) -> tuple[ConfiguredFieldAnswer, 
         if kind in {"checkbox", "radio"}:
             if not isinstance(value, bool):
                 raise ValueError("checkbox/radio field_answers require boolean values")
+        elif kind == "select":
+            if isinstance(value, list):
+                if not all(isinstance(item, str) for item in value):
+                    raise ValueError("select field_answers list values must be strings")
+                value = tuple(value)
+            elif not isinstance(value, str):
+                raise ValueError("select field_answers require a string value or a list of strings")
         elif not isinstance(value, str):
             raise ValueError("field_answers require string values")
         key = (str(ats), _norm_match(name), _norm_match(label), str(kind))
@@ -572,7 +588,7 @@ def unresolved_required_fields(observation: PageObservation, answers: tuple[Fiel
             continue
         kind = _field_kind(field)
         if field.readonly and kind != "radio":
-            if field.value not in (None, "", False) and field.valid:
+            if field.value not in (None, "", False, ()) and field.valid:
                 continue
             unresolved.append(field.target_id)
             continue
@@ -599,14 +615,14 @@ def unresolved_required_fields(observation: PageObservation, answers: tuple[Fiel
             required_member = next((item for item in members if item.required), field)
             unresolved.append(required_member.target_id)
             continue
-        if field.value not in (None, "", False) and field.valid:
+        if field.value not in (None, "", False, ()) and field.valid:
             continue
         if kind == "checkbox":
             if field.value is True and field.valid:
                 continue
         elif field.target_id in answered:
             candidate = answered[field.target_id]
-            if candidate is not None and candidate is not False and candidate != "":
+            if candidate is not None and candidate is not False and candidate != "" and candidate != ():
                 continue
         unresolved.append(field.target_id)
     return tuple(unresolved)
@@ -674,7 +690,12 @@ class GreenhouseAdapter:
             selected = configured.get(target_id)
             if selected is not None:
                 if validate_answer_value(field, selected.value, kind=selected.kind):
-                    answers.append(FieldAnswer(target_id, selected.value, 1.0, "configured field answer", "configured"))
+                    answer_value = selected.value
+                    if _field_kind(field) == "select":
+                        canonical = _canonicalize_select_value(field, selected.value)
+                        if canonical is not None:
+                            answer_value = canonical
+                    answers.append(FieldAnswer(target_id, answer_value, 1.0, "configured field answer", "configured"))
                 continue
             canonical, descriptor_conflict = _canonical_field_identity(field)
             if descriptor_conflict or canonical is None:
@@ -1074,13 +1095,66 @@ def _configured_resolution_for_observation(
     return resolved, conflicts
 
 
-def validate_answer_value(field: ObservedField, value: str | bool, *, kind: str | None = None) -> bool:
+def _canonicalize_select_value(field: ObservedField, value: Any) -> tuple[str, ...] | str | None:
+    """Return a canonical select value or None if invalid.
+
+    Single select returns the enabled option value as a string.  Multi-select
+    returns an immutable tuple of unique enabled option values in observed DOM
+    order.  Duplicate observed option values, disabled choices, forbidden
+    control characters, and non-canonical request order are rejected.
+    """
+
+    if _field_kind(field) != "select" or type(field.multiple) is not bool:
+        return None
+
+    observed: list[tuple[str, str, bool]] = []
+    seen_values: set[str] = set()
+    for option in field.options:
+        if type(option.value) is not str or type(option.label) is not str or type(option.enabled) is not bool:
+            return None
+        if option.value in seen_values:
+            return None
+        seen_values.add(option.value)
+        observed.append((option.value, option.label, option.enabled))
+
+    if field.multiple:
+        if isinstance(value, (str, bool)) or value is None:
+            return None
+        if not isinstance(value, (list, tuple)):
+            return None
+        if any(type(item) is not str for item in value):
+            return None
+        requested = tuple(value)
+        if len(requested) != len(set(requested)):
+            return None
+        if field.required and not requested:
+            return None
+        enabled = {option.value for option in field.options if option.enabled}
+        for item in requested:
+            if item not in enabled or _contains_forbidden_controls(item):
+                return None
+        canonical = tuple(option.value for option in field.options if option.value in requested and option.enabled)
+        return canonical
+
+    if not isinstance(value, str) or isinstance(value, bool):
+        return None
+    if _contains_forbidden_controls(value):
+        return None
+    enabled_values = {option.value for option in field.options if option.enabled}
+    if value not in enabled_values:
+        return None
+    return value
+
+
+def validate_answer_value(field: ObservedField, value: FieldValue, *, kind: str | None = None) -> bool:
     """Purely validate a proposed value against the observed field contract."""
 
     field_kind = _field_kind(field)
     answer_kind = (kind or field_kind).lower()
     if answer_kind in {"checkbox", "radio"}:
         return isinstance(value, bool) and field_kind == answer_kind
+    if answer_kind == "select":
+        return _canonicalize_select_value(field, value) is not None
     if not isinstance(value, str) or _contains_forbidden_controls(value):
         return False
     if field_kind in {"checkbox", "radio", "file"}:

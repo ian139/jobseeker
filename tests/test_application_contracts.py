@@ -149,6 +149,7 @@ def test_observation_dataclass_field_shapes_and_booleans() -> None:
         "max_value",
         "step",
         "options",
+        "multiple",
     )
     assert tuple(field.name for field in fields(ObservedButton)) == (
         "target_id",

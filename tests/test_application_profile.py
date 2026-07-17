@@ -29,6 +29,7 @@ from jobs_assistant.ats import (
     load_applicant_description,
     load_resume_context,
     merge_plans,
+    parse_application_profile,
     unresolved_required_fields,
     validate_answer_value,
 )
@@ -61,7 +62,8 @@ def _field(
     min_value: str | None = None,
     max_value: str | None = None,
     step: str | None = None,
-    value: str | bool | None = None,
+    value: str | bool | tuple[str, ...] | None = None,
+    multiple: bool = False,
 ) -> ObservedField:
     return ObservedField(
         target_id=target_id,
@@ -94,6 +96,7 @@ def _field(
         max_value=max_value,
         step=step,
         options=options,
+        multiple=multiple,
     )
 
 
@@ -848,3 +851,147 @@ def test_autocomplete_url_is_compatible_but_never_selects_a_fact() -> None:
     assert canonical_greenhouse_fact(email) is None
     opaque = _field(name="question_1234", safety_descriptors=("autocomplete=url",))
     assert canonical_greenhouse_fact(opaque) is None
+
+
+def test_profile_configured_select_list_freezes_to_tuple() -> None:
+    profile = ApplicationProfile(
+        field_answers=(
+            ats.ConfiguredFieldAnswer("greenhouse", None, "Skills", "select", ["python", "go"]),
+        ),
+    )
+    assert profile.field_answers[0].value == ("python", "go")
+
+
+def test_profile_configured_multi_select_order_and_canonicalization() -> None:
+    profile = ApplicationProfile(
+        field_answers=(
+            ats.ConfiguredFieldAnswer("greenhouse", None, "Skills", "select", ("go", "python")),
+        ),
+    )
+    field = _field(
+        target_id="skills",
+        kind="select",
+        label="Skills",
+        multiple=True,
+        options=(
+            ObservedOption("python", "Python", True),
+            ObservedOption("go", "Go", True),
+            ObservedOption("rust", "Rust", True),
+        ),
+    )
+    observation = _observation(field)
+    answers = GreenhouseAdapter().deterministic_answers(observation, _context(profile), profile=profile)
+    assert answers == (FieldAnswer("skills", ("python", "go"), 1.0, "configured field answer", "configured"),)
+
+
+def test_profile_configured_multi_select_rejects_duplicate_requested() -> None:
+    profile = ApplicationProfile(
+        field_answers=(
+            ats.ConfiguredFieldAnswer("greenhouse", None, "Skills", "select", ("python", "python")),
+        ),
+    )
+    field = _field(
+        target_id="skills",
+        kind="select",
+        label="Skills",
+        multiple=True,
+        options=(ObservedOption("python", "Python", True),),
+    )
+    assert GreenhouseAdapter().deterministic_answers(_observation(field), _context(profile), profile=profile) == ()
+
+
+def test_profile_configured_multi_select_rejects_disabled_options() -> None:
+    profile = ApplicationProfile(
+        field_answers=(
+            ats.ConfiguredFieldAnswer("greenhouse", None, "Skills", "select", ("python", "rust")),
+        ),
+    )
+    field = _field(
+        target_id="skills",
+        kind="select",
+        label="Skills",
+        multiple=True,
+        options=(
+            ObservedOption("python", "Python", True),
+            ObservedOption("rust", "Rust", False),
+        ),
+    )
+    assert GreenhouseAdapter().deterministic_answers(_observation(field), _context(profile), profile=profile) == ()
+
+
+def test_profile_configured_multi_select_rejects_required_empty() -> None:
+    profile = ApplicationProfile(
+        field_answers=(ats.ConfiguredFieldAnswer("greenhouse", None, "Skills", "select", ()),)
+    )
+    field = _field(
+        target_id="skills",
+        kind="select",
+        label="Skills",
+        required=True,
+        multiple=True,
+        options=(ObservedOption("python", "Python", True),),
+    )
+    assert GreenhouseAdapter().deterministic_answers(_observation(field), _context(profile), profile=profile) == ()
+
+
+def test_profile_configured_multi_select_rejects_malformed_list() -> None:
+    with pytest.raises(ValueError, match="list values must be strings"):
+        parse_application_profile(
+            {"field_answers": [{"ats": "greenhouse", "label": "Skills", "kind": "select", "value": ["python", 1]}]}
+        )
+
+
+def test_validate_answer_value_rejects_duplicate_observed_option_values() -> None:
+    field = _field(
+        target_id="skills",
+        kind="select",
+        label="Skills",
+        multiple=True,
+        options=(
+            ObservedOption("python", "Python", True),
+            ObservedOption("python", "Python duplicate", True),
+        ),
+    )
+    assert not validate_answer_value(field, ("python",))
+
+
+def test_validate_answer_value_rejects_forbidden_controls_in_multi_select() -> None:
+    field = _field(
+        target_id="skills",
+        kind="select",
+        label="Skills",
+        multiple=True,
+        options=(ObservedOption("python\x00", "Python", True), ObservedOption("go", "Go", True)),
+    )
+    assert not validate_answer_value(field, ("python\x00",))
+    assert not validate_answer_value(field, ("go", "python\x00"))
+
+
+def test_validate_answer_value_multi_select_uses_observed_dom_order() -> None:
+    field = _field(
+        target_id="skills",
+        kind="select",
+        label="Skills",
+        multiple=True,
+        options=(
+            ObservedOption("python", "Python", True),
+            ObservedOption("go", "Go", True),
+            ObservedOption("rust", "Rust", True),
+        ),
+    )
+    assert validate_answer_value(field, ("rust", "python"))
+    answer = next(
+        answer
+        for answer in GreenhouseAdapter().deterministic_answers(
+            _observation(field),
+            _context(
+                ApplicationProfile(
+                    field_answers=(ats.ConfiguredFieldAnswer("greenhouse", None, "Skills", "select", ("rust", "python")),)
+                )
+            ),
+            profile=ApplicationProfile(
+                field_answers=(ats.ConfiguredFieldAnswer("greenhouse", None, "Skills", "select", ("rust", "python")),)
+            ),
+        )
+    )
+    assert answer.value == ("python", "rust")

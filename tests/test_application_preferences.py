@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
 import pytest
@@ -18,9 +18,10 @@ from jobs_assistant.application_preferences import (
     apply_preferences,
     load_application_preferences,
     mapping_answer,
+    normalize_field_descriptor,
     order_actions,
 )
-from jobs_assistant.contracts import FieldAnswer, ObservedField
+from jobs_assistant.contracts import FieldAnswer, ObservedField, ObservedOption
 
 
 def _field(
@@ -301,3 +302,105 @@ def test_sensitive_opaque_final_actions_reject() -> None:
             order_actions(preferences, ({"target_id": kind, "kind": kind},))
     with pytest.raises(PreferenceValidationError):
         apply_preferences(preferences, (ObservedFieldDescriptor("x", "*", "x", "", "password", False),))
+
+
+def test_preference_mapping_accepts_select_list_and_freezes_to_tuple() -> None:
+    mapping = PreferenceMapping("greenhouse", None, "Skills", "select", ["python", "go"])
+    assert mapping.value == ("python", "go")
+
+
+def test_preference_descriptor_preserves_multiple_and_option_enabled_triples() -> None:
+    descriptor = ObservedFieldDescriptor(
+        "skills",
+        "greenhouse",
+        "skills",
+        "Skills",
+        "select",
+        required=True,
+        options=(("python", "Python", True), ("go", "Go", False)),
+        multiple=True,
+    )
+    assert descriptor.multiple is True
+    assert descriptor.options == (("python", "Python", True), ("go", "Go", False))
+    assert descriptor.matcher == PreferenceMatcher("greenhouse", "skills", "skills", "select")
+
+
+def test_preference_mapping_answer_canonicalizes_multi_select() -> None:
+    preferences = ApplicationPreferences(
+        1,
+        (PreferenceMapping("greenhouse", None, "Skills", "select", ("go", "python")),),
+        (),
+        (),
+    )
+    field = _field("skills", kind="select", name="skills", label="Skills", required=True)
+    field = replace(
+        field,
+        multiple=True,
+        options=(
+            ObservedOption("python", "Python", True),
+            ObservedOption("go", "Go", True),
+            ObservedOption("rust", "Rust", True),
+        ),
+    )
+    answer = mapping_answer(preferences, field, ats="greenhouse")
+    assert answer is not None
+    assert answer.value == ("python", "go")
+
+
+def test_preference_descriptor_rejects_pair_options_for_multi_select() -> None:
+    with pytest.raises(PreferenceValidationError, match="requires option enabled triples"):
+        ObservedFieldDescriptor(
+            "skills",
+            "greenhouse",
+            "skills",
+            "Skills",
+            "select",
+            required=True,
+            options=(("python", "Python"),),
+            multiple=True,
+        )
+
+
+def test_preference_descriptor_rejects_malformed_mode_and_option_metadata() -> None:
+    with pytest.raises(PreferenceValidationError, match="multiple flag"):
+        ObservedFieldDescriptor("skills", "greenhouse", "skills", "Skills", "select", False, multiple=1)
+    with pytest.raises(PreferenceValidationError, match="options"):
+        ObservedFieldDescriptor(
+            "skills",
+            "greenhouse",
+            "skills",
+            "Skills",
+            "select",
+            False,
+            options=(("python", "Python", 1),),
+            multiple=True,
+        )
+    with pytest.raises(PreferenceValidationError, match="options"):
+        normalize_field_descriptor(
+            {
+                "target_id": "skills",
+                "options": [("python", "Python", 1)],
+                "label": "Skills",
+                "kind": "select",
+                "options": [{"value": "python", "label": "Python", "enabled": True}],
+            }
+        )
+
+
+def test_preference_descriptor_materializes_disabled_options_for_validation() -> None:
+    preferences = ApplicationPreferences(
+        1,
+        (PreferenceMapping("greenhouse", None, "Skills", "select", ("python", "rust")),),
+        (),
+        (),
+    )
+    field = _field("skills", kind="select", name="skills", label="Skills", required=True)
+    field = replace(
+        field,
+        multiple=True,
+        options=(
+            ObservedOption("python", "Python", True),
+            ObservedOption("rust", "Rust", False),
+        ),
+    )
+    assert mapping_answer(preferences, field, ats="greenhouse") is None

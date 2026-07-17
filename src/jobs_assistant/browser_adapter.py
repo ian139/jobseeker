@@ -711,6 +711,7 @@ class PuppeteerSession:
         internal_transport_url: str | None = None,
         on_owner_identity: Any | None = None,
         on_browser_identity: Any | None = None,
+        test_drift: bool = False,
     ) -> "PuppeteerSession":
         try:
             selected_ats_policy = validate_ats_policy_name(ats_policy)
@@ -758,6 +759,16 @@ class PuppeteerSession:
             raise BrowserAdapterError("staged_input_required")
         if session_manifest is not None:
             env["JOBS_ASSISTANT_SESSION_MANIFEST"] = str(Path(session_manifest).resolve())
+        test_drift_token: str | None = None
+        if type(test_drift) is not bool:
+            shutil.rmtree(child_root, ignore_errors=True)
+            raise BrowserAdapterError("test_select_drift_unavailable")
+        if test_drift:
+            if not internal_transport_url or not internal_token:
+                shutil.rmtree(child_root, ignore_errors=True)
+                raise BrowserAdapterError("test_select_drift_unavailable")
+            test_drift_token = uuid.uuid4().hex
+            env["JOBS_ASSISTANT_TEST_DRIFT_TOKEN"] = test_drift_token
         cwd = Path(run_cwd).resolve() if run_cwd is not None else RUNNER.parent
         shot_root = Path(screenshot_root).resolve() if screenshot_root is not None else cwd / "screenshots"
         shot_root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -791,6 +802,7 @@ class PuppeteerSession:
                 internal_transport_url=internal_transport_url,
             )
             session._internal_transport_token = internal_token
+            session._test_drift_token = test_drift_token
             hello = session.read_response(timeout=timeout)
             data = hello.get("data") if hello.get("ok") else None
             if not hello.get("ok") or not isinstance(data, dict) or data.get("protocol") != "length-prefixed-json-v1":
@@ -928,7 +940,11 @@ class PuppeteerSession:
         if type(value) is not bool:
             raise BrowserAdapterError("invalid_boolean_value")
         return self.request({"action": "check", "target_id": str(target_id), "value": value})
-    def select(self, target_id: str, value: str) -> dict[str, Any]:
+    def select(self, target_id: str, value: str | tuple[str, ...]) -> dict[str, Any]:
+        if not isinstance(value, (str, tuple)):
+            raise BrowserAdapterError("invalid_select_value")
+        if isinstance(value, tuple) and not all(isinstance(item, str) for item in value):
+            raise BrowserAdapterError("invalid_select_value")
         return self.request({"action": "select", "target_id": str(target_id), "value": value})
 
     def upload(self, target_id: str) -> dict[str, Any]:
@@ -999,9 +1015,13 @@ class PuppeteerSession:
         process = self.process
         threading.Thread(target=process.wait, name="jobs-assistant-browser-reaper", daemon=True).start()
         return {"state": "open_guarded", "released": True}
-
     def network_counters(self) -> dict[str, Any]:
         return self.request({"action": "networkCounters"})
+    def _trigger_select_drift_for_test(self) -> dict[str, Any]:
+        token = getattr(self, "_test_drift_token", None)
+        if not token:
+            raise BrowserAdapterError("test_select_drift_unavailable")
+        return self.request({"action": "test_select_drift", "test_drift_token": token})
     def _fill_receive_buffer(self, deadline: float) -> None:
         if self.process.stdout is None:
             raise BrowserAdapterError("adapter_stdout_missing")

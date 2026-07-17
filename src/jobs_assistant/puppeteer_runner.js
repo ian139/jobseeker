@@ -264,6 +264,7 @@ async function fail(error, action = 'protocol') {
   try { await writeFrame({ ok: false, error: safeErrorCode(error, action) }); } catch {}
 }
 function hash(value) { return crypto.createHash('sha256').update(String(value)).digest('hex'); }
+function arraysEqual(a, b) { return Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((value, index) => value === b[index]); }
 function safeUrl(value) { try { return new URL(String(value)); } catch { return null; } }
 function isLocalHost(host) { return host === '127.0.0.1' || host === 'localhost' || host === '[::1]' || host === '::1'; }
 function isFinalLike(value) {
@@ -966,7 +967,7 @@ function enforceBudgets() {
   const run = measureTree(process.cwd());
   const profile = measureTree(ownerRoot, { allowSymlinks: true });
   const inputRoot = process.env.JOBS_ASSISTANT_INPUT_ROOT;
-  const input = inputRoot ? measureTree(inputRoot) : { bytes: 0, files: 0 };
+  const input = inputRoot ? measureTree(inputRoot, { allowSymlinks: true }) : { bytes: 0, files: 0 };
   if (input.bytes > 10 * 1024 * 1024 || input.files > 1
       || run.bytes > 50 * 1024 * 1024 || run.files > 500
       || profile.bytes > 128 * 1024 * 1024 || profile.files > 5000
@@ -1393,7 +1394,15 @@ function descriptorClassification(info) {
 function identityKey(frameUrl, info) {
   const origin = safeUrl(frameUrl)?.origin || frameUrl;
   const form = info.formActionUrl ? (() => { const u = safeUrl(info.formActionUrl); return u ? `${u.origin}${u.pathname}` : ''; })() : '';
-  return hash([origin, form, info.kind, info.name || '', info.label || '', info.groupId || '', (info.options || []).map(option => `${option.value}:${option.label}`).join('|')].join('\u001f')).slice(0, 24);
+  const optionKey = JSON.stringify((info.options || []).map(option => [String(option.value), String(option.label), Boolean(option.enabled)]));
+  return hash([origin, form, info.kind, info.name || '', info.label || '', info.groupId || '', `multiple=${info.multiple ? '1' : '0'}`, `ambiguous=${info.optionsAmbiguous ? '1' : '0'}`, optionKey].join('\u001f')).slice(0, 24);
+}
+function actionIdentityKey(frameUrl, info) {
+  const stable = identityKey(frameUrl, info);
+  const selectedIndexes = info.kind === 'select' ? (info.options || []).map((option, index) => option.nativeSelected ? index : -1).filter(index => index >= 0) : [];
+  const selectedTuple = info.kind === 'select' && info.multiple ? JSON.stringify({ value: info.value || [], indexes: selectedIndexes }) : '';
+  const scalarSelected = info.kind === 'select' && !info.multiple ? JSON.stringify({ value: String(info.value || ''), indexes: selectedIndexes }) : '';
+  return hash([stable, selectedTuple, scalarSelected].join('\u001f')).slice(0, 24);
 }
 function reviewClickKey(frameUrl, info) {
   const origin = safeUrl(frameUrl)?.origin || frameUrl;
@@ -1452,11 +1461,44 @@ async function safeElementInfo(handle) {
       : textarea ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')
         : button ? Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'value') : null;
     const checkedDescriptor = input ? Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked') : null;
+    const selectValueDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value') : null;
+    const selectMultipleDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'multiple') : null;
+    const selectOptionsDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options') : null;
+    const selectDisabledDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'disabled') : null;
+    const selectRequiredDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'required') : null;
+    const optionParentElementDescriptor = select ? Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement') : null;
+    const elementLocalNameDescriptor = select ? Object.getOwnPropertyDescriptor(Element.prototype, 'localName') : null;
+    const optionValueDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'value') : null;
+    const optionSelectedDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'selected') : null;
+    const optionDisabledDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'disabled') : null;
+    const optionLabelDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'label') : null;
+    const optionTextDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'text') : null;
+    const optgroupDisabledDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLOptGroupElement.prototype, 'disabled') : null;
+    const nativeMultiple = selectMultipleDescriptor && typeof selectMultipleDescriptor.get === 'function' ? Boolean(selectMultipleDescriptor.get.call(el)) : false;
+    const nativeOptions = selectOptionsDescriptor && typeof selectOptionsDescriptor.get === 'function' ? selectOptionsDescriptor.get.call(el) : [];
     const nativeValue = valueDescriptor && typeof valueDescriptor.get === 'function' ? valueDescriptor.get.call(el) : null;
     const nativeChecked = checkedDescriptor && typeof checkedDescriptor.get === 'function' ? checkedDescriptor.get.call(el) : null;
-    const scalarValue = input && ['checkbox', 'radio'].includes(type) ? Boolean(nativeChecked)
-      : input && type === 'file' ? null
-        : (input || textarea || button) ? String(nativeValue ?? '') : String(el.value ?? '');
+    const nativeSelectDisabled = selectDisabledDescriptor && typeof selectDisabledDescriptor.get === 'function' ? Boolean(selectDisabledDescriptor.get.call(el)) : false;
+    const nativeSelectRequired = selectRequiredDescriptor && typeof selectRequiredDescriptor.get === 'function' ? Boolean(selectRequiredDescriptor.get.call(el)) : false;
+    let scalarValue;
+    if (input && ['checkbox', 'radio'].includes(type)) scalarValue = Boolean(nativeChecked);
+    else if (input && type === 'file') scalarValue = null;
+    else if (select) {
+      const rawSelectValue = selectValueDescriptor && typeof selectValueDescriptor.get === 'function' ? selectValueDescriptor.get.call(el) : '';
+      if (nativeMultiple) {
+        const selected = [];
+        if (optionValueDescriptor && typeof optionValueDescriptor.get === 'function' && optionSelectedDescriptor && typeof optionSelectedDescriptor.get === 'function') {
+          for (const option of (nativeOptions || [])) {
+            if (optionSelectedDescriptor.get.call(option)) selected.push(String(optionValueDescriptor.get.call(option) ?? ''));
+          }
+        }
+        scalarValue = selected;
+      } else {
+        scalarValue = String(rawSelectValue ?? '');
+      }
+    } else {
+      scalarValue = String(el.value ?? '');
+    }
     const buttonValue = (button || input) && ['submit', 'button', 'reset', 'image'].includes(type)
       ? String(nativeValue ?? '') : '';
     const text = (button || anchor) ? String(el.innerText || el.textContent || '').trim() : '';
@@ -1464,7 +1506,34 @@ async function safeElementInfo(handle) {
     const descriptors = [...own, ...labels, ...(button || anchor || buttonLikeInput ? [text, buttonValue] : [])].map(value => String(value).trim()).filter(Boolean);
     const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : { width: 0, height: 0 };
     const style = typeof getComputedStyle === 'function' ? getComputedStyle(el) : null;
-    const options = select ? Array.from(el.options || []).map(option => ({ value: String(option.value || ''), label: String(option.label || option.text || ''), enabled: !option.disabled })) : [];
+    const options = select ? Array.from(nativeOptions || []).map(option => {
+      const optionDisabled = optionDisabledDescriptor && typeof optionDisabledDescriptor.get === 'function' ? optionDisabledDescriptor.get.call(option) : false;
+      let ancestor = optionParentElementDescriptor && typeof optionParentElementDescriptor.get === 'function' ? optionParentElementDescriptor.get.call(option) : null;
+      let optgroupDisabled = false;
+      while (ancestor) {
+        const ancestorName = elementLocalNameDescriptor && typeof elementLocalNameDescriptor.get === 'function'
+          ? String(elementLocalNameDescriptor.get.call(ancestor) || '').toLowerCase() : '';
+        if (ancestorName === 'optgroup') {
+          optgroupDisabled = optgroupDisabledDescriptor && typeof optgroupDisabledDescriptor.get === 'function' ? optgroupDisabledDescriptor.get.call(ancestor) : false;
+          break;
+        }
+        ancestor = optionParentElementDescriptor && typeof optionParentElementDescriptor.get === 'function'
+          ? optionParentElementDescriptor.get.call(ancestor) : null;
+      }
+      const effectiveEnabled = !optionDisabled && !optgroupDisabled;
+      const optValue = optionValueDescriptor && typeof optionValueDescriptor.get === 'function' ? String(optionValueDescriptor.get.call(option) ?? '') : '';
+      const nativeLabel = optionLabelDescriptor && typeof optionLabelDescriptor.get === 'function' ? optionLabelDescriptor.get.call(option) : '';
+      const nativeText = optionTextDescriptor && typeof optionTextDescriptor.get === 'function' ? optionTextDescriptor.get.call(option) : '';
+      const optLabel = String(nativeLabel ?? '') || String(nativeText ?? '');
+      const nativeSelected = optionSelectedDescriptor && typeof optionSelectedDescriptor.get === 'function'
+        ? Boolean(optionSelectedDescriptor.get.call(option)) : false;
+      return {
+        value: optValue, label: optLabel, enabled: effectiveEnabled, nativeSelected,
+        nativeLabel: String(nativeLabel ?? ''), nativeText: String(nativeText ?? ''),
+      };
+    }) : [];
+    const allOptionValues = select ? options.map(option => option.value) : [];
+    const optionsAmbiguous = select && allOptionValues.length !== new Set(allOptionValues).size;
     const label = String(el.getAttribute('aria-label') || labels.join(' ').replace(/\s+/g, ' ').trim() || el.getAttribute('placeholder') || el.getAttribute('name') || el.id || '').slice(0, 2048);
     const name = el.getAttribute('name') || el.id || null;
     const action = form ? (el.hasAttribute('formaction') ? el.formAction : form.action) : null;
@@ -1490,6 +1559,23 @@ async function safeElementInfo(handle) {
       || typeof checkedDescriptor.get !== 'function'
       || typeof checkedDescriptor.set !== 'function'
     );
+    const selectAccessPoisoned = select && (
+      !selectMultipleDescriptor || typeof selectMultipleDescriptor.get !== 'function'
+      || !selectOptionsDescriptor || typeof selectOptionsDescriptor.get !== 'function'
+      || !selectDisabledDescriptor || typeof selectDisabledDescriptor.get !== 'function'
+      || !selectRequiredDescriptor || typeof selectRequiredDescriptor.get !== 'function'
+      || !optionValueDescriptor || typeof optionValueDescriptor.get !== 'function'
+      || !optionDisabledDescriptor || typeof optionDisabledDescriptor.get !== 'function'
+      || !optgroupDisabledDescriptor || typeof optgroupDisabledDescriptor.get !== 'function'
+      || !optionLabelDescriptor || typeof optionLabelDescriptor.get !== 'function'
+      || !optionTextDescriptor || typeof optionTextDescriptor.get !== 'function'
+      || !optionParentElementDescriptor || typeof optionParentElementDescriptor.get !== 'function'
+      || !elementLocalNameDescriptor || typeof elementLocalNameDescriptor.get !== 'function'
+      || !optionSelectedDescriptor || typeof optionSelectedDescriptor.get !== 'function'
+      || (nativeMultiple
+        ? typeof optionSelectedDescriptor.set !== 'function'
+        : (!selectValueDescriptor || typeof selectValueDescriptor.get !== 'function' || typeof selectValueDescriptor.set !== 'function'))
+    );
     return {
       id: el.id || null,
       tag,
@@ -1498,15 +1584,14 @@ async function safeElementInfo(handle) {
       isNativeOfflineButton: (button && type === 'button') || (input && type === 'button'),
       isNativeContinuationButton: button && type === 'submit' && !form,
       isAnchor: anchor, isFile: input && type === 'file', isCustomElement: tag.includes('-'),
-      prototypePoisoned: valueAccessPoisoned || checkedAccessPoisoned,
+      prototypePoisoned: valueAccessPoisoned || checkedAccessPoisoned || selectAccessPoisoned,
       kind: textarea ? 'textarea' : select ? 'select' : type, name, label, groupId, formIdentity, formToken, optionValue: input && ['checkbox', 'radio'].includes(type) ? String(nativeValue || '') : null, descriptors, selector: el.id ? `#${CSS.escape(el.id)}` : name ? `${tag}[name="${String(name).replaceAll('"', '\\"')}"]` : tag,
-      required: Boolean(el.required || el.getAttribute('aria-required') === 'true'), visible: Boolean(rect.width && rect.height && (!style || (style.visibility !== 'hidden' && style.display !== 'none'))), enabled: !el.disabled, readonly: Boolean(el.readOnly),
-      value: scalarValue, buttonValue, willValidate: Boolean(el.willValidate), valid: Boolean(el.validity ? el.validity.valid : true),
+      required: select ? nativeSelectRequired : Boolean(el.required || el.getAttribute('aria-required') === 'true'), visible: Boolean(rect.width && rect.height && (!style || (style.visibility !== 'hidden' && style.display !== 'none'))), enabled: select ? !nativeSelectDisabled : !el.disabled, readonly: Boolean(el.readOnly),
+      value: scalarValue, multiple: select ? nativeMultiple : false, optionsAmbiguous, buttonValue, willValidate: Boolean(el.willValidate), valid: Boolean(el.validity ? el.validity.valid : true),
       validityFlags: el.validity ? ['valueMissing', 'typeMismatch', 'patternMismatch', 'tooLong', 'tooShort', 'rangeUnderflow', 'rangeOverflow', 'stepMismatch', 'badInput', 'customError'].filter(flag => Boolean(el.validity[flag])) : [],
       formActionUrl: action, effectiveMethod: method, documentOrigin: el.ownerDocument?.location?.origin || null, text: text.slice(0, 2048), buttonType: input ? type : (button ? type : (anchor ? 'anchor' : null)), target: el.getAttribute('target'), download: Boolean(el.getAttribute('download')), hrefUrl: anchor ? el.href : null, hrefAttribute: anchor ? el.getAttribute('href') : null, finalLike,
       fileCount: input && type === 'file' && el.files ? el.files.length : 0, fileBasenames: input && type === 'file' && el.files ? Array.from(el.files).map(file => file.name) : [], accept: input && type === 'file' ? String(el.accept || '').split(',').map(value => value.trim()).filter(Boolean) : [],
       minLength: Number.isInteger(el.minLength) && el.minLength >= 0 ? el.minLength : null, maxLength: Number.isInteger(el.maxLength) && el.maxLength >= 0 ? el.maxLength : null, pattern: el.pattern || null, minValue: el.min || null, maxValue: el.max || null, step: el.step || null, options,
-      formActionUrl: action, effectiveMethod: method, text: text.slice(0, 2048), buttonType: input ? type : (button ? type : (anchor ? 'anchor' : null)), target: el.getAttribute('target'), download: Boolean(el.getAttribute('download')), hrefUrl: anchor ? el.href : null, hrefAttribute: anchor ? el.getAttribute('href') : null, finalLike,
     };
   }, [...FINAL_LIKE_TOKENS]);
 }
@@ -1542,6 +1627,32 @@ function testProxyFreeze(command = {}) {
   return { ...networkCounters, terminal_reason: terminalReason };
 }
 
+async function testSelectDrift(command) {
+  const expected = process.env.JOBS_ASSISTANT_TEST_DRIFT_TOKEN;
+  if (!expected || typeof command.test_drift_token !== 'string' || command.test_drift_token !== expected) throw new Error('test_select_drift_unavailable');
+  assertPage();
+  const frame = page.mainFrame();
+  const handle = await frame.isolatedRealm().evaluateHandle(() => {
+    const query = Object.getOwnPropertyDescriptor(Document.prototype, 'querySelectorAll')?.value;
+    if (typeof query !== 'function') throw new Error('query_selector_unavailable');
+    return query.call(document, 'select')[0] || null;
+  });
+  const element = handle.asElement?.() || handle;
+  if (!element) { await handle.dispose().catch(() => {}); throw new Error('test_select_drift_no_select'); }
+  try {
+    await element.evaluate((el) => {
+      const proto = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'selectedIndex')?.set;
+      if (!proto) throw new Error('prototype_poisoned');
+      proto.call(el, 1);
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+  } finally {
+    await element.dispose().catch(() => {});
+  }
+  return { drifted: true };
+}
+
 
 function invalidateGeneration(reason = 'stale_generation') {
   generationConsumed = true;
@@ -1555,7 +1666,16 @@ function invalidateGeneration(reason = 'stale_generation') {
 }
 
 function toObservedField(targetId, frameId, frameUrl, info, key, sensitive) {
-  return { target_id: targetId, field_key: key, frame_id: frameId, frame_url: frameUrl, form_action_url: info.formActionUrl, kind: info.kind, name: info.name, label: info.label, group_id: info.groupId || null, option_value: info.optionValue || null, safety_descriptors: info.descriptors, selector: info.selector, required: info.required, visible: info.visible, enabled: info.enabled, readonly: info.readonly, value: info.value, will_validate: info.willValidate, valid: info.valid, validity_flags: [...info.validityFlags, ...(sensitive ? ['sensitive_field'] : [])], file_count: info.fileCount, file_basenames: info.fileBasenames, accept: info.accept, min_length: info.minLength, max_length: info.maxLength, pattern: info.pattern, min_value: info.minValue, max_value: info.maxValue, step: info.step, options: info.options };
+  const ambiguous = Boolean(info.optionsAmbiguous);
+  const selectedOptions = info.kind === 'select' && Array.isArray(info.options)
+    ? info.options.filter(option => option.nativeSelected)
+    : [];
+  const conventionalPlaceholder = !info.multiple && info.required && info.value === ''
+    && selectedOptions.length === 1 && selectedOptions[0].value === '' && !selectedOptions[0].enabled;
+  const invalidSelectedOption = selectedOptions.some(option => !option.enabled) && !conventionalPlaceholder;
+  const valid = info.valid && !ambiguous && !invalidSelectedOption;
+  const validityFlags = [...info.validityFlags, ...(sensitive ? ['sensitive_field'] : []), ...(ambiguous ? ['options_ambiguous'] : []), ...(invalidSelectedOption ? ['invalid_selected_option'] : [])];
+  return { target_id: targetId, field_key: key, frame_id: frameId, frame_url: frameUrl, form_action_url: info.formActionUrl, kind: info.kind, name: info.name, label: info.label, group_id: info.groupId || null, option_value: info.optionValue || null, safety_descriptors: info.descriptors, selector: info.selector, required: info.required, visible: info.visible, enabled: info.enabled, readonly: info.readonly, value: info.value, multiple: Boolean(info.multiple), will_validate: info.willValidate, valid, validity_flags: validityFlags, file_count: info.fileCount, file_basenames: info.fileBasenames, accept: info.accept, min_length: info.minLength, max_length: info.maxLength, pattern: info.pattern, min_value: info.minValue, max_value: info.maxValue, step: info.step, options: info.options.map(option => ({ value: option.value, label: option.label, enabled: option.enabled })) };
 }
 function toObservedButton(targetId, frameId, frameUrl, info, clickKey, sensitive) {
   const nativeOffline = Boolean(info.isNativeOfflineButton);
@@ -1701,7 +1821,7 @@ async function observe() {
       if (info.isField) {
         if (observation.fields.length >= 500) { observation.blockers.push({ code: 'observation_too_large', frame_id: frameId, text: 'field cap exceeded' }); await handle.dispose().catch(() => {}); continue; }
         const targetId = `${currentGeneration}:${frameId}:field-${fieldIndex++}`;
-        info.fieldKey = key; info.sensitive = sensitive; info.identity = identity;
+        info.fieldKey = key; info.actionIdentity = actionIdentityKey(frame.url(), info); info.sensitive = sensitive; info.identity = identity;
         info.collisionCount = seen.get(identity) || 0;
         handleCache.set(targetId, { handle, info, frame, frameUrl: frame.url(), frameChain: ancestry, generation: currentGeneration, kind: 'field' });
         const fieldRecord = toObservedField(targetId, frameId, frame.url(), info, key, sensitive);
@@ -1783,9 +1903,9 @@ async function consumeTarget(command) {
   const live = frameTrusted ? await safeElementInfo(selected).catch(() => null) : null;
   const liveClassification = live ? descriptorClassification(live) : { overflow: false, sensitive: false };
   const isButton = entry.kind === 'button';
-  const identityMatches = isButton
-    ? reviewClickKey(entry.frame.url(), live || {}) === entry.info.clickKey
-    : identityKey(entry.frame.url(), live || {}) === entry.info.fieldKey;
+    const identityMatches = isButton
+      ? reviewClickKey(entry.frame.url(), live || {}) === entry.info.clickKey
+      : actionIdentityKey(entry.frame.url(), live || {}) === entry.info.actionIdentity;
   const forbiddenButton = isButton && (live?.finalLike || live?.isAnchor || entry.info.finalLike || entry.info.isAnchor);
   if (!frameTrusted || !live || live.kind !== entry.info.kind
       || !identityMatches
@@ -1893,6 +2013,8 @@ async function action(command) {
   if (command.action === 'click') await waitForInitialQuiet(command.quietTimeoutMs || 10000);
   const { selected, live, frame, frameChain } = await consumeTarget(command);
   try {
+    let selectCanonical = undefined;
+    const beforeNetworkSequence = networkRequestSequence;
     if (live.isButton) return await buttonAction(selected, live, command, frame, frameChain);
     if (command.action === 'fill') {
       if (live.isFile || live.kind === 'select' || !validateCandidateValue(command.value, live)
@@ -1915,14 +2037,207 @@ async function action(command) {
         el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
       }, command.value);
     } else if (command.action === 'select') {
-      if (live.kind !== 'select' || typeof command.value !== 'string' || !live.options.some(option => option.enabled && option.value === command.value)) throw new Error('invalid_select_value');
-      beginMutation();
-      await selected.evaluate((el, value) => {
-        const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
-        if (!setter) throw new Error('prototype_poisoned');
-        setter.call(el, value);
-        el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
-      }, command.value);
+      if (live.kind !== 'select' || live.optionsAmbiguous) throw new Error('invalid_select_value');
+      const enabledByIndex = new Map();
+      for (const [index, option] of live.options.entries()) {
+        if (option.enabled) {
+          if (enabledByIndex.has(option.value)) continue;
+          enabledByIndex.set(option.value, index);
+        }
+      }
+      if (live.multiple) {
+        if (!Array.isArray(command.value) || command.value.some(v => typeof v !== 'string')) throw new Error('invalid_select_value');
+        if (new Set(command.value).size !== command.value.length) throw new Error('invalid_select_value');
+        if (live.required && command.value.length === 0) throw new Error('invalid_select_value');
+        for (const v of command.value) if (!enabledByIndex.has(v)) throw new Error('invalid_select_value');
+        const desired = new Set(command.value);
+        const pairs = [];
+        for (const [index, option] of live.options.entries()) {
+          if (option.enabled && desired.has(option.value)) {
+            pairs.push({ index, value: option.value });
+          }
+        }
+        if (pairs.length !== command.value.length || !arraysEqual(command.value, pairs.map(p => p.value))) throw new Error('invalid_select_value');
+        selectCanonical = pairs.map(p => p.value);
+        const expectedSelect = {
+          multiple: true,
+          disabled: false,
+          required: Boolean(live.required),
+          selected: Array.isArray(live.value) ? [...live.value] : [],
+          selectedIndexes: live.options.map((option, index) => option.nativeSelected ? index : -1).filter(index => index >= 0),
+          options: live.options.map(option => ({
+            value: String(option.value), label: String(option.nativeLabel ?? ''),
+            text: String(option.nativeText ?? ''), enabled: Boolean(option.enabled),
+          })),
+        };
+        beginMutation();
+        await selected.evaluate((el, payload) => {
+          const { pairs, expected } = payload;
+          const multipleDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'multiple');
+          const optionsDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options');
+          const selectDisabledDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'disabled');
+          const selectRequiredDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'required');
+          const valueDesc = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'value');
+          const labelDesc = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'label');
+          const textDesc = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'text');
+          const selectedDesc = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'selected');
+          const disabledDesc = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'disabled');
+          const optgroupDisabledDesc = Object.getOwnPropertyDescriptor(HTMLOptGroupElement.prototype, 'disabled');
+          const parentElementDesc = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement');
+          const localNameDesc = Object.getOwnPropertyDescriptor(Element.prototype, 'localName');
+          if (!multipleDesc || typeof multipleDesc.get !== 'function'
+              || !optionsDesc || typeof optionsDesc.get !== 'function'
+              || !selectDisabledDesc || typeof selectDisabledDesc.get !== 'function'
+              || !selectRequiredDesc || typeof selectRequiredDesc.get !== 'function'
+              || !valueDesc || typeof valueDesc.get !== 'function'
+              || !labelDesc || typeof labelDesc.get !== 'function'
+              || !textDesc || typeof textDesc.get !== 'function'
+              || !selectedDesc || typeof selectedDesc.get !== 'function' || typeof selectedDesc.set !== 'function'
+              || !disabledDesc || typeof disabledDesc.get !== 'function'
+              || !optgroupDisabledDesc || typeof optgroupDisabledDesc.get !== 'function'
+              || !parentElementDesc || typeof parentElementDesc.get !== 'function'
+              || !localNameDesc || typeof localNameDesc.get !== 'function') throw new Error('prototype_poisoned');
+          if (!multipleDesc.get.call(el) || selectDisabledDesc.get.call(el)
+              || Boolean(selectRequiredDesc.get.call(el)) !== Boolean(expected.required)) throw new Error('prototype_poisoned');
+          const nativeOpts = optionsDesc.get.call(el);
+          if (!nativeOpts || nativeOpts.length !== expected.options.length) throw new Error('prototype_poisoned');
+          const current = [];
+          const selectedNow = [];
+          const selectedIndexesNow = [];
+          for (let index = 0; index < nativeOpts.length; index += 1) {
+            const option = nativeOpts[index];
+            const optDisabled = disabledDesc.get.call(option);
+            let ancestor = parentElementDesc.get.call(option);
+            let optgroupDisabled = false;
+            while (ancestor) {
+              if (String(localNameDesc.get.call(ancestor) || '').toLowerCase() === 'optgroup') {
+                optgroupDisabled = Boolean(optgroupDisabledDesc.get.call(ancestor));
+                break;
+              }
+              ancestor = parentElementDesc.get.call(ancestor);
+            }
+            const value = String(valueDesc.get.call(option) ?? '');
+            const label = String(labelDesc.get.call(option) ?? '');
+            const text = String(textDesc.get.call(option) ?? '');
+            const enabled = !optDisabled && !optgroupDisabled;
+            current.push({ value, label, text, enabled });
+            if (selectedDesc.get.call(option)) {
+              selectedNow.push(value);
+              selectedIndexesNow.push(index);
+            }
+          }
+          const same = (left, right) => Array.isArray(left) && Array.isArray(right) && left.length === right.length
+            && left.every((value, index) => value === right[index]);
+          if (!same(selectedNow, expected.selected) || !same(selectedIndexesNow, expected.selectedIndexes)
+              || current.some((option, index) => {
+                const wanted = expected.options[index];
+                return !wanted || option.value !== wanted.value || option.label !== wanted.label
+                  || option.text !== wanted.text || option.enabled !== wanted.enabled;
+              })) throw new Error('prototype_poisoned');
+          if (current.some((option, index) => !option.enabled && selectedNow.includes(option.value))) {
+            throw new Error('invalid_select_value');
+          }
+          for (const { index, value: expectedValue } of pairs) {
+            if (!Number.isInteger(index) || index < 0 || index >= nativeOpts.length) throw new Error('prototype_poisoned');
+            const option = nativeOpts[index];
+            if (current[index].value !== expectedValue || !current[index].enabled) throw new Error('prototype_poisoned');
+          }
+          for (let index = 0; index < nativeOpts.length; index += 1) {
+            const option = nativeOpts[index];
+            if (current[index].enabled && selectedDesc.get.call(option)) selectedDesc.set.call(option, false);
+          }
+          for (const { index } of pairs) {
+            const option = nativeOpts[index];
+            if (!selectedDesc.get.call(option)) selectedDesc.set.call(option, true);
+          }
+          el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
+        }, { pairs, expected: expectedSelect });
+      } else {
+        if (typeof command.value !== 'string' || !enabledByIndex.has(command.value)) throw new Error('invalid_select_value');
+        const expectedSelect = {
+          required: Boolean(live.required),
+          selectedIndexes: live.options.map((option, index) => option.nativeSelected ? index : -1).filter(index => index >= 0),
+          selected: live.options.filter(option => option.nativeSelected).map(option => String(option.value)),
+          target: { index: enabledByIndex.get(command.value), value: command.value },
+          options: live.options.map(option => ({
+            value: String(option.value), label: String(option.nativeLabel ?? option.label ?? ''),
+            text: String(option.nativeText ?? option.label ?? ''), enabled: Boolean(option.enabled),
+          })),
+        };
+        beginMutation();
+        await selected.evaluate((el, payload) => {
+          const { target, expected } = payload;
+          const multipleDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'multiple');
+          const optionsDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options');
+          const disabledSelectDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'disabled');
+          const requiredDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'required');
+          const valueDesc = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'value');
+          const labelDesc = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'label');
+          const textDesc = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'text');
+          const selectedDesc = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'selected');
+          const disabledDesc = Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'disabled');
+          const optgroupDisabledDesc = Object.getOwnPropertyDescriptor(HTMLOptGroupElement.prototype, 'disabled');
+          const parentElementDesc = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement');
+          const localNameDesc = Object.getOwnPropertyDescriptor(Element.prototype, 'localName');
+          const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set;
+          if (!multipleDesc || typeof multipleDesc.get !== 'function'
+              || !optionsDesc || typeof optionsDesc.get !== 'function'
+              || !disabledSelectDesc || typeof disabledSelectDesc.get !== 'function'
+              || !requiredDesc || typeof requiredDesc.get !== 'function'
+              || !valueDesc || typeof valueDesc.get !== 'function'
+              || !labelDesc || typeof labelDesc.get !== 'function'
+              || !textDesc || typeof textDesc.get !== 'function'
+              || !selectedDesc || typeof selectedDesc.get !== 'function'
+              || !disabledDesc || typeof disabledDesc.get !== 'function'
+              || !optgroupDisabledDesc || typeof optgroupDisabledDesc.get !== 'function'
+              || !parentElementDesc || typeof parentElementDesc.get !== 'function'
+              || !localNameDesc || typeof localNameDesc.get !== 'function'
+              || typeof setter !== 'function') throw new Error('prototype_poisoned');
+          if (multipleDesc.get.call(el) || disabledSelectDesc.get.call(el)
+              || Boolean(requiredDesc.get.call(el)) !== Boolean(expected.required)
+              || (expected.required && target.value === '')) throw new Error('invalid_select_value');
+          const nativeOpts = optionsDesc.get.call(el);
+          if (!nativeOpts || nativeOpts.length !== expected.options.length
+              || new Set(expected.options.map(option => option.value)).size !== expected.options.length) throw new Error('prototype_poisoned');
+          const selectedNow = [];
+          const selectedIndexesNow = [];
+          for (let index = 0; index < nativeOpts.length; index += 1) {
+            const option = nativeOpts[index];
+            const optDisabled = disabledDesc.get.call(option);
+            let ancestor = parentElementDesc.get.call(option);
+            let optgroupDisabled = false;
+            while (ancestor) {
+              if (String(localNameDesc.get.call(ancestor) || '').toLowerCase() === 'optgroup') {
+                optgroupDisabled = Boolean(optgroupDisabledDesc.get.call(ancestor));
+                break;
+              }
+              ancestor = parentElementDesc.get.call(ancestor);
+            }
+            const current = {
+              value: String(valueDesc.get.call(option) ?? ''),
+              label: String(labelDesc.get.call(option) ?? ''),
+              text: String(textDesc.get.call(option) ?? ''),
+              enabled: !optDisabled && !optgroupDisabled,
+            };
+            const wanted = expected.options[index];
+            if (!wanted || current.value !== wanted.value || current.label !== wanted.label
+                || current.text !== wanted.text || current.enabled !== wanted.enabled) throw new Error('prototype_poisoned');
+            if (selectedDesc.get.call(option)) {
+              selectedNow.push(current.value);
+              selectedIndexesNow.push(index);
+            }
+          }
+          if (selectedNow.length !== expected.selected.length
+              || selectedNow.some((value, index) => value !== expected.selected[index])
+              || selectedIndexesNow.length !== expected.selectedIndexes.length
+              || selectedIndexesNow.some((value, index) => value !== expected.selectedIndexes[index])) throw new Error('prototype_poisoned');
+          if (!Number.isInteger(target.index) || target.index < 0 || target.index >= nativeOpts.length
+              || String(valueDesc.get.call(nativeOpts[target.index]) ?? '') !== target.value
+              || !expected.options[target.index].enabled) throw new Error('prototype_poisoned');
+          setter.call(el, target.value);
+          el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
+        }, { target: expectedSelect.target, expected: expectedSelect });
+      }
     } else if (command.action === 'upload') {
       if (!live.isFile || Object.hasOwn(command, 'path')) throw new Error('upload_path_forbidden');
       const root = process.env.JOBS_ASSISTANT_INPUT_ROOT;
@@ -1939,12 +2254,35 @@ async function action(command) {
         throw error;
       }
     } else throw new Error(`unknown_target_action:${command.action}`);
-    await settle();
+    const isSelect = command.action === 'select';
+    try {
+      await settle();
+    } catch (error) {
+      if (isSelect && (networkRequestSequence !== beforeNetworkSequence || terminalReason)) {
+        const networkError = terminalReason === 'unsafe_navigation_target' ? 'unsafe_navigation_target' : 'unsafe_network_attempt';
+        if (!terminalReason) terminalReason = networkError;
+        throw new Error(networkError);
+      }
+      throw error;
+    }
     const after = await safeElementInfo(selected).catch(() => null);
+    if (isSelect) {
+      const networkAttempted = networkRequestSequence !== beforeNetworkSequence;
+      if (networkAttempted || terminalReason) {
+        const networkError = terminalReason === 'unsafe_navigation_target' ? 'unsafe_navigation_target' : 'unsafe_network_attempt';
+        if (!terminalReason) terminalReason = networkError;
+        throw new Error(networkError);
+      }
+    }
+    const afterClassification = after ? descriptorClassification(after) : { overflow: true, sensitive: true };
+    const stableSelect = command.action === 'select' && after && !after.prototypePoisoned
+      && !after.optionsAmbiguous && !afterClassification.overflow && !afterClassification.sensitive
+      && after.visible && after.enabled && !after.readonly
+      && identityKey(frame.url(), after) === identityKey(frame.url(), live);
     const retained = command.action === 'fill' ? after?.value === command.value
       : command.action === 'check' ? after?.value === command.value
-        : command.action === 'select' ? after?.value === command.value
-          : command.action === 'upload' ? after?.fileCount === 1 && after?.fileBasenames?.length === 1 && after.fileBasenames[0] === process.env.JOBS_ASSISTANT_STAGED_INPUT_NAME : true;
+      : command.action === 'select' ? (stableSelect && after.valid === true && (live.multiple ? arraysEqual(after.value, selectCanonical) : after.value === command.value))
+        : command.action === 'upload' ? after?.fileCount === 1 && after?.fileBasenames?.length === 1 && after.fileBasenames[0] === process.env.JOBS_ASSISTANT_STAGED_INPUT_NAME : true;
     if (!retained) throw new Error('field_value_not_retained');
     return { retained: true, counters: { ...networkCounters } };
   } finally { await selected.dispose().catch(() => {}); }
@@ -1986,7 +2324,18 @@ async function buttonAction(handle, info, command, frame, observedFrameChain) {
     if (typeof click !== 'function') throw new Error('prototype_poisoned');
     click.call(el);
   });
-  await settle();
+  try {
+    await settle();
+  } catch (error) {
+    if (networkRequestSequence !== beforeNetworkSequence || terminalReason) {
+      const networkError = terminalReason === 'unsafe_navigation_target'
+        ? 'unsafe_navigation_target'
+        : 'unsafe_network_attempt';
+      if (!terminalReason) terminalReason = networkError;
+      throw new Error(networkError);
+    }
+    throw error;
+  }
   const afterUrl = page.url();
   const afterFrameUrl = frame?.url?.() || '';
   const urlChanged = afterUrl !== beforeUrl || afterFrameUrl !== beforeFrameUrl;
@@ -2375,6 +2724,7 @@ async function handle(command) {
     case 'networkCounters': return { ...networkCounters, terminal_reason: terminalReason, review_state: reviewState };
     case 'test_proxy_setup': return testProxySetup(command);
     case 'test_proxy_freeze': return testProxyFreeze(command);
+    case 'test_select_drift': return testSelectDrift(command);
     case 'close': await close(); return {};
     default: throw new Error(`unknown_action:${String(command.action || '')}`);
   }
@@ -2466,6 +2816,7 @@ async function runErrorCodeSelfTest() {
 }
 
 function runRequestGuardSelfTest() {
+
   selectRoutePolicy('greenhouse');
   documentRouteIdentity = { mode: 'greenhouse_job', host: 'boards.greenhouse.io', board: 'acme', job: '123' };
   const vectors = [
@@ -2496,11 +2847,97 @@ function runRequestGuardSelfTest() {
       === reviewClickKey('https://boards.greenhouse.io/acme/jobs/123', { ...inputButton, buttonValue: 'Cancel' })) {
     throw new Error('request_guard_self_test_failed');
   }
+  const baseSelect = {
+    kind: 'select',
+    name: 'skills',
+    label: 'Skills',
+    groupId: '',
+    formActionUrl: null,
+    multiple: true,
+    optionsAmbiguous: false,
+    value: ['go', 'rust'],
+    options: [{ value: 'go', label: 'Go', enabled: true }, { value: 'rust', label: 'Rust', enabled: true }, { value: 'python', label: 'Python', enabled: true }],
+  };
+  const keyA = identityKey('https://example.com/apply', baseSelect);
+  const keyB = identityKey('https://example.com/apply', { ...baseSelect, value: ['rust', 'go'] });
+  const keyC = identityKey('https://example.com/apply', { ...baseSelect, multiple: false, value: 'go' });
+  const keyD = identityKey('https://example.com/apply', { ...baseSelect, options: [{ value: 'go', label: 'Go', enabled: true }, { value: 'rust', label: 'Rust', enabled: false }, { value: 'python', label: 'Python', enabled: true }] });
+  if (keyA !== keyB) throw new Error('request_guard_self_test_failed');
+  if (keyA === keyC || keyA === keyD) throw new Error('request_guard_self_test_failed');
+  const actA = actionIdentityKey('https://example.com/apply', baseSelect);
+  const actB = actionIdentityKey('https://example.com/apply', { ...baseSelect, value: ['rust', 'go'] });
+  if (actA === actB) throw new Error('request_guard_self_test_failed');
+  const collisionA = {
+    kind: 'select', name: 'x', label: 'X', groupId: '', formActionUrl: null,
+    multiple: false, optionsAmbiguous: false, value: 'a',
+    options: [{ value: 'a:b', label: 'c|d', enabled: true }],
+  };
+  const collisionB = {
+    kind: 'select', name: 'x', label: 'X', groupId: '', formActionUrl: null,
+    multiple: false, optionsAmbiguous: false, value: 'a',
+    options: [{ value: 'a', label: 'b:c|d', enabled: true }],
+  };
+  const collisionC = {
+    kind: 'select', name: 'x', label: 'X', groupId: '', formActionUrl: null,
+    multiple: false, optionsAmbiguous: false, value: 'a',
+    options: [{ value: 'a:b', label: 'c', enabled: true }, { value: '', label: 'd', enabled: true }],
+  };
+  if (identityKey('https://example.com/apply', collisionA) === identityKey('https://example.com/apply', collisionB)) throw new Error('request_guard_self_test_failed');
+  if (identityKey('https://example.com/apply', collisionA) === identityKey('https://example.com/apply', collisionC)) throw new Error('request_guard_self_test_failed');
+  if (actionIdentityKey('https://example.com/apply', collisionA) === actionIdentityKey('https://example.com/apply', collisionB)) throw new Error('request_guard_self_test_failed');
+  if (actionIdentityKey('https://example.com/apply', collisionA) === actionIdentityKey('https://example.com/apply', collisionC)) throw new Error('request_guard_self_test_failed');
   documentRouteIdentity = null;
   if (vectors.some(([actual, expected]) => actual !== expected)) throw new Error('request_guard_self_test_failed');
-  return { passed: vectors.length + 3 };
+  return { passed: vectors.length + 5 };
+}
+
+async function runSelectNativeSelfTest() {
+  await preflight();
+  await launch({ headless: true });
+  try {
+    await page.setContent(`<!doctype html><select multiple required>
+      <option value="go">Go</option>
+      <optgroup label="legacy" disabled><option value="cobol">Cobol</option></optgroup>
+    </select>`);
+    const realm = page.mainFrame().isolatedRealm();
+    await realm.evaluate(() => {
+      const select = document.querySelector('select');
+      const group = select.querySelector('optgroup');
+      const option = group.querySelector('option');
+      const realOptions = Array.from(select.querySelectorAll('option'));
+      Object.defineProperty(select, 'multiple', { configurable: true, get() { return false; } });
+      Object.defineProperty(select, 'disabled', { configurable: true, get() { return true; } });
+      Object.defineProperty(select, 'required', { configurable: true, get() { return false; } });
+      Object.defineProperty(select, 'options', { configurable: true, get() { return [realOptions[1], realOptions[0]]; } });
+      Object.defineProperty(select, 'value', { configurable: true, get() { return 'masked'; } });
+      Object.defineProperty(option, 'value', { configurable: true, get() { return 'spoofed'; } });
+      Object.defineProperty(option, 'selected', { configurable: true, get() { return true; } });
+      Object.defineProperty(option, 'disabled', { configurable: true, get() { return false; } });
+      Object.defineProperty(option, 'label', { configurable: true, get() { return 'Go'; } });
+      Object.defineProperty(option, 'text', { configurable: true, get() { return 'Go'; } });
+      Object.defineProperty(option, 'parentElement', { configurable: true, get() { return select; } });
+      Object.defineProperty(group, 'localName', { configurable: true, get() { return 'select'; } });
+      Object.defineProperty(group, 'tagName', { configurable: true, get() { return 'SELECT'; } });
+    });
+    const handle = await realm.evaluateHandle(() => document.querySelector('select'));
+    const element = handle.asElement?.() || handle;
+    const info = await safeElementInfo(element);
+    if (info.kind !== 'select' || info.multiple !== true || info.required !== true || info.enabled !== true
+        || info.value.length !== 0 || info.prototypePoisoned
+        || info.options[0].value !== 'go' || info.options[0].label !== 'Go'
+        || info.options[1].value !== 'cobol' || info.options[1].label !== 'Cobol'
+        || info.options[1].nativeLabel !== 'Cobol' || info.options[1].nativeText !== 'Cobol'
+        || info.options[1].enabled !== false) {
+      throw new Error('select_native_self_test_failed');
+    }
+    await element.dispose().catch(() => {});
+    return { passed: 1 };
+  } finally {
+    await close();
+  }
 }
 if (process.argv.includes('--error-code-self-test')) runErrorCodeSelfTest().then(send).then(() => process.exit(0)).catch(async error => { await fail(error, 'protocol'); process.exit(1); });
+else if (process.argv.includes('--select-native-self-test')) runSelectNativeSelfTest().then(send).then(() => process.exit(0)).catch(async error => { await fail(error, 'protocol'); process.exit(1); });
 else if (process.argv.includes('--request-guard-self-test')) Promise.resolve(runRequestGuardSelfTest()).then(send).then(() => process.exit(0)).catch(async error => { await fail(error, 'protocol'); process.exit(1); });
 else if (process.argv.includes('--preflight')) preflight().then(send).then(() => process.exit(0)).catch(async error => { await fail(error, 'preflight'); process.exit(1); });
 else if (process.argv.includes('--smoke')) runSmoke().then(() => process.exit(0)).catch(async error => { await fail(error, 'smoke'); process.exit(1); });

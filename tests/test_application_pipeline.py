@@ -50,6 +50,7 @@ def field(
     valid: bool = True,
     validity_flags=(),
     descriptors=(),
+    multiple: bool = False,
 ):
     return ObservedField(
         target_id,
@@ -82,6 +83,7 @@ def field(
         None,
         None,
         (),
+        multiple,
     )
 
 
@@ -478,6 +480,63 @@ def test_privacy_rejects_copying_protected_identifier_and_long_resume_span():
     assert validate_inference_privacy(copied, protected_values=(), source_text=long) is False
 
 
+def test_inference_privacy_checks_each_multi_select_item_independently() -> None:
+    target_id = field().target_id
+    protected_item = AutofillPlan(
+        answers=(FieldAnswer(target_id, ("safe", "ada@example.test"), 0.9, "x", "inference"),),
+        status="ready",
+        reason_code=PublicReasonCode.draft_ready,
+    )
+    assert not validate_inference_privacy(protected_item, protected_values=("ada@example.test",))
+
+    copied_value = "one two three four five six seven eight nine ten eleven twelve"
+    copied_item = AutofillPlan(
+        answers=(FieldAnswer(target_id, ("safe", copied_value), 0.9, "x", "inference"),),
+        status="ready",
+        reason_code=PublicReasonCode.draft_ready,
+    )
+    assert not validate_inference_privacy(copied_item, protected_values=(), source_text=copied_value)
+
+def test_resolve_privacy_flattens_configured_multi_values(monkeypatch) -> None:
+    target = field(name="nickname", label="Nickname")
+    profile = ApplicationProfile(field_answers=(
+        ConfiguredFieldAnswer("greenhouse", "skills", None, "select", ("python", "go")),
+    ))
+    monkeypatch.setattr(app.socket, "getaddrinfo", lambda *args, **kwargs: [(2, 1, 6, "", ("8.8.8.8", 443))])
+
+    class Client:
+        def __init__(self, **kwargs):
+            pass
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(app.httpx, "Client", Client)
+    monkeypatch.setattr(
+        app,
+        "_client_json",
+        lambda *args, **kwargs: {
+            "answers": [{
+                "target_id": target.target_id,
+                "value": "go",
+                "confidence": 0.9,
+                "reason": "copied",
+            }],
+            "safe_click_target_id": None,
+        },
+    )
+    result = resolve_with_llm(
+        observation(target),
+        job={"title": "Engineer"},
+        resume_context="safe",
+        profile_context=profile,
+        api_key="token",
+        base_url="https://ollama.example.test",
+    )
+    assert result.reason_code is PublicReasonCode.inference_privacy_violation
+
+
 def test_llm_parser_rejects_non_current_or_sensitive_fields():
     payload_for = lambda item: {
         "answers": [{"target_id": item.target_id, "value": "Ada", "confidence": 0.9, "reason": "x"}],
@@ -589,6 +648,18 @@ def test_hidden_sensitive_required_field_does_not_force_manual_reason():
     )
     assert plan.reason_code is not PublicReasonCode.required_sensitive_fields_manual
 
+def test_optional_value_missing_is_not_exempt_from_page_validation() -> None:
+    item = field(valid=False, validity_flags=("valueMissing",), value=None, required=False)
+    resume = ResumeContext("resume.txt", "text/plain", "", "0" * 64, -1, facts=ResumeFacts())
+    plan = _configured_and_profile_plan(
+        observation(item),
+        adapter=GreenhouseAdapter(),
+        context=ApplicationContext(),
+        profile=ApplicationProfile(),
+        resume=resume,
+    )
+    assert plan.reason_code is PublicReasonCode.page_validation_error
+
 
 def test_identity_collision_flag_is_a_manual_tombstone():
     item = field(
@@ -649,3 +720,362 @@ def test_readiness_signature_rejects_validity_safety_and_enabled_changes() -> No
     assert _observation_semantic_signature(first) == _observation_semantic_signature(renamed)
     swapped = replace(renamed, final_submit_target_ids=("safe-b",))
     assert _observation_semantic_signature(first) != _observation_semantic_signature(swapped)
+
+
+def test_observation_payload_rejects_multi_select_value_without_multiple() -> None:
+    payload = {
+        "observation_id": "obs-1",
+        "url": "https://boards.greenhouse.io/fixture/jobs/123",
+        "title": "Apply",
+        "site_markers": [],
+        "fields": [{
+            "target_id": "skills",
+            "field_key": "skills",
+            "kind": "select",
+            "label": "Skills",
+            "value": ["python", "go"],
+            "options": [
+                {"value": "python", "label": "Python", "enabled": True},
+                {"value": "go", "label": "Go", "enabled": True},
+            ],
+        }],
+        "buttons": [],
+        "final_submit_target_ids": [],
+        "errors": [],
+        "blockers": [],
+    }
+    with pytest.raises(Exception):
+        app._observation_from_payload(payload)
+
+
+def test_observation_payload_accepts_multi_select_list_and_rejects_scalar() -> None:
+    single = {
+        "observation_id": "obs-1",
+        "url": "https://boards.greenhouse.io/fixture/jobs/123",
+        "title": "Apply",
+        "site_markers": [],
+        "fields": [{
+            "target_id": "skills",
+            "field_key": "skills",
+            "kind": "select",
+            "label": "Skills",
+            "multiple": True,
+            "value": "python",
+            "options": [{"value": "python", "label": "Python", "enabled": True}],
+        }],
+        "buttons": [],
+        "final_submit_target_ids": [],
+        "errors": [],
+        "blockers": [],
+    }
+    with pytest.raises(Exception):
+        app._observation_from_payload(single)
+
+    multi = {
+        **single,
+        "fields": [{
+            "target_id": "skills",
+            "field_key": "skills",
+            "kind": "select",
+            "label": "Skills",
+            "multiple": True,
+            "value": ["python", "go"],
+            "options": [
+                {"value": "python", "label": "Python", "enabled": True},
+                {"value": "go", "label": "Go", "enabled": True},
+            ],
+        }],
+    }
+    parsed = app._observation_from_payload(multi)
+    assert parsed.fields[0].value == ("python", "go")
+    assert parsed.fields[0].multiple is True
+
+
+def test_observation_payload_rejects_non_select_list_value() -> None:
+    payload = {
+        "observation_id": "obs-1",
+        "url": "https://boards.greenhouse.io/fixture/jobs/123",
+        "title": "Apply",
+        "site_markers": [],
+        "fields": [{
+            "target_id": "name",
+            "field_key": "name",
+            "kind": "text",
+            "label": "Name",
+            "value": ["Ada"],
+        }],
+        "buttons": [],
+        "final_submit_target_ids": [],
+        "errors": [],
+        "blockers": [],
+    }
+    with pytest.raises(Exception):
+        app._observation_from_payload(payload)
+
+
+def test_observation_snapshot_persists_multiple_and_tuple_value_as_array() -> None:
+    item = field(kind="select", target_id="skills", label="Skills", multiple=True, value=("go", "python"))
+    item = replace(item, options=(ObservedOption("python", "Python", True), ObservedOption("go", "Go", True)))
+    obs = observation(item)
+    snapshot = app._observation_snapshot(obs)
+    assert snapshot["fields"][0]["multiple"] is True
+    assert snapshot["fields"][0]["value"] == ("go", "python")
+    encoded = json.dumps(snapshot, sort_keys=True)
+    assert "\"value\": [\"go\", \"python\"]" in encoded
+
+
+def test_llm_parser_accepts_multi_select_list_and_rejects_mismatches() -> None:
+    item = field(kind="select", target_id="skills", label="Skills", multiple=True, value=None)
+    item = replace(item, options=(ObservedOption("python", "Python", True), ObservedOption("go", "Go", True)))
+    obs = observation(item)
+    plan = parse_llm_plan(
+        {"answers": [{"target_id": item.target_id, "value": ["go", "python"], "confidence": 0.9, "reason": "x"}], "safe_click_target_id": None},
+        obs,
+    )
+    assert plan.status == "ready"
+    assert plan.answers[0].value == ("python", "go")
+
+    scalar = parse_llm_plan(
+        {"answers": [{"target_id": item.target_id, "value": "python", "confidence": 0.9, "reason": "x"}], "safe_click_target_id": None},
+        obs,
+    )
+    assert scalar.status == "manual"
+
+    single = replace(item, multiple=False)
+    list_for_single = parse_llm_plan(
+        {"answers": [{"target_id": single.target_id, "value": ["python"], "confidence": 0.9, "reason": "x"}], "safe_click_target_id": None},
+        observation(single),
+    )
+    assert list_for_single.status == "manual"
+
+
+def test_llm_multi_select_rejects_non_string_items_before_normalization() -> None:
+    item = field(kind="select", target_id="numeric-option", label="Skills", multiple=True, value=None)
+    item = replace(item, options=(ObservedOption("1", "One", True),))
+    plan = parse_llm_plan(
+        {
+            "answers": [{"target_id": item.target_id, "value": [1], "confidence": 0.9, "reason": "x"}],
+            "safe_click_target_id": None,
+        },
+        observation(item),
+    )
+    assert plan.status == "manual"
+
+
+def test_observation_payload_enforces_select_mode_metadata() -> None:
+    base = {
+        "observation_id": "obs-1",
+        "url": "https://boards.greenhouse.io/fixture/jobs/123",
+        "title": "Apply",
+        "site_markers": [],
+        "buttons": [],
+        "final_submit_target_ids": [],
+        "errors": [],
+        "blockers": [],
+    }
+    scalar_select = {
+        **base,
+        "fields": [{
+            "target_id": "skill",
+            "field_key": "skill",
+            "kind": "select",
+            "value": "python",
+            "options": [{"value": "python", "label": "Python", "enabled": True}],
+        }],
+    }
+    assert app._observation_from_payload(scalar_select).fields[0].multiple is False
+    for field_payload in (
+        {
+            "target_id": "skill",
+            "field_key": "skill",
+            "kind": "select",
+            "multiple": False,
+
+            "options": [{"value": "python", "label": "Python", "enabled": True}],
+        },
+        {
+            "target_id": "skill",
+            "field_key": "skill",
+            "kind": "select",
+            "multiple": True,
+            "value": None,
+            "options": [{"value": "python", "label": "Python", "enabled": True}],
+        },
+        {
+            "target_id": "name",
+            "field_key": "name",
+            "kind": "text",
+            "multiple": True,
+            "value": "Ada",
+        },
+        {
+            "target_id": "skill",
+            "field_key": "skill",
+            "kind": "select",
+            "multiple": 1,
+            "value": [],
+        },
+    ):
+        with pytest.raises(Exception):
+            app._observation_from_payload({**base, "fields": [field_payload]})
+    empty_multi = {
+        **base,
+        "fields": [{
+            "target_id": "skill",
+            "field_key": "skill",
+            "kind": "select",
+            "multiple": True,
+            "value": [],
+            "options": [{"value": "python", "label": "Python", "enabled": True}],
+        }],
+    }
+    assert app._observation_from_payload(empty_multi).fields[0].value == ()
+
+@pytest.mark.parametrize(
+    "field_payload",
+    (
+        {
+            "target_id": "skills", "field_key": "skills", "kind": "SeLeCt",
+            "multiple": True, "value": [], "options": [],
+        },
+        {
+            "target_id": "skills", "field_key": "skills", "kind": "select",
+            "multiple": True, "value": ["a"],
+            "options": [
+                {"value": "a", "label": "A", "enabled": True},
+                {"value": "a", "label": "A2", "enabled": True},
+            ],
+        },
+        {
+            "target_id": "skills", "field_key": "skills", "kind": "select",
+            "multiple": True, "value": ["z"],
+            "options": [{"value": "a", "label": "A", "enabled": True}],
+        },
+        {
+            "target_id": "skills", "field_key": "skills", "kind": "select",
+            "multiple": True, "value": ["b"],
+            "options": [
+                {"value": "a", "label": "A", "enabled": True},
+                {"value": "b", "label": "B", "enabled": False},
+            ],
+        },
+        {
+            "target_id": "skills", "field_key": "skills", "kind": "select",
+            "multiple": True, "value": ["a", "a"],
+            "options": [{"value": "a", "label": "A", "enabled": True}],
+        },
+        {
+            "target_id": "skills", "field_key": "skills", "kind": "select",
+            "multiple": True, "value": ["b", "a"],
+            "options": [
+                {"value": "a", "label": "A", "enabled": True},
+                {"value": "b", "label": "B", "enabled": True},
+            ],
+        },
+        {
+            "target_id": "skill", "field_key": "skill", "kind": "select",
+            "value": "b",
+            "options": [
+                {"value": "a", "label": "A", "enabled": True},
+                {"value": "b", "label": "B", "enabled": False},
+            ],
+        },
+    ),
+)
+def test_observation_payload_rejects_noncanonical_or_invalid_select_state(field_payload) -> None:
+    payload = {
+        "observation_id": "obs-1",
+        "url": "https://boards.greenhouse.io/fixture/jobs/123",
+        "title": "Apply",
+        "site_markers": [],
+        "fields": [field_payload],
+        "buttons": [],
+        "final_submit_target_ids": [],
+        "errors": [],
+        "blockers": [],
+    }
+    with pytest.raises(app.BrowserAdapterError, match="protocol_invalid_response"):
+        app._observation_from_payload(payload)
+
+def test_observation_payload_preserves_invalid_select_evidence_with_flags() -> None:
+    base = {
+        "observation_id": "obs-1",
+        "url": "https://boards.greenhouse.io/fixture/jobs/123",
+        "title": "Apply",
+        "site_markers": [],
+        "buttons": [],
+        "final_submit_target_ids": [],
+        "errors": [],
+        "blockers": [],
+    }
+    ambiguous = {
+        **base,
+        "fields": [{
+            "target_id": "skills",
+            "field_key": "skills",
+            "kind": "select",
+            "multiple": True,
+            "valid": False,
+            "validity_flags": ["options_ambiguous"],
+            "value": ["a", "a"],
+            "options": [
+                {"value": "a", "label": "A", "enabled": True},
+                {"value": "a", "label": "A2", "enabled": True},
+            ],
+        }],
+    }
+    parsed = app._observation_from_payload(ambiguous).fields[0]
+    assert parsed.valid is False
+    assert parsed.value == ("a", "a")
+
+    invalid_selection = {
+        **base,
+        "fields": [{
+            "target_id": "skills",
+            "field_key": "skills",
+            "kind": "select",
+            "multiple": True,
+            "valid": False,
+            "validity_flags": ["invalid_selected_option"],
+            "value": ["unknown"],
+            "options": [{"value": "a", "label": "A", "enabled": True}],
+        }],
+    }
+    parsed = app._observation_from_payload(invalid_selection).fields[0]
+    assert parsed.validity_flags == ("invalid_selected_option",)
+
+
+def test_action_evidence_rejects_noncanonical_multi_select_and_preserves_existing() -> None:
+    item = field(kind="select", target_id="skills", label="Skills", multiple=True, value=None)
+    item = replace(item, options=(ObservedOption("python", "Python", True), ObservedOption("go", "Go", True)))
+    plan = AutofillPlan(
+        answers=(FieldAnswer(item.target_id, ("rust",), 1.0, "x", "configured"),),
+        status="ready",
+        reason_code=PublicReasonCode.draft_ready,
+    )
+    planned, rejected = plan_action_evidence(observation(item), plan)
+    assert rejected and rejected[0]["reason"] == "invalid_value"
+
+    existing = replace(item, value=("python", "go"))
+    same_plan = AutofillPlan(
+        answers=(FieldAnswer(existing.target_id, ("python", "go"), 1.0, "x", "configured"),),
+        status="ready",
+        reason_code=PublicReasonCode.draft_ready,
+    )
+    planned, rejected = plan_action_evidence(observation(existing), same_plan)
+    assert not planned and not rejected
+
+
+def test_inference_request_advertises_multiple_for_multi_select() -> None:
+    item = field(kind="select", target_id="skills", label="Skills", multiple=True, value=None)
+    item = replace(item, options=(ObservedOption("python", "Python", True), ObservedOption("go", "Go", True)))
+    request = build_inference_request(
+        observation(item),
+        job={"title": "x"},
+        resume_text="",
+        profile_facts={},
+    )
+    field_payload = request["fields"][0]
+    assert field_payload["multiple"] is True
+    assert "enabled" in field_payload["options"][0]
+    assert request["answers"] == []

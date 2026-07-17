@@ -135,11 +135,13 @@ every future adapter and preference feature.
 
 - [x] Close the runnable browser-adapter verification gate with final action-time network quiet/revalidation, CDP-attributed post-mutation fetch/WebSocket/popup denial, exact implicit-favicon suppression, and independently verified detached owner/browser test cleanup. The host-only `npm run puppeteer-verify` gate runs every automated adapter check (including the supported-host headed diagnostic) and deselects only the physical headed review-window survival check; full package, Puppeteer smoke, container smoke, lock, and CLI checks pass.
 
+- [x] Close the supplied live Greenhouse compatibility gap by making both CONNECT relay directions tolerate peer-close/write errors without crashing the protocol owner, while preserving authorization revalidation, byte budgets, terminal attribution, and transport-token isolation. Deterministic local RST coverage is in `tests/test_puppeteer_adapter.py::test_connect_relay_peer_close_does_not_crash_protocol_owner`; the live route was observed successfully after the fix and the independent Wave 28 safety review returned READY.
+
+- [x] Deliver native `<input type="button">` ATS continuation with offline click permission, native value-bound live identity, final-like value denial, hostile-listener terminal/offline enforcement, and zero final-submit calls. Coverage is in `tests/test_puppeteer_adapter.py`, `tests/test_application_pipeline.py`, and `tests/test_application_workflow.py`; corrected independent Wave 29 safety and hostile-listener reviews returned READY.
+
+- [x] Deliver native `<select multiple>` ATS autofill with immutable tuple values, native descriptor-based mutation, fail-closed prototype poisoning, isolated-realm self-test, deterministic TOCTOU drift detection via child-only nonce, select-only post-mutation network gating, conventional placeholder exemption, observation quarantine for invalid/ambiguous evidence, and zero final-submit calls. Coverage is in `tests/test_puppeteer_adapter.py`, `tests/test_application_contracts.py`, `tests/test_application_pipeline.py`, `tests/test_application_preferences.py`, `tests/test_application_profile.py`, and `tests/test_application_workflow.py`; full package (726 passed, 2 skipped), select-native-self-test, and request-guard-self-test (9/9) pass, and both corrected independent Wave 30 reviews returned READY.
+
 ## Open gaps and blockers
-
-- [ ] Native `<select multiple>` ATS autofill remains unsupported. A bounded cross-layer attempt was fully reverted after Python contract regressions and three native Puppeteer continuation failures; no partial representation or browser mutation path remains. Revisit only with an immutable multi-value contract and fixture-first whole-set validation that preserves scalar selects, generation/network gates, and zero final-submit calls.
-
-- [ ] Native `<input type="button">` ATS continuation support remains unimplemented. The attempted lane was fully reverted after `RUN_PUPPETEER_INTEGRATION=1` browser coverage did not pass for the safe input-button click. Revisit only with a clean browser fixture; preserve existing hostile-listener, transport-token, no-network, final-like, and no-submit assertions.
 
 - [ ] Physical headed review-window survival remains a manual host gate requiring a benign human click and tab/window close. It is intentionally excluded by exact test name from `npm run puppeteer-verify`; no code path automates the physical action.
 

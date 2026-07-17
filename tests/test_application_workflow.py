@@ -1993,3 +1993,513 @@ def test_browser_failure_write_failure_fails_closed_without_unverified_index(
         assert (run_dir / "browser_failure.json").exists()
         payload = json.loads((run_dir / "browser_failure.json").read_text(encoding="utf-8"))
         assert payload["code"] == "browser_command_failed"
+
+
+def test_workflow_dispatches_select_tuple_for_multi_select(monkeypatch, tmp_path: Path) -> None:
+    class MultiSelectSession(FakeSession):
+        select_calls: list[tuple[str, object]] = []
+
+        def observe(self):
+            payload = _payload()
+            payload["fields"] = [{
+                "target_id": "skills",
+                "field_key": "skills",
+                "kind": "select",
+                "label": "Skills",
+                "multiple": True,
+                "visible": True,
+                "enabled": True,
+                "value": [],
+                "options": [
+                    {"value": "python", "label": "Python", "enabled": True},
+                    {"value": "go", "label": "Go", "enabled": True},
+                ],
+            }]
+            payload["final_submit_target_ids"] = []
+            return payload
+
+        def select(self, target_id: str, value: object) -> dict[str, object]:
+            type(self).select_calls.append((target_id, value))
+            return {}
+
+    claims = [ApplicationClaim(
+        301,
+        {"id": 301, "canonical_url": "https://boards.greenhouse.io/a/jobs/301", "title": "Multi"},
+    )]
+    monkeypatch.setattr(app, "PuppeteerSession", MultiSelectSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in (
+        "register_application_artifact",
+        "register_application_session",
+        "register_application_owner_process",
+        "register_application_browser_process",
+    ):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({
+        "field_answers": [
+            {"ats": "greenhouse", "label": "Skills", "kind": "select", "value": ["go", "python"]},
+        ],
+    }))
+
+    result = asyncio.run(app.run_application_workflow(
+        object(),
+        resume_file=resume,
+        application_profile_json=profile,
+        artifact_root=root,
+        headed=True,
+    ))
+    assert result[0]["status"] == "manual"
+    assert result[0]["reason_code"] == "field_value_not_retained"
+    assert MultiSelectSession.select_calls == [("skills", ("python", "go"))]
+    run_dir = root / "run-301"
+    actions = json.loads((run_dir / "actions.json").read_text(encoding="utf-8"))
+    assert actions["actions"][0]["action"] == "select"
+    assert actions["actions"][0]["target_id"] == "skills"
+
+
+def test_workflow_privacy_flattens_configured_multi_values(monkeypatch, tmp_path: Path) -> None:
+    class PrivacySession(FakeSession):
+        def observe(self):
+            payload = _payload()
+            payload["fields"] = [
+                {
+                    "target_id": "skills",
+                    "field_key": "skills",
+                    "kind": "select",
+                    "label": "Skills",
+                    "multiple": True,
+                    "visible": True,
+                    "enabled": True,
+                    "value": [],
+                    "options": [
+                        {"value": "python", "label": "Python", "enabled": True},
+                        {"value": "go", "label": "Go", "enabled": True},
+                    ],
+                },
+                {
+                    "target_id": "nickname",
+                    "field_key": "nickname",
+                    "kind": "text",
+                    "label": "Nickname",
+                    "visible": True,
+                    "enabled": True,
+                    "value": None,
+                },
+            ]
+            payload["final_submit_target_ids"] = []
+            return payload
+
+    claims = [ApplicationClaim(
+        304,
+        {"id": 304, "canonical_url": "https://boards.greenhouse.io/a/jobs/304", "title": "Privacy"},
+    )]
+    monkeypatch.setattr(app, "PuppeteerSession", PrivacySession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in (
+        "register_application_artifact",
+        "register_application_session",
+        "register_application_owner_process",
+        "register_application_browser_process",
+    ):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        app,
+        "resolve_with_llm",
+        lambda *args, **kwargs: app.AutofillPlan(
+            answers=(app.FieldAnswer("nickname", "go", 0.9, "copied", "inference"),),
+            status="ready",
+            reason_code=app.PublicReasonCode.draft_ready,
+        ),
+    )
+
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({
+        "field_answers": [
+            {"ats": "greenhouse", "label": "Skills", "kind": "select", "value": ["python", "go"]},
+        ],
+    }))
+    result = asyncio.run(app.run_application_workflow(
+        object(),
+        limit=1,
+        resume_file=resume,
+        application_profile_json=profile,
+        artifact_root=tmp_path / "artifacts",
+        headed=True,
+    ))
+    assert result[0]["reason_code"] == "inference_privacy_violation"
+
+def test_workflow_preserves_ambiguous_select_for_page_validation(monkeypatch, tmp_path: Path) -> None:
+    class AmbiguousSession(FakeSession):
+        def observe(self):
+            payload = _payload()
+            payload["fields"] = [{
+                "target_id": "skills",
+                "field_key": "skills",
+                "kind": "select",
+                "label": "Skills",
+                "multiple": True,
+                "visible": True,
+                "enabled": True,
+                "valid": False,
+                "validity_flags": ["options_ambiguous"],
+                "value": ["a", "a"],
+                "options": [
+                    {"value": "a", "label": "A", "enabled": True},
+                    {"value": "a", "label": "A2", "enabled": True},
+                ],
+            }]
+            payload["final_submit_target_ids"] = []
+            return payload
+
+    claims = [ApplicationClaim(
+        305,
+        {"id": 305, "canonical_url": "https://boards.greenhouse.io/a/jobs/305", "title": "Ambiguous"},
+    )]
+    monkeypatch.setattr(app, "PuppeteerSession", AmbiguousSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in (
+        "register_application_artifact",
+        "register_application_session",
+        "register_application_owner_process",
+        "register_application_browser_process",
+    ):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    result = asyncio.run(app.run_application_workflow(
+        object(),
+        limit=1,
+        resume_file=resume,
+        artifact_root=tmp_path / "artifacts",
+        headed=True,
+    ))
+    assert result[0]["reason_code"] == "page_validation_error"
+
+def test_workflow_retention_requires_exact_multi_select_tuple(monkeypatch, tmp_path: Path) -> None:
+    class DriftingMultiSelectSession(FakeSession):
+        def __init__(self, manifest, screenshot_root=None):
+            super().__init__(manifest, screenshot_root)
+            self.observed: list[object] = []
+
+        def observe(self):
+            payload = _payload()
+            current = [] if len(self.observed) == 0 else ["go"]
+            self.observed.append(current)
+            payload["fields"] = [{
+                "target_id": "skills",
+                "field_key": "skills",
+                "kind": "select",
+                "label": "Skills",
+                "multiple": True,
+                "visible": True,
+                "enabled": True,
+                "value": current,
+                "options": [
+                    {"value": "python", "label": "Python", "enabled": True},
+                    {"value": "go", "label": "Go", "enabled": True},
+                ],
+            }]
+            payload["final_submit_target_ids"] = []
+            return payload
+
+        def select(self, target_id: str, value: object) -> dict[str, object]:
+            return {}
+
+    claims = [ApplicationClaim(
+        302,
+        {"id": 302, "canonical_url": "https://boards.greenhouse.io/a/jobs/302", "title": "Drifting"},
+    )]
+    monkeypatch.setattr(app, "PuppeteerSession", DriftingMultiSelectSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in (
+        "register_application_artifact",
+        "register_application_session",
+        "register_application_owner_process",
+        "register_application_browser_process",
+    ):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({
+        "field_answers": [
+            {"ats": "greenhouse", "label": "Skills", "kind": "select", "value": ["python", "go"]},
+        ],
+    }))
+
+    result = asyncio.run(app.run_application_workflow(
+        object(),
+        resume_file=resume,
+        application_profile_json=profile,
+        artifact_root=root,
+        headed=True,
+    ))
+    assert result[0]["status"] == "manual"
+    assert result[0]["reason_code"] == "field_value_not_retained"
+
+
+def test_workflow_persists_multi_select_value_as_json_array(monkeypatch, tmp_path: Path) -> None:
+    class TupleMultiSelectSession(FakeSession):
+        def observe(self):
+            payload = _payload()
+            payload["fields"] = [{
+                "target_id": "skills",
+                "field_key": "skills",
+                "kind": "select",
+                "label": "Skills",
+                "multiple": True,
+                "visible": True,
+                "enabled": True,
+                "value": [],
+                "options": [
+                    {"value": "python", "label": "Python", "enabled": True},
+                    {"value": "go", "label": "Go", "enabled": True},
+                ],
+            }]
+            payload["final_submit_target_ids"] = ["final"]
+            return payload
+
+        def observe_after_mutation(self):
+            payload = _payload()
+            payload["fields"] = [{
+                "target_id": "skills",
+                "field_key": "skills",
+                "kind": "select",
+                "label": "Skills",
+                "multiple": True,
+                "visible": True,
+                "enabled": True,
+                "value": ["python", "go"],
+                "options": [
+                    {"value": "python", "label": "Python", "enabled": True},
+                    {"value": "go", "label": "Go", "enabled": True},
+                ],
+            }]
+            payload["final_submit_target_ids"] = ["final"]
+            return payload
+
+        def select(self, target_id: str, value: object) -> dict[str, object]:
+            return {}
+
+    # The loop calls observe() each iteration; override the second call.
+    class ObservableMultiSelectSession(TupleMultiSelectSession):
+        call_count = 0
+        def observe(self):
+            type(self).call_count += 1
+            if type(self).call_count == 1:
+                return super().observe()
+            return self.observe_after_mutation()
+
+    claims = [ApplicationClaim(
+        303,
+        {"id": 303, "canonical_url": "https://boards.greenhouse.io/a/jobs/303", "title": "Persist"},
+    )]
+    monkeypatch.setattr(app, "PuppeteerSession", ObservableMultiSelectSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in (
+        "register_application_artifact",
+        "register_application_session",
+        "register_application_owner_process",
+        "register_application_browser_process",
+    ):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({
+        "field_answers": [
+            {"ats": "greenhouse", "label": "Skills", "kind": "select", "value": ["python", "go"]},
+        ],
+    }))
+
+    result = asyncio.run(app.run_application_workflow(
+        object(),
+        resume_file=resume,
+        application_profile_json=profile,
+        artifact_root=root,
+        headed=True,
+    ))
+    assert result[0]["status"] == "review_ready"
+    run_dir = root / "run-303"
+    saved = json.loads((run_dir / "iterations/0002/observation.json").read_text(encoding="utf-8"))
+    assert saved["fields"][0]["multiple"] is True
+    assert saved["fields"][0]["value"] == ["python", "go"]
+    iteration_obs = json.loads((run_dir / "iterations/0001/observation.json").read_text(encoding="utf-8"))
+    assert iteration_obs["fields"][0]["value"] == []
+
+
+def test_workflow_required_empty_multi_select_dispatches_and_retains(monkeypatch, tmp_path: Path) -> None:
+    class RequiredMultiSession(FakeSession):
+        def observe(self):
+            payload = _payload()
+            payload["fields"] = [{
+                "target_id": "skills",
+                "field_key": "skills",
+                "kind": "select",
+                "label": "Skills",
+                "multiple": True,
+                "visible": True,
+                "enabled": True,
+                "required": True,
+                "valid": False,
+                "validity_flags": ["valueMissing"],
+                "value": [],
+                "options": [
+                    {"value": "python", "label": "Python", "enabled": True},
+                    {"value": "go", "label": "Go", "enabled": True},
+                ],
+            }]
+            payload["final_submit_target_ids"] = ["final"]
+            return payload
+
+        def observe_after_mutation(self):
+            payload = _payload()
+            payload["fields"] = [{
+                "target_id": "skills",
+                "field_key": "skills",
+                "kind": "select",
+                "label": "Skills",
+                "multiple": True,
+                "visible": True,
+                "enabled": True,
+                "required": True,
+                "valid": True,
+                "validity_flags": [],
+                "value": ["python", "go"],
+                "options": [
+                    {"value": "python", "label": "Python", "enabled": True},
+                    {"value": "go", "label": "Go", "enabled": True},
+                ],
+            }]
+            payload["final_submit_target_ids"] = ["final"]
+            return payload
+
+        def select(self, target_id: str, value: object) -> dict[str, object]:
+            return {}
+
+    class ObservableRequiredMultiSession(RequiredMultiSession):
+        call_count = 0
+        def observe(self):
+            type(self).call_count += 1
+            if type(self).call_count == 1:
+                return super().observe()
+            return self.observe_after_mutation()
+
+    claims = [ApplicationClaim(
+        304,
+        {"id": 304, "canonical_url": "https://boards.greenhouse.io/a/jobs/304", "title": "RequiredMulti"},
+    )]
+    monkeypatch.setattr(app, "PuppeteerSession", ObservableRequiredMultiSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in (
+        "register_application_artifact",
+        "register_application_session",
+        "register_application_owner_process",
+        "register_application_browser_process",
+    ):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({
+        "field_answers": [
+            {"ats": "greenhouse", "label": "Skills", "kind": "select", "value": ["python", "go"]},
+        ],
+    }))
+
+    result = asyncio.run(app.run_application_workflow(
+        object(),
+        resume_file=resume,
+        application_profile_json=profile,
+        artifact_root=root,
+        headed=True,
+    ))
+    assert result[0]["status"] == "review_ready"
+    run_dir = root / "run-304"
+    saved = json.loads((run_dir / "iterations/0002/observation.json").read_text(encoding="utf-8"))
+    assert saved["fields"][0]["value"] == ["python", "go"]
+    assert saved["fields"][0]["multiple"] is True
+
+
+def test_workflow_nonempty_invalid_multi_select_is_page_validation_error(monkeypatch, tmp_path: Path) -> None:
+    class InvalidMultiSession(FakeSession):
+        def observe(self):
+            payload = _payload()
+            payload["fields"] = [{
+                "target_id": "skills",
+                "field_key": "skills",
+                "kind": "select",
+                "label": "Skills",
+                "multiple": True,
+                "visible": True,
+                "enabled": True,
+                "required": True,
+                "valid": False,
+                "validity_flags": ["valueMissing", "customError"],
+                "value": ["python"],
+                "options": [
+                    {"value": "python", "label": "Python", "enabled": True},
+                    {"value": "go", "label": "Go", "enabled": True},
+                ],
+            }]
+            payload["final_submit_target_ids"] = ["final"]
+            return payload
+
+    claims = [ApplicationClaim(
+        305,
+        {"id": 305, "canonical_url": "https://boards.greenhouse.io/a/jobs/305", "title": "InvalidMulti"},
+    )]
+    monkeypatch.setattr(app, "PuppeteerSession", InvalidMultiSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in (
+        "register_application_artifact",
+        "register_application_session",
+        "register_application_owner_process",
+        "register_application_browser_process",
+    ):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({
+        "field_answers": [
+            {"ats": "greenhouse", "label": "Skills", "kind": "select", "value": ["python", "go"]},
+        ],
+    }))
+
+    result = asyncio.run(app.run_application_workflow(
+        object(),
+        resume_file=resume,
+        application_profile_json=profile,
+        artifact_root=root,
+        headed=True,
+    ))
+    assert result[0]["status"] == "manual"
+    assert result[0]["reason_code"] == "page_validation_error"

@@ -1034,6 +1034,7 @@ async function launch(command = {}) {
       requestTerminalCleanup('unexpected_target', 1, 'unexpected_target');
       return;
     }
+    if (firstApplicantMutation && reviewState !== 'open_guarded') recordUnsafePageNetworkIntent();
     target.page().then(child => {
       if (!child || child === page) return;
       child.close().catch(() => {});

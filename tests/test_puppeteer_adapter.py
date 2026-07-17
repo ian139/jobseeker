@@ -70,6 +70,10 @@ SCRIPT_WEBSOCKET_CONTINUATION_FIXTURE = SUBMIT_CONTINUATION_FIXTURE.replace(
     b'history.pushState({}, "", "/fixture/jobs/123?gh_src=step-2");document.body.dataset.continued="yes"',
     b'new WebSocket("wss://www.google.com/jobs-assistant-probe")',
 )
+SCRIPT_POPUP_CONTINUATION_FIXTURE = SUBMIT_CONTINUATION_FIXTURE.replace(
+    b'history.pushState({}, "", "/fixture/jobs/123?gh_src=step-2");document.body.dataset.continued="yes"',
+    b'window.open("https://www.google.com/jobs-assistant-probe")',
+)
 BLOCKER_FIXTURE = b"""<!doctype html><form>
 <label>First Name <input name="first_name" required></label>
 <button type="button" id="offline">Continue</button>
@@ -162,6 +166,7 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
             else SCRIPT_FAVICON_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-favicon-script")
             else SCRIPT_CROSS_ORIGIN_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-cross-origin-script")
             else SCRIPT_WEBSOCKET_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-websocket-script")
+            else SCRIPT_POPUP_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-popup-script")
             else CROSS_JOB_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-cross-job")
             else FINAL_LIKE_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-final")
             else SUBMIT_CONTINUATION_FIXTURE if self.path.startswith("/continue-native")
@@ -199,13 +204,13 @@ def _validated_emergency_cleanup(identities: dict, manifest: Path) -> bool:
             return _capture_process_identity(identity["pid"]) == identity
         except BrowserAdapterError:
             return False
+
     def group_exists(pgid: int) -> bool:
         try:
             os.killpg(pgid, 0)
             return True
         except ProcessLookupError:
             return False
-
 
     try:
         current = json.loads(manifest.read_text(encoding="utf-8"))
@@ -223,24 +228,37 @@ def _validated_emergency_cleanup(identities: dict, manifest: Path) -> bool:
                 return False
             if type(identity["birth"]) is not str or not identity["birth"] or len(identity["birth"]) > 256:
                 return False
-        if current.get("state") != "open_guarded":
-            return False
         if current.get("owner_identity") != owner or current.get("browser_identity") != browser:
             return False
         current_pid = os.getpid()
         current_pgid = os.getpgrp()
         if any(identity["pid"] == current_pid or identity["pgid"] == current_pgid for identity in (owner, browser)):
             return False
-        if not matches(owner) or not matches(browser):
-            return False
         groups = {browser["pgid"], owner["pgid"]}
-        for pgid in groups:
+        if current.get("state") == "closed":
+            return current.get("cleanup") is True and all(not group_exists(pgid) for pgid in groups)
+        if current.get("state") != "open_guarded":
+            return False
+        identity_matches = {
+            identity["pgid"]: matches(identity)
+            for identity in (owner, browser)
+        }
+        verified_groups = {
+            pgid
+            for pgid, verified in identity_matches.items()
+            if verified
+        }
+        unverified_group_present = any(
+            not verified and group_exists(pgid)
+            for pgid, verified in identity_matches.items()
+        )
+        for pgid in verified_groups:
             try:
                 os.killpg(pgid, signal.SIGTERM)
             except ProcessLookupError:
                 pass
         time.sleep(0.25)
-        for pgid in groups:
+        for pgid in verified_groups:
             if group_exists(pgid):
                 try:
                     os.killpg(pgid, signal.SIGKILL)
@@ -249,9 +267,9 @@ def _validated_emergency_cleanup(identities: dict, manifest: Path) -> bool:
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             if all(not group_exists(pgid) for pgid in groups):
-                return True
+                return not unverified_group_present
             time.sleep(0.05)
-        return all(not group_exists(pgid) for pgid in groups)
+        return False
     except (KeyError, TypeError, ValueError, OSError, AttributeError, json.JSONDecodeError):
         return False
 
@@ -614,6 +632,7 @@ def test_submit_typed_nonfinal_continuation_click_uses_framed_offline_protocol(f
         "continue-native-favicon-script",
         "continue-native-cross-origin-script",
         "continue-native-websocket-script",
+        "continue-native-popup-script",
     ),
 )
 def test_script_network_request_after_click_remains_terminal(fixture_server, endpoint):
@@ -701,8 +720,17 @@ def test_lever_session_uses_selected_policy_and_keeps_final_submit_manual(fixtur
     os.name != "nt" and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"),
     reason="headed Chromium requires a Linux display",
 )
+@pytest.mark.parametrize(
+    "browser_exits_before_cleanup",
+    (False, True),
+    ids=("both-live", "browser-already-absent"),
+)
 @BROWSER_INTEGRATION_SKIP
-def test_release_survives_normal_helper_exit_and_heartbeat(fixture_server, tmp_path):
+def test_release_survives_normal_helper_exit_and_heartbeat(
+    fixture_server,
+    tmp_path,
+    browser_exits_before_cleanup,
+):
     """A released owner survives normal interpreter shutdown without a guardian."""
     run_dir = tmp_path / "run"
     manifest = run_dir / "review_session.json"
@@ -780,6 +808,17 @@ finally:
                 break
             time.sleep(0.1)
         assert len(heartbeat_values) >= 2, "released owner did not emit a second heartbeat"
+        if browser_exits_before_cleanup:
+            os.killpg(browser["pgid"], signal.SIGKILL)
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    os.killpg(browser["pgid"], 0)
+                except ProcessLookupError:
+                    break
+                if time.monotonic() >= deadline:
+                    pytest.fail("browser process group survived forced pre-cleanup exit")
+                time.sleep(0.05)
     finally:
         if identities is not None:
             assert _validated_emergency_cleanup(identities, manifest)

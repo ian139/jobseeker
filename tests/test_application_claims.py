@@ -2381,6 +2381,100 @@ def test_review_details_browser_failure_invalid_stage_operation_rejected(
     root.close()
 
 
+@pytest.mark.parametrize(
+    ("stage", "operation"),
+    [
+        ("startup", "fill"),
+        ("navigation", "observe"),
+        ("observation", "fill"),
+        ("mutation", "start"),
+        ("handoff", "close"),
+        ("cleanup", "goto"),
+    ],
+)
+def test_review_details_browser_failure_cross_paired_stage_operation_rejected(
+    tmp_path: Path, stage: str, operation: str
+) -> None:
+    """Reject valid stage and operation values that are not an emitted pair."""
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    failure = _valid_browser_failure()
+    failure["stage"] = stage
+    failure["operation"] = operation
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="failed",
+        reason_code="browser_error",
+        manifest_stage="failed",
+        artifacts={"browser_failure": failure},
+    )
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+def test_review_details_missing_latest_rejected(tmp_path: Path) -> None:
+    """A current manifest must always include the bounded latest metadata."""
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="review_ready",
+        reason_code="draft_ready",
+        manifest_stage="finished",
+        artifacts={
+            "observation": _valid_observation(),
+            "plan": _valid_plan(),
+            "actions": _valid_actions(),
+        },
+    )
+    run_dir = tmp_path / "artifacts" / f"run-{run_id}"
+    manifest_path = run_dir / "run.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["latest"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
+@pytest.mark.parametrize(
+    "latest",
+    [
+        None,
+        {"iteration": 1},
+        {"stage": "finished"},
+        {"iteration": "1", "stage": "finished"},
+        {"iteration": -1, "stage": "finished"},
+        {"iteration": 1, "stage": "bogus"},
+    ],
+)
+def test_review_details_malformed_latest_rejected(
+    tmp_path: Path, latest: Any
+) -> None:
+    """latest must be a dict with bounded iteration and a known review stage."""
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    root, run_id, _ = _review_details_run(
+        conn,
+        tmp_path,
+        status="review_ready",
+        reason_code="draft_ready",
+        manifest_stage="finished",
+        artifacts={
+            "observation": _valid_observation(),
+            "plan": _valid_plan(),
+            "actions": _valid_actions(),
+        },
+        manifest={"latest": latest},
+    )
+    with pytest.raises(RuntimeError, match="manifest_error"):
+        get_application_review_details(conn, run_id=run_id, artifact_root=root)
+    root.close()
+
+
 def test_review_details_invalid_observation_blocker_code_rejected(tmp_path: Path) -> None:
     conn = connect(tmp_path / "jobs.sqlite3")
     _initialize(conn, tmp_path)

@@ -2117,33 +2117,26 @@ _PUBLIC_BLOCKER_CODES = frozenset(
         "observation_too_large",
     }
 )
-_BROWSER_FAILURE_STAGES = frozenset(
+# Producer-valid (stage, operation) pairs derived from application.py callsites.
+_BROWSER_FAILURE_PAIRS = frozenset(
     {
-        "startup",
-        "navigation",
-        "observation",
-        "blocker",
-        "mutation",
-        "handoff",
-        "final",
-        "cleanup",
-    }
-)
-_BROWSER_FAILURE_OPERATIONS = frozenset(
-    {
-        "start",
-        "goto",
-        "screenshot",
-        "observe",
-        "route",
-        "click_offline",
-        "upload",
-        "select",
-        "check",
-        "fill",
-        "prepare_handoff",
-        "commit_handoff",
-        "close",
+        ("startup", "start"),
+        ("navigation", "goto"),
+        ("observation", "observe"),
+        ("observation", "route"),
+        ("observation", "screenshot"),
+        ("blocker", "screenshot"),
+        ("final", "screenshot"),
+        ("handoff", "screenshot"),
+        ("mutation", "route"),
+        ("mutation", "click_offline"),
+        ("mutation", "upload"),
+        ("mutation", "select"),
+        ("mutation", "check"),
+        ("mutation", "fill"),
+        ("handoff", "prepare_handoff"),
+        ("handoff", "commit_handoff"),
+        ("cleanup", "close"),
     }
 )
 _REVIEW_ARTIFACT_PATHS = {
@@ -2255,12 +2248,13 @@ def _read_review_run_manifest(run: Any, run_id: int, job_id: int) -> dict[str, A
     if type(stage) is not str or stage not in _REVIEW_STAGES:
         raise _review_manifest_error()
     latest = manifest.get("latest")
-    if isinstance(latest, dict):
-        _require_manifest_int(latest.get("iteration"), max_value=_MAX_REVIEW_ITERATION)
-        _require_manifest_string(latest.get("stage"), max_length=64)
-        if latest.get("stage") not in _REVIEW_STAGES:
-            raise _review_manifest_error()
-    elif "latest" in manifest:
+    if not isinstance(latest, dict):
+        raise _review_manifest_error()
+    _require_manifest_int(
+        latest.get("iteration"), min_value=0, max_value=_MAX_REVIEW_ITERATION
+    )
+    latest_stage = _require_manifest_string(latest.get("stage"), max_length=64)
+    if latest_stage not in _REVIEW_STAGES:
         raise _review_manifest_error()
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, dict):
@@ -2400,10 +2394,8 @@ def _review_browser_failure_summary(
     if not required_keys.issubset(value):
         raise _review_manifest_error()
     stage = _require_manifest_string(value["stage"], max_length=64)
-    if stage not in _BROWSER_FAILURE_STAGES:
-        raise _review_manifest_error()
     operation = _require_manifest_string(value["operation"], max_length=64)
-    if operation not in _BROWSER_FAILURE_OPERATIONS:
+    if (stage, operation) not in _BROWSER_FAILURE_PAIRS:
         raise _review_manifest_error()
     code = _require_manifest_string(value["code"], max_length=128)
     if code not in SAFE_BROWSER_ERROR_CODES:

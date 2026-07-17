@@ -129,7 +129,11 @@ every future adapter and preference feature.
 
 - [x] Audit database-backed generic `import-feed` runs with source/mode/count/completion metadata and fixed redacted failures. Job upserts and terminal success metadata commit atomically; rollback, audit-write, rollback-failure, and post-commit output fault injection preserve truthful durable state. Coverage is in `tests/test_cli_smoke.py`; full package, Puppeteer smoke, container smoke, lock, and CLI checks pass.
 
+- [x] Add read-only `import-feed --dry-run` preflight for JSON and HTTP feeds using disposable in-memory SQLite simulation of production normalization/deduplication. Missing databases stay absent, existing databases and sync audits remain byte/state unchanged, counts cover all input, and normalized preview output is allow-listed and capped at 100. Coverage is in `tests/test_cli_smoke.py`; full package, Puppeteer smoke, container smoke, lock, CLI, and direct smoke checks pass.
+
 ## Open gaps and blockers
+
+- [ ] Native `<select multiple>` ATS autofill remains unsupported. A bounded cross-layer attempt was fully reverted after Python contract regressions and three native Puppeteer continuation failures; no partial representation or browser mutation path remains. Revisit only with an immutable multi-value contract and fixture-first whole-set validation that preserves scalar selects, generation/network gates, and zero final-submit calls.
 
 - [ ] Native `<input type="button">` ATS continuation support remains unimplemented. The attempted lane was fully reverted after `RUN_PUPPETEER_INTEGRATION=1` browser coverage did not pass for the safe input-button click. Revisit only with a clean browser fixture; preserve existing hostile-listener, transport-token, no-network, final-like, and no-submit assertions.
 

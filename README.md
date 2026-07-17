@@ -119,6 +119,8 @@ Use `import-feed --source NAME` to record an exact source value for imported job
 
 Each database-backed `import-feed` attempt records a redacted sync audit with the source, `json_file` or `http` mode, item counts, completion state, and a fixed failure reason. Imported jobs and the terminal success audit commit atomically; a failed import rolls back job changes before recording its failure audit.
 
+Add `--dry-run` to validate and simulate the same import without creating or modifying the configured database or recording a sync run. The command reports exact would-insert/update counts and at most 100 normalized, allow-listed preview rows; raw payloads and descriptions are excluded.
+
 ## Commands
 
 | Command | Description |

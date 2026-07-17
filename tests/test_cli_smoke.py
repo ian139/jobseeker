@@ -1,15 +1,19 @@
 import httpx
+import secrets
+import shutil
 import sqlite3
 import json
 import sys
+from typing import Any
 
 import pytest
 from pathlib import Path
 
 import jobs_assistant.cli as cli_mod
+from jobs_assistant.artifacts import ArtifactRoot
 from jobs_assistant.backlog import upsert_job
 from jobs_assistant.contracts import JobInput
-from jobs_assistant.db import connect, init_db
+from jobs_assistant.db import connect, init_db, initialize_database
 
 from jobs_assistant.cli import job_scrape_main, main
 from jobs_assistant.theirstack import TheirStackClient
@@ -2160,3 +2164,408 @@ def test_cli_backlog_archive_rejects_invalid_ids_before_opening_db(tmp_path: Pat
     monkeypatch.setattr(cli_mod, "connect", fail_connect)
     assert main(["--db", str(tmp_path / "jobs.sqlite3"), "backlog-archive", *args]) == 1
     assert capsys.readouterr().out == ""
+
+
+def _make_review_show_run(
+    tmp_path: Path,
+    *,
+    ats: str = "greenhouse",
+    status: str = "review_ready",
+    reason_code: str = "draft_ready",
+    stage: str = "finished",
+    outcome: str | None = None,
+    reviewed_at: str | None = None,
+    blocker_codes: list[str] | None = None,
+    browser_failure: dict[str, Any] | None = None,
+    final_submit_calls: int = 0,
+    plan_status: str | None = None,
+    plan_reason_code: str | None = None,
+) -> tuple[Path, Path, int]:
+    db_path = tmp_path / "jobs.sqlite3"
+    root_path = tmp_path / "artifacts"
+    conn = connect(db_path)
+    root = ArtifactRoot.open(root_path, cwd=tmp_path)
+    initialize_database(conn, migration_artifact_root=root)
+    root.close()
+
+    conn.execute(
+        """
+        INSERT INTO jobs (
+            source, source_job_id, canonical_url, title, company, discovered_at,
+            raw_json, first_seen_at, last_seen_at, status
+        ) VALUES (
+            'fixture', ?, ?, 'Engineer', 'Acme', '2026-07-10T00:00:00+00:00',
+            '{}', '2026-07-10T00:00:00+00:00', '2026-07-10T00:00:00+00:00', 'in_progress'
+        )
+        """,
+        (f"job-{ats}-{secrets.token_hex(4)}", f"https://{ats}.example.test/jobs/{secrets.token_hex(4)}"),
+    )
+    conn.commit()
+    job_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    conn.execute(
+        """
+        INSERT INTO application_runs (
+            job_id, apply_url, status, owner, started_at, finished_at,
+            reason_code, artifact_dir, outcome, reviewed_at
+        ) VALUES (?, ?, ?, 'owner', '2026-07-10T00:00:00Z',
+                  '2026-07-10T00:01:00Z', ?, 'run-1', ?, ?)
+        """,
+        (job_id, f"https://{ats}.example.test/jobs/1", status, reason_code, outcome, reviewed_at),
+    )
+    conn.commit()
+    run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+    root = ArtifactRoot.open(root_path, cwd=tmp_path)
+    run = root.create_run_dir(run_id)
+    observation = {
+        "observation_id": "obs1",
+        "url_host": f"{ats}.example.test",
+        "field_count": 5,
+        "button_count": 1,
+        "required_count": 2,
+        "final_marker_count": 1,
+        "error_count": 0,
+        "blocker_codes": list(blocker_codes or []),
+    }
+    plan = {
+        "status": plan_status if plan_status is not None else ("manual" if blocker_codes else "ready"),
+        "reason_code": plan_reason_code if plan_reason_code is not None else reason_code,
+        "answer_count": 3 if not blocker_codes else 0,
+        "skipped_target_count": 0,
+        "resume_upload": False,
+        "safe_click": False,
+    }
+    actions = {
+        "mutation_count": 0,
+        "actions": [],
+        "final_submit_calls": final_submit_calls,
+    }
+    obs_result = run.write_json("observation.json", observation)
+    plan_result = run.write_json("plan.json", plan)
+    actions_result = run.write_json("actions.json", actions)
+    artifacts_descriptor: dict[str, Any] = {
+        "observation": {"path": "observation.json", "sha256": obs_result.sha256, "iteration": 1, "stage": stage},
+        "plan": {"path": "plan.json", "sha256": plan_result.sha256, "iteration": 1, "stage": stage},
+        "actions": {"path": "actions.json", "sha256": actions_result.sha256, "iteration": 1, "stage": stage},
+    }
+    if browser_failure is not None:
+        failure_result = run.write_json("browser_failure.json", browser_failure)
+        artifacts_descriptor["browser_failure"] = {
+            "path": "browser_failure.json",
+            "sha256": failure_result.sha256,
+            "iteration": 1,
+            "stage": "failed",
+        }
+    manifest = {
+        "run_id": run_id,
+        "job_id": job_id,
+        "ats_policy": ats,
+        "no_final_submit": True,
+        "stage": stage,
+        "latest_iteration": 1,
+        "latest_stage": stage,
+        "latest": {"iteration": 1, "stage": stage},
+        "commit_token_sha256": None,
+        "artifacts": artifacts_descriptor,
+    }
+    run.write_json("run.json", manifest)
+    run.close()
+    conn.execute("UPDATE application_runs SET artifact_dir=? WHERE id=?", (f"run-{run_id}", run_id))
+    conn.commit()
+    conn.close()
+    root.close()
+    return db_path, root_path, run_id
+
+
+def test_cli_review_show_greenhouse_success(tmp_path: Path, capsys) -> None:
+    db, root, run_id = _make_review_show_run(tmp_path, ats="greenhouse")
+    assert main(["--db", str(db), "autofill-review", "--artifact-root", str(root), "show", str(run_id)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["run_id"] == run_id
+    assert payload["ats"] == "greenhouse"
+    assert payload["status"] == "review_ready"
+    assert payload["reason_code"] == "draft_ready"
+    assert payload["artifact_ref"] == f"run-{run_id}"
+    assert payload["window_state"] == "none"
+    assert payload["evidence"] == {
+        "ats": "greenhouse",
+        "stage": "finished",
+        "latest": {"iteration": 1, "stage": "finished"},
+        "no_final_submit": True,
+    }
+    assert payload["observation"] == {
+        "field_count": 5,
+        "button_count": 1,
+        "required_count": 2,
+        "final_marker_count": 1,
+        "error_count": 0,
+        "blocker_codes": [],
+    }
+    assert payload["plan"] == {
+        "status": "ready",
+        "reason_code": "draft_ready",
+        "answer_count": 3,
+        "skipped_target_count": 0,
+        "resume_upload": False,
+        "safe_click": False,
+    }
+    assert payload["actions"] == {
+        "mutation_count": 0,
+        "action_count": 0,
+        "final_submit_calls": 0,
+    }
+    assert payload["browser_failure"] is None
+
+
+def test_cli_review_show_lever_success(tmp_path: Path, capsys) -> None:
+    db, root, run_id = _make_review_show_run(tmp_path, ats="lever")
+    assert main(["--db", str(db), "autofill-review", "--artifact-root", str(root), "show", str(run_id)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ats"] == "lever"
+    assert payload["evidence"]["ats"] == "lever"
+    assert payload["plan"]["status"] == "ready"
+
+
+def test_cli_review_show_blocker_run(tmp_path: Path, capsys) -> None:
+    db, root, run_id = _make_review_show_run(
+        tmp_path,
+        ats="greenhouse",
+        status="blocked",
+        reason_code="captcha",
+        stage="finished",
+        blocker_codes=["captcha"],
+        plan_status="manual",
+        plan_reason_code="captcha",
+    )
+    assert main(["--db", str(db), "autofill-review", "--artifact-root", str(root), "show", str(run_id)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "blocked"
+    assert payload["reason_code"] == "captcha"
+    assert payload["observation"]["blocker_codes"] == ["captcha"]
+    assert payload["plan"] == {
+        "status": "manual",
+        "reason_code": "captcha",
+        "answer_count": 0,
+        "skipped_target_count": 0,
+        "resume_upload": False,
+        "safe_click": False,
+    }
+
+
+def test_cli_review_show_browser_failure_run(tmp_path: Path, capsys) -> None:
+    failure = {
+        "version": 1,
+        "stage": "observation",
+        "operation": "observe",
+        "code": "browser_command_failed",
+        "iteration": 1,
+        "ats_policy": "greenhouse",
+        "no_final_submit": True,
+        "protocol": "length-prefixed-json-v1",
+    }
+    db, root, run_id = _make_review_show_run(
+        tmp_path,
+        ats="greenhouse",
+        status="failed",
+        reason_code="browser_error",
+        stage="failed",
+        browser_failure=failure,
+        plan_status="manual",
+        plan_reason_code="browser_error",
+    )
+    assert main(["--db", str(db), "autofill-review", "--artifact-root", str(root), "show", str(run_id)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == "browser_error"
+    assert payload["browser_failure"] == {
+        "stage": "observation",
+        "operation": "observe",
+        "code": "browser_command_failed",
+        "iteration": 1,
+        "ats": "greenhouse",
+        "no_final_submit": True,
+    }
+
+
+def test_cli_review_show_reviewed_and_unreviewed_rows(tmp_path: Path, capsys) -> None:
+    db_reviewed, root_reviewed, run_id_reviewed = _make_review_show_run(
+        tmp_path,
+        ats="greenhouse",
+        status="review_ready",
+        reason_code="draft_ready",
+        stage="finished",
+        outcome="submitted",
+        reviewed_at="2026-07-10T00:02:00Z",
+    )
+    db_unreviewed, root_unreviewed, run_id_unreviewed = _make_review_show_run(
+        tmp_path,
+        ats="greenhouse",
+        status="review_ready",
+        reason_code="draft_ready",
+        stage="finished",
+    )
+    assert main(["--db", str(db_reviewed), "autofill-review", "--artifact-root", str(root_reviewed), "show", str(run_id_reviewed)]) == 0
+    reviewed = json.loads(capsys.readouterr().out)
+    assert reviewed["outcome"] == "submitted"
+    assert reviewed["reviewed_at"] == "2026-07-10T00:02:00Z"
+    assert main(["--db", str(db_unreviewed), "autofill-review", "--artifact-root", str(root_unreviewed), "show", str(run_id_unreviewed)]) == 0
+    unreviewed = json.loads(capsys.readouterr().out)
+    assert unreviewed["outcome"] is None
+    assert unreviewed["reviewed_at"] is None
+
+
+@pytest.mark.parametrize("run_id", ["0", "-1", "abc"])
+def test_cli_review_show_rejects_invalid_run_id_before_opening_dependencies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_id: str
+) -> None:
+    def fail_open(*args: object, **kwargs: object) -> object:
+        pytest.fail("artifact root opened before run_id validation")
+
+    monkeypatch.setattr(cli_mod.ArtifactRoot, "open_existing", fail_open)
+    monkeypatch.setattr(cli_mod.ArtifactRoot, "open", fail_open)
+    monkeypatch.setattr(cli_mod, "connect_read_only", lambda *args, **kwargs: pytest.fail("db opened"))
+    monkeypatch.setattr(cli_mod, "connect", lambda *args, **kwargs: pytest.fail("db opened"))
+    with pytest.raises(SystemExit) as exc:
+        main([
+            "--db", str(tmp_path / "jobs.sqlite3"),
+            "--artifact-root", str(tmp_path / "artifacts"),
+            "autofill-review", "show", run_id,
+        ])
+    assert exc.value.code == 2
+
+
+def test_cli_review_show_nonexistent_run_returns_fixed_error_and_does_not_mutate_db(
+    tmp_path: Path, capsys
+) -> None:
+    db, root, _ = _make_review_show_run(tmp_path)
+    before = db.read_bytes()
+    assert main(["--db", str(db), "autofill-review", "--artifact-root", str(root), "show", "999"]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err == {"error": {"code": "run_not_found", "message": "review run was not found"}}
+    assert db.read_bytes() == before
+
+
+def test_cli_review_show_missing_db_returns_database_error_without_creating_file(
+    tmp_path: Path, capsys
+) -> None:
+    db = tmp_path / "missing.sqlite3"
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    assert not db.exists()
+    assert main(["--db", str(db), "autofill-review", "--artifact-root", str(root), "show", "1"]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["code"] == "database_error"
+    assert not db.exists()
+
+
+def test_cli_review_show_missing_root_returns_artifact_error_without_creating_root(
+    tmp_path: Path, capsys
+) -> None:
+    db, root, _ = _make_review_show_run(tmp_path)
+    missing_root = tmp_path / "missing-artifacts"
+    assert not missing_root.exists()
+    assert main(["--db", str(db), "autofill-review", "--artifact-root", str(missing_root), "show", "1"]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["code"] == "artifact_root_error"
+    assert not missing_root.exists()
+
+
+def test_cli_review_show_db_artifact_mismatch_returns_fixed_error(
+    tmp_path: Path, capsys
+) -> None:
+    db, root, run_id = _make_review_show_run(tmp_path)
+    conn = connect(db)
+    try:
+        conn.execute("UPDATE application_runs SET artifact_dir='run-2' WHERE id=?", (run_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    before = db.read_bytes()
+    assert main(["--db", str(db), "autofill-review", "--artifact-root", str(root), "show", str(run_id)]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["code"] == "manifest_error"
+    assert db.read_bytes() == before
+
+
+def test_cli_review_show_symlink_run_dir_is_rejected_as_artifact_error(
+    tmp_path: Path, capsys
+) -> None:
+    db, root, run_id = _make_review_show_run(tmp_path)
+    run_dir = root / f"run-{run_id}"
+    outside = tmp_path / "outside-run"
+    outside.mkdir()
+    shutil.rmtree(run_dir)
+    run_dir.symlink_to(outside, target_is_directory=True)
+    before = db.read_bytes()
+    assert main(["--db", str(db), "autofill-review", "--artifact-root", str(root), "show", str(run_id)]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["code"] == "artifact_root_error"
+    assert db.read_bytes() == before
+
+
+def test_cli_review_show_malformed_run_json_returns_manifest_error(
+    tmp_path: Path, capsys
+) -> None:
+    db, root, run_id = _make_review_show_run(tmp_path)
+    run_dir = root / f"run-{run_id}"
+    (run_dir / "run.json").write_text("{not json", encoding="utf-8")
+    before = db.read_bytes()
+    assert main(["--db", str(db), "autofill-review", "--artifact-root", str(root), "show", str(run_id)]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["code"] == "manifest_error"
+    assert db.read_bytes() == before
+
+
+def test_cli_review_show_oversized_run_json_returns_manifest_error(
+    tmp_path: Path, capsys
+) -> None:
+    db, root, run_id = _make_review_show_run(tmp_path)
+    run_dir = root / f"run-{run_id}"
+    (run_dir / "run.json").write_text('"' + "x" * (131072 + 1) + '"', encoding="utf-8")
+    before = db.read_bytes()
+    assert main(["--db", str(db), "autofill-review", "--artifact-root", str(root), "show", str(run_id)]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["code"] == "manifest_error"
+    assert db.read_bytes() == before
+
+
+def test_cli_review_show_hash_changed_observation_returns_manifest_error(
+    tmp_path: Path, capsys
+) -> None:
+    db, root, run_id = _make_review_show_run(tmp_path)
+    run_dir = root / f"run-{run_id}"
+    obs_path = run_dir / "observation.json"
+    before = db.read_bytes()
+    before_obs = obs_path.read_bytes()
+    obs_path.write_text(obs_path.read_text(encoding="utf-8").replace("5", "6"), encoding="utf-8")
+    assert obs_path.read_bytes() != before_obs
+    assert main(["--db", str(db), "autofill-review", "--artifact-root", str(root), "show", str(run_id)]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["code"] == "manifest_error"
+    assert db.read_bytes() == before
+
+
+def test_cli_review_show_final_submit_calls_nonzero_returns_manifest_error(
+    tmp_path: Path, capsys
+) -> None:
+    db, root, run_id = _make_review_show_run(tmp_path, final_submit_calls=1)
+    before = db.read_bytes()
+    assert main(["--db", str(db), "autofill-review", "--artifact-root", str(root), "show", str(run_id)]) == 1
+    err = json.loads(capsys.readouterr().err)
+    assert err["error"]["code"] == "manifest_error"
+    assert db.read_bytes() == before
+
+
+def test_cli_review_show_uses_read_only_db_and_no_migration_browser_or_claim(
+    tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db, root, run_id = _make_review_show_run(tmp_path)
+    monkeypatch.setattr(cli_mod, "connect", lambda *args, **kwargs: pytest.fail("writable connect called"))
+    monkeypatch.setattr(
+        cli_mod, "initialize_database", lambda *args, **kwargs: pytest.fail("initialize_database called")
+    )
+    monkeypatch.setattr(
+        cli_mod.PuppeteerSession, "preflight", lambda **kwargs: pytest.fail("preflight called")
+    )
+    assert main(["--db", str(db), "autofill-review", "--artifact-root", str(root), "show", str(run_id)]) == 0
+    assert json.loads(capsys.readouterr().out)["run_id"] == run_id

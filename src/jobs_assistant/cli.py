@@ -55,13 +55,13 @@ from .db import (
     complete_review,
     connect,
     connect_read_only,
+    get_application_review_details,
     init_db,
     initialize_database,
     latest_sync_checkpoint,
     list_application_reviews,
     record_sync_run,
     retry_review,
-    review_window_state,
     update_sync_run,
     utc_now,
 )
@@ -416,6 +416,47 @@ def _open_review_root(path: str | Path = DEFAULT_ARTIFACT_ROOT) -> ArtifactRoot:
     except Exception as exc:
         raise _CliFailure("artifact_root_error") from exc
 
+
+def _open_existing_review_root(path: str | Path = DEFAULT_ARTIFACT_ROOT) -> ArtifactRoot:
+    """Open an existing artifact root without creating any missing component."""
+    try:
+        return ArtifactRoot.open_existing(path, cwd=Path.cwd())
+    except Exception as exc:
+        raise _CliFailure("artifact_root_error") from exc
+
+
+def _run_review_show(args: argparse.Namespace) -> int:
+    root = _open_existing_review_root(getattr(args, "artifact_root", DEFAULT_ARTIFACT_ROOT))
+    connection = None
+    try:
+        try:
+            connection = connect_read_only(args.db)
+        except FileNotFoundError as exc:
+            raise _CliFailure("database_error") from exc
+        except (PermissionError, OSError) as exc:
+            raise _CliFailure("database_privacy_error") from exc
+        except Exception as exc:
+            raise _CliFailure("database_error") from exc
+        with root:
+            try:
+                result = get_application_review_details(
+                    connection,
+                    run_id=args.run_id,
+                    artifact_root=root,
+                )
+            except Exception as exc:
+                raise _CliFailure(_review_failure_code(exc)) from exc
+            print(json.dumps(result, sort_keys=True))
+            return 0
+    except _CliFailure:
+        raise
+    except Exception as exc:
+        raise _CliFailure("artifact_root_error") from exc
+    finally:
+        if connection is not None:
+            _close_database(connection)
+
+
 def _review_artifact_ref(connection: object, _root: ArtifactRoot, run_id: int) -> str | None:
     """Load the requested run's DB-bound artifact ref without a list-window cap."""
     try:
@@ -679,6 +720,8 @@ def build_parser() -> argparse.ArgumentParser:
     review_retry.add_argument("--run-id", type=int, required=True)
     review_retry.add_argument("--confirm-window-closed", action="store_true")
     review_retry.add_argument("--annotation-file", required=False)
+    review_show = review_sub.add_parser("show", help="show one guarded autofill run summary")
+    review_show.add_argument("run_id", type=int, metavar="RUN_ID", help="positive application run ID to show")
     return parser
 
 
@@ -796,7 +839,7 @@ def job_scrape_main(argv: list[str] | None = None) -> int:
         try:
             connection = connect(args.db)
             init_db(connection)
-        except (PermissionError, OSError) as exc:
+        except (PermissionError, OSError):
             return _emit_failure("database_privacy_error")
         except sqlite3.DatabaseError:
             return _emit_failure("database_error")
@@ -1533,9 +1576,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "autofill-review":
         if args.review_command == "list" and (type(args.limit) is not int or not 1 <= args.limit <= 100):
             parser.error("autofill-review list --limit must be between 1 and 100")
+        if args.review_command == "show" and (type(args.run_id) is not int or args.run_id <= 0):
+            parser.error("autofill-review show RUN_ID must be positive")
         if args.review_command in {"complete", "retry"} and (type(args.run_id) is not int or args.run_id <= 0):
             parser.error("autofill-review run ID must be positive")
         try:
+            if args.review_command == "show":
+                return _run_review_show(args)
             return _run_review(args)
         except Exception as exc:
             return _emit_failure(_review_failure_code(exc))

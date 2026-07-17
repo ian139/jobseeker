@@ -14,8 +14,9 @@ from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from . import artifacts as _artifacts
-from .artifacts import ArtifactRoot
+from .artifacts import ArtifactRoot, ArtifactSecurityError
 from .contracts import ApplicationClaim, PublicReasonCode, StoredJobInfo
+from .safety import SUPPORTED_ATS_POLICIES
 
 
 SCHEMA_SQL = """
@@ -2099,6 +2100,312 @@ def list_application_reviews(
         }
         for row in rows
     ]
+
+
+_REVIEW_STAGES = frozenset(
+    {"claimed", "action_planned", "action_applied", "prepared", "finished", "failed"}
+)
+_MAX_REVIEW_MANIFEST_BYTES = 128 * 1024
+_MAX_REVIEW_ARTIFACT_BYTES = 1024 * 1024
+_MAX_REVIEW_ITERATION = 100
+
+
+def _review_manifest_error() -> RuntimeError:
+    return RuntimeError("manifest_error")
+
+
+def _require_manifest_string(value: Any, *, max_length: int = 256) -> str:
+    if type(value) is not str or not value or len(value) > max_length:
+        raise _review_manifest_error()
+    return value
+
+
+def _require_manifest_int(value: Any, *, min_value: int = 0, max_value: int | None = None) -> int:
+    if type(value) is not int or value < min_value or (max_value is not None and value > max_value):
+        raise _review_manifest_error()
+    return value
+
+
+def _require_manifest_bool(value: Any) -> bool:
+    if value is True:
+        return True
+    if value is False:
+        return False
+    raise _review_manifest_error()
+
+
+def _read_review_run_manifest(run: Any, run_id: int, job_id: int) -> dict[str, Any]:
+    try:
+        raw = run.read_bytes("run.json", max_bytes=_MAX_REVIEW_MANIFEST_BYTES)
+    except _artifacts.ArtifactSecurityError as exc:
+        raise _review_manifest_error() from exc
+    except (FileNotFoundError, OSError):
+        raise _review_manifest_error() from None
+    try:
+        manifest = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise _review_manifest_error() from None
+    if not isinstance(manifest, dict):
+        raise _review_manifest_error()
+    if (
+        type(manifest.get("run_id")) is not int
+        or manifest["run_id"] <= 0
+        or manifest["run_id"] != run_id
+    ):
+        raise _review_manifest_error()
+    if (
+        type(manifest.get("job_id")) is not int
+        or manifest["job_id"] <= 0
+        or manifest["job_id"] != job_id
+    ):
+        raise _review_manifest_error()
+    if type(manifest.get("ats_policy")) is not str or manifest["ats_policy"] not in SUPPORTED_ATS_POLICIES:
+        raise _review_manifest_error()
+    if manifest.get("no_final_submit") is not True:
+        raise _review_manifest_error()
+    stage = manifest.get("stage")
+    if type(stage) is not str or stage not in _REVIEW_STAGES:
+        raise _review_manifest_error()
+    latest = manifest.get("latest")
+    if isinstance(latest, dict):
+        _require_manifest_int(latest.get("iteration"), max_value=_MAX_REVIEW_ITERATION)
+        _require_manifest_string(latest.get("stage"), max_length=64)
+        if latest.get("stage") not in _REVIEW_STAGES:
+            raise _review_manifest_error()
+    elif "latest" in manifest:
+        raise _review_manifest_error()
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise _review_manifest_error()
+    return manifest
+
+
+def _read_manifest_artifact(
+    run: Any,
+    manifest: dict[str, Any],
+    key: str,
+    *,
+    required: bool = True,
+) -> Any:
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise _review_manifest_error()
+    descriptor = artifacts.get(key)
+    if descriptor is None:
+        if required:
+            raise _review_manifest_error()
+        return None
+    if not isinstance(descriptor, dict):
+        raise _review_manifest_error()
+    path = descriptor.get("path")
+    sha256 = descriptor.get("sha256")
+    iteration = descriptor.get("iteration")
+    stage = descriptor.get("stage")
+    if type(path) is not str or not path or type(sha256) is not str or len(sha256) != 64:
+        raise _review_manifest_error()
+    if any(char not in "0123456789abcdef" for char in sha256):
+        raise _review_manifest_error()
+    _require_manifest_int(iteration, max_value=_MAX_REVIEW_ITERATION)
+    _require_manifest_string(stage, max_length=64)
+    if stage not in _REVIEW_STAGES:
+        raise _review_manifest_error()
+    try:
+        _artifacts._validate_relative_artifact_path(path)
+    except _artifacts.ArtifactSecurityError:
+        raise _review_manifest_error() from None
+    try:
+        raw = run.read_bytes(path, max_bytes=_MAX_REVIEW_ARTIFACT_BYTES, expected_sha256=sha256)
+    except _artifacts.ArtifactSecurityError as exc:
+        raise _review_manifest_error() from exc
+    except (FileNotFoundError, OSError):
+        raise _review_manifest_error() from None
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise _review_manifest_error() from None
+
+
+def _review_observation_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _review_manifest_error()
+    required_keys = {"field_count", "button_count", "required_count", "final_marker_count", "error_count", "blocker_codes"}
+    if not required_keys.issubset(value):
+        raise _review_manifest_error()
+    field_count = _require_manifest_int(value["field_count"], max_value=10_000)
+    button_count = _require_manifest_int(value["button_count"], max_value=10_000)
+    required_count = _require_manifest_int(value["required_count"], max_value=10_000)
+    final_marker_count = _require_manifest_int(value["final_marker_count"], max_value=10_000)
+    error_count = _require_manifest_int(value["error_count"], max_value=10_000)
+    blocker_codes = value["blocker_codes"]
+    if not isinstance(blocker_codes, list) or len(blocker_codes) > 100:
+        raise _review_manifest_error()
+    if any(type(code) is not str or not code or len(code) > 128 for code in blocker_codes):
+        raise _review_manifest_error()
+    return {
+        "field_count": field_count,
+        "button_count": button_count,
+        "required_count": required_count,
+        "final_marker_count": final_marker_count,
+        "error_count": error_count,
+        "blocker_codes": list(blocker_codes),
+    }
+
+
+def _review_plan_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _review_manifest_error()
+    required_keys = {"status", "reason_code", "answer_count", "skipped_target_count", "resume_upload", "safe_click"}
+    if not required_keys.issubset(value):
+        raise _review_manifest_error()
+    status = _require_manifest_string(value["status"], max_length=64)
+    if status not in {"ready", "manual"}:
+        raise _review_manifest_error()
+    reason_code = _require_manifest_string(value["reason_code"], max_length=64)
+    if reason_code not in PUBLIC_REASON_CODES:
+        raise _review_manifest_error()
+    answer_count = _require_manifest_int(value["answer_count"], max_value=10_000)
+    skipped_target_count = _require_manifest_int(value["skipped_target_count"], max_value=10_000)
+    resume_upload = _require_manifest_bool(value["resume_upload"])
+    safe_click = _require_manifest_bool(value["safe_click"])
+    return {
+        "status": status,
+        "reason_code": reason_code,
+        "answer_count": answer_count,
+        "skipped_target_count": skipped_target_count,
+        "resume_upload": resume_upload,
+        "safe_click": safe_click,
+    }
+
+
+def _review_actions_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _review_manifest_error()
+    required_keys = {"mutation_count", "actions", "final_submit_calls"}
+    if not required_keys.issubset(value):
+        raise _review_manifest_error()
+    mutation_count = _require_manifest_int(value["mutation_count"], max_value=10_000)
+    actions = value["actions"]
+    final_submit_calls = _require_manifest_int(value["final_submit_calls"], min_value=0, max_value=0)
+    if not isinstance(actions, list) or len(actions) > 10_000:
+        raise _review_manifest_error()
+    if any(not isinstance(item, dict) for item in actions):
+        raise _review_manifest_error()
+    return {
+        "mutation_count": mutation_count,
+        "action_count": len(actions),
+        "final_submit_calls": final_submit_calls,
+    }
+
+
+def _review_browser_failure_summary(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise _review_manifest_error()
+    required_keys = {"stage", "operation", "code", "iteration", "ats_policy", "no_final_submit"}
+    if not required_keys.issubset(value):
+        raise _review_manifest_error()
+    stage = _require_manifest_string(value["stage"], max_length=64)
+    operation = _require_manifest_string(value["operation"], max_length=128)
+    code = _require_manifest_string(value["code"], max_length=128)
+    iteration = _require_manifest_int(value["iteration"], max_value=_MAX_REVIEW_ITERATION)
+    ats_policy = _require_manifest_string(value["ats_policy"], max_length=64)
+    if ats_policy not in SUPPORTED_ATS_POLICIES:
+        raise _review_manifest_error()
+    no_final_submit = _require_manifest_bool(value["no_final_submit"])
+    return {
+        "stage": stage,
+        "operation": operation,
+        "code": code,
+        "iteration": iteration,
+        "ats": ats_policy,
+        "no_final_submit": no_final_submit,
+    }
+
+
+def get_application_review_details(
+    connection: sqlite3.Connection,
+    *,
+    run_id: int,
+    artifact_root: ArtifactRoot,
+) -> dict[str, Any]:
+    """Return a fixed, redacted summary for one persisted application run.
+
+    This is a read-only operation: it opens the existing DB-bound artifact
+    root, validates the run manifest, and projects only bounded public fields
+    from the manifest-indexed evidence artifacts.
+    """
+    if type(run_id) is not int or run_id <= 0:
+        raise TypeError("run_id must be a positive integer")
+    if not isinstance(artifact_root, ArtifactRoot):
+        raise TypeError("artifact_root must be an ArtifactRoot")
+    _bind_artifact_root(connection, artifact_root, create=False)
+    row = connection.execute(
+        """
+        SELECT r.*, j.title, j.company, j.status AS job_status
+        FROM application_runs AS r
+        JOIN jobs AS j ON j.id = r.job_id
+        WHERE r.id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+    if row is None:
+        raise RuntimeError("run_not_found")
+    try:
+        artifact_ref = _require_existing_artifact_ref(row["artifact_dir"], run_id)
+    except (TypeError, ValueError):
+        raise _review_manifest_error() from None
+
+    try:
+        run = artifact_root.open_artifact_ref(artifact_ref, run_id=run_id)
+    except OSError as exc:
+        raise ArtifactSecurityError("artifact run is unavailable") from exc
+    with run:
+        manifest = _read_review_run_manifest(run, run_id, int(row["job_id"]))
+        observation = _read_manifest_artifact(run, manifest, "observation")
+        plan = _read_manifest_artifact(run, manifest, "plan")
+        actions = _read_manifest_artifact(run, manifest, "actions")
+        failure = _read_manifest_artifact(run, manifest, "browser_failure", required=False)
+
+    observation_summary = _review_observation_summary(observation)
+    plan_summary = _review_plan_summary(plan)
+    actions_summary = _review_actions_summary(actions)
+
+    latest = manifest.get("latest")
+    evidence_latest: dict[str, Any] | None = None
+    if isinstance(latest, dict):
+        evidence_latest = {
+            "iteration": int(latest["iteration"]),
+            "stage": str(latest["stage"]),
+        }
+
+    result: dict[str, Any] = {
+        "run_id": run_id,
+        "job_id": int(row["job_id"]),
+        "status": str(row["status"]),
+        "reason_code": None if row["reason_code"] is None else str(row["reason_code"]),
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "outcome": None if row["outcome"] is None else str(row["outcome"]),
+        "reviewed_at": None if row["reviewed_at"] is None else str(row["reviewed_at"]),
+        "title": str(row["title"]),
+        "company": str(row["company"]),
+        "job_status": str(row["job_status"]),
+        "ats": str(manifest["ats_policy"]),
+        "artifact_ref": artifact_ref,
+        "window_state": review_window_state(connection, run_id=run_id, artifact_root=artifact_root),
+        "evidence": {
+            "ats": str(manifest["ats_policy"]),
+            "stage": str(manifest["stage"]),
+            "latest": evidence_latest,
+            "no_final_submit": True,
+        },
+        "observation": observation_summary,
+        "plan": plan_summary,
+        "actions": actions_summary,
+        "browser_failure": None,
+    }
+    if failure is not None:
+        result["browser_failure"] = _review_browser_failure_summary(failure)
+    return result
 
 
 def complete_review(

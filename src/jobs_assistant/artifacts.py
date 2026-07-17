@@ -128,6 +128,60 @@ class ArtifactRoot:
             except FileNotFoundError:
                 raise ArtifactSecurityError("artifact run is unavailable") from None
             return ArtifactRun(self, name, run_fd, _register=True)
+
+    @classmethod
+    def open_existing(cls, path: str | os.PathLike[str], *, cwd: str | os.PathLike[str]) -> "ArtifactRoot":
+        """Open an existing private artifact root without creating any component."""
+        raw_path = Path(path)
+        cwd_path = Path(cwd).resolve(strict=True)
+        if any(part == ".." for part in raw_path.parts):
+            raise ArtifactSecurityError("artifact root path may not escape its base")
+        if raw_path.is_absolute():
+            parts = _path_parts(raw_path)
+            display_path = _path_from_parts(parts)
+        else:
+            parts = _path_parts(cwd_path) + _path_parts(raw_path)
+            display_path = _path_from_parts(parts)
+            if not _is_relative_to(display_path, cwd_path):
+                raise ArtifactSecurityError("artifact root escaped cwd")
+        if not parts:
+            raise ArtifactSecurityError("artifact root may not be filesystem root")
+        if not _is_path_allowed(display_path):
+            raise ArtifactSecurityError("artifact root is under a protected system location")
+
+        root_fd = os.open("/", _OPEN_DIR_FLAGS)
+        current_fd = root_fd
+        opened: list[int] = []
+        try:
+            _validate_fd_directory_component(current_fd, ancestor=True)
+            for index, part in enumerate(parts):
+                is_final = index == len(parts) - 1
+                try:
+                    child_fd = os.open(part, _OPEN_DIR_FLAGS, dir_fd=current_fd)
+                except FileNotFoundError:
+                    raise ArtifactSecurityError("artifact root is unavailable") from None
+                except OSError as exc:
+                    raise ArtifactSecurityError("artifact root is unsafe") from exc
+                try:
+                    _verify_child_identity(current_fd, part, child_fd)
+                    _validate_fd_directory_component(child_fd, ancestor=not is_final)
+                except Exception:
+                    os.close(child_fd)
+                    raise
+                opened.append(child_fd)
+                current_fd = child_fd
+            fd = os.dup(current_fd)
+        finally:
+            for opened_fd in reversed(opened):
+                os.close(opened_fd)
+            os.close(root_fd)
+        try:
+            _validate_fd_directory_component(fd, ancestor=False)
+        except Exception:
+            os.close(fd)
+            raise
+        return cls(display_path, fd)
+
     def open_artifact_ref(self, artifact_ref: str, *, run_id: int) -> "ArtifactRun":
         """Open an existing current or migrated run directory by its DB-bound ref."""
         if type(run_id) is not int or run_id <= 0:

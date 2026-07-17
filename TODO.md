@@ -127,7 +127,9 @@ every future adapter and preference feature.
 
 - [x] Promote validated read-only backlog listing query into a typed domain API (`list_backlog_jobs`) with exact status/source/limit/offset validation, deterministic ordering, stable counts, and no duplicate CLI SQL. Coverage is in `tests/test_backlog_ingestion.py` and `tests/test_cli_smoke.py`.
 
-- [ ] Native `<input type="button">` ATS continuation support was attempted but blocked by integration test failures; the safe-click gate and runner remain unchanged. Revisit when a clean browser fixture and smoke path are available.
+## Open gaps and blockers
+
+- [ ] Native `<input type="button">` ATS continuation support remains unimplemented. The attempted lane was fully reverted after `RUN_PUPPETEER_INTEGRATION=1` browser coverage did not pass for the safe input-button click. Revisit only with a clean browser fixture; preserve existing hostile-listener, transport-token, no-network, final-like, and no-submit assertions.
 
 ## Reference-only history
 

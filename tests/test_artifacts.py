@@ -148,6 +148,44 @@ def test_artifact_root_rejects_component_replacement_during_fd_open(tmp_path: Pa
     assert data.is_symlink()
     assert not (outside / "application-runs").exists()
 
+def test_artifact_root_open_existing_does_not_recreate_deleted_final_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root_path = tmp_path / "private" / "application-runs"
+    root_path.parent.mkdir(mode=0o700)
+    root_path.mkdir(mode=0o700)
+    real_open = os.open
+    removed = False
+
+    def deleting_open(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal removed
+        if (
+            not removed
+            and path == root_path.name
+            and dir_fd is not None
+            and root_path.is_dir()
+            and not root_path.is_symlink()
+        ):
+            removed = True
+            root_path.rmdir()
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(artifacts.os, "open", deleting_open)
+
+    with pytest.raises(ArtifactSecurityError):
+        ArtifactRoot.open_existing(root_path, cwd=tmp_path)
+
+    assert removed
+    assert not root_path.exists()
+    assert not list(root_path.parent.iterdir())
+
+
 
 def test_artifact_write_rejects_directory_replacement_during_fd_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     outside = tmp_path / "outside"

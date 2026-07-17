@@ -8,6 +8,7 @@ import os
 import signal
 import selectors
 import socket
+import struct
 import socketserver
 import subprocess
 import sys
@@ -405,11 +406,22 @@ def test_injected_resolver_is_called_once_and_pins_one_validated_result() -> Non
     send({"action": "close"})
     process.wait(timeout=5)
 
-def _start_test_proxy(*, logical_url: str, resolver: dict[str, list[dict[str, object]]], delay_ms: int = 0):
+def _start_test_proxy(
+    *,
+    logical_url: str,
+    resolver: dict[str, list[dict[str, object]]],
+    delay_ms: int = 0,
+    upstream_port: int | None = None,
+    upstream_host: str | None = None,
+):
     env = os.environ.copy()
     env["JOBS_ASSISTANT_TEST_PROXY"] = "1"
     env["JOBS_ASSISTANT_TEST_RESOLVER_JSON"] = json.dumps(resolver)
     env["JOBS_ASSISTANT_TEST_RESOLVER_DELAY_MS"] = str(delay_ms)
+    if upstream_port is not None:
+        env["JOBS_ASSISTANT_TEST_PROXY_UPSTREAM_PORT"] = str(upstream_port)
+    if upstream_host is not None:
+        env["JOBS_ASSISTANT_TEST_PROXY_UPSTREAM_HOST"] = upstream_host
     process = subprocess.Popen(
         ["node", "src/jobs_assistant/puppeteer_runner.js"],
         stdin=subprocess.PIPE,
@@ -552,6 +564,47 @@ def test_connect_allows_exact_logical_and_static_authorities_before_freeze():
         _close_test_proxy(process, send)
         logical_client.close()
         static_client.close()
+
+def test_connect_relay_peer_close_does_not_crash_protocol_owner():
+    class HalfCloseHandler(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.sendall(b"relay-first")
+            time.sleep(0.25)
+            try:
+                self.request.sendall(b"relay-after-peer-close")
+            except OSError:
+                pass
+
+    with socketserver.TCPServer(("127.0.0.1", 0), HalfCloseHandler) as upstream:
+        upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        upstream_thread.start()
+        process, send, port = _start_test_proxy(
+            logical_url="https://boards.greenhouse.io/acme/jobs/123",
+            resolver={"boards.greenhouse.io": [{"address": "8.8.8.8", "family": 4}]},
+            upstream_port=upstream.server_address[1],
+            upstream_host="127.0.0.1",
+        )
+        client = _connect_proxy(port, "boards.greenhouse.io:443")
+        try:
+            client.settimeout(2)
+            response = b""
+            while b"\r\n\r\n" not in response or b"relay-first" not in response:
+                response += client.recv(4096)
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            client.close()
+            client = None
+            time.sleep(0.4)
+            assert process.poll() is None
+            counters = send({"action": "networkCounters"})
+            assert counters["ok"] is True, counters
+            assert counters["data"]["proxyTunnelsClosed"] >= 1
+            assert counters["data"]["proxySocketErrors"] + counters["data"]["proxyWriteErrors"] >= 1
+        finally:
+            if client is not None:
+                client.close()
+            _close_test_proxy(process, send)
+        upstream.shutdown()
+        upstream_thread.join(timeout=5)
 
 def test_preflight_does_not_launch_browser():
     data = PuppeteerSession.preflight()

@@ -220,8 +220,11 @@ const networkCounters = {
   proxyRequests: 0,
   upstreamConnectAttempts: 0,
   upstreamHttpAttempts: 0,
-  redirectsDenied: 0,
   responseBytesRejected: 0,
+  redirectsDenied: 0,
+  proxyTunnelsClosed: 0,
+  proxySocketErrors: 0,
+  proxyWriteErrors: 0,
 };
 
 async function writeFrame(payload) {
@@ -811,7 +814,15 @@ async function startProxy() {
     if (client.destroyed || !initialAuthorization.allowed) {
       client.destroy(); return;
     }
-    const destinationPort = localTunnel ? Number(localParsed.port || 443) : 443;
+    const configuredTestHost = process.env.JOBS_ASSISTANT_TEST_PROXY === '1'
+      ? process.env.JOBS_ASSISTANT_TEST_PROXY_UPSTREAM_HOST
+      : null;
+    const configuredTestPort = process.env.JOBS_ASSISTANT_TEST_PROXY === '1'
+      ? Number(process.env.JOBS_ASSISTANT_TEST_PROXY_UPSTREAM_PORT)
+      : NaN;
+    const destinationPort = localTunnel
+      ? Number(localParsed.port || 443)
+      : (Number.isInteger(configuredTestPort) && configuredTestPort > 0 && configuredTestPort <= 65535 ? configuredTestPort : 443);
     const connect = target => {
       const authorization = currentConnectAuthorization(authority, host, localTunnel, localParsed, parsed);
       if (client.destroyed || !authorization.allowed
@@ -819,35 +830,86 @@ async function startProxy() {
         client.destroy(); return;
       }
       networkCounters.upstreamConnectAttempts += 1;
-      const socket = net.connect({ port: destinationPort, host: target.address, family: target.family }, () => {
+      const state = { closed: false, socketErrorRecorded: false, writeErrorRecorded: false };
+      let socket = null;
+      const recordSocketError = () => {
+        if (state.socketErrorRecorded) return;
+        state.socketErrorRecorded = true;
+        networkCounters.proxySocketErrors += 1;
+      };
+      const recordWriteError = () => {
+        if (state.writeErrorRecorded) return;
+        state.writeErrorRecorded = true;
+        networkCounters.proxyWriteErrors += 1;
+      };
+      const closeTunnel = () => {
+        if (state.closed) return;
+        state.closed = true;
+        networkCounters.proxyTunnelsClosed += 1;
+        try { socket?.destroy(); } catch {}
+        try { client.destroy(); } catch {}
+      };
+      const onSocketError = () => {
+        recordSocketError();
+        closeTunnel();
+      };
+      const safeWrite = (destination, chunk) => {
+        if (state.closed) return false;
+        if (destination.destroyed || destination.writableEnded || destination.writableFinished) {
+          closeTunnel(); return false;
+        }
+        try {
+          destination.write(chunk, error => {
+            if (error) {
+              recordWriteError();
+              closeTunnel();
+            }
+          });
+          return true;
+        } catch {
+          recordWriteError();
+          closeTunnel();
+          return false;
+        }
+      };
+      client.once('error', onSocketError);
+      socket = net.connect({ port: destinationPort, host: configuredTestHost || target.address, family: target.family }, () => {
         const connectedAuthorization = currentConnectAuthorization(authority, host, localTunnel, localParsed, parsed);
-        if (client.destroyed || !connectedAuthorization.allowed
+        if (state.closed || client.destroyed || socket.destroyed || !connectedAuthorization.allowed
             || (connectedAuthorization.reviewAllowed
               && (!connectedAuthorization.reviewExpiry || connectedAuthorization.reviewExpiry <= Date.now()))) {
-          socket.destroy(); client.destroy(); return;
+          closeTunnel(); return;
         }
-        client.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+        if (!safeWrite(client, Buffer.from('HTTP/1.1 200 Connection Established\r\n\r\n', 'ascii'))) return;
         let transferred = head.length;
-        const relay = (source, destination) => source.on('data', chunk => {
-          const relayAuthorization = currentConnectAuthorization(authority, host, localTunnel, localParsed, parsed);
-          if (relayAuthorization.reviewAllowed
-              && (!relayAuthorization.reviewExpiry || relayAuthorization.reviewExpiry <= Date.now())) {
-            source.destroy(); destination.destroy(); return;
-          }
-          transferred += chunk.length;
-          if (transferred > MAX_STATIC_BYTES || staticBytes + chunk.length > MAX_STATIC_BYTES) {
-            networkCounters.responseBytesRejected += 1;
-            if (!terminalReason) terminalReason = 'observation_too_large';
-            source.destroy(); destination.destroy(); return;
-          }
-          staticBytes += chunk.length; destination.write(chunk);
-        });
-        if (head.length) socket.write(head);
+        const relay = (source, destination) => {
+          source.on('data', chunk => {
+            if (state.closed) return;
+            if (source.destroyed || destination.destroyed || destination.writableEnded || destination.writableFinished) {
+              closeTunnel(); return;
+            }
+            const relayAuthorization = currentConnectAuthorization(authority, host, localTunnel, localParsed, parsed);
+            if (relayAuthorization.reviewAllowed
+                && (!relayAuthorization.reviewExpiry || relayAuthorization.reviewExpiry <= Date.now())) {
+              closeTunnel(); return;
+            }
+            if (transferred + chunk.length > MAX_STATIC_BYTES || staticBytes + chunk.length > MAX_STATIC_BYTES) {
+              networkCounters.responseBytesRejected += 1;
+              if (!terminalReason) terminalReason = 'observation_too_large';
+              closeTunnel(); return;
+            }
+            if (!safeWrite(destination, chunk)) return;
+            transferred += chunk.length;
+            staticBytes += chunk.length;
+          });
+          source.once('error', onSocketError);
+        };
+        if (head.length) safeWrite(socket, head);
         relay(socket, client); relay(client, socket);
       });
+      socket.on('error', onSocketError);
       trackProxyTunnel(socket, authorization.reviewExpiry);
       trackProxyTunnel(client, authorization.reviewExpiry);
-      socket.on('error', () => client.destroy());
     };
     void (async () => {
       try {

@@ -1178,19 +1178,35 @@ def _run_import_feed(connection, args: argparse.Namespace, preloaded_jobs: list[
     run_id = record_sync_run(connection, args.source, mode)
     returned = 0
     seen = 0
+    transaction_started = False
 
     def finish_failure(error: str) -> None:
-        update_sync_run(
-            connection,
-            run_id,
-            finished_at=utc_now(),
-            success=False,
-            jobs_seen=seen,
-            jobs_returned=returned,
-            jobs_inserted=0,
-            jobs_updated=0,
-            error=error,
-        )
+        try:
+            update_sync_run(
+                connection,
+                run_id,
+                finished_at=utc_now(),
+                success=False,
+                jobs_seen=seen,
+                jobs_returned=returned,
+                jobs_inserted=0,
+                jobs_updated=0,
+                error=error,
+            )
+        except BaseException:
+            # Keep the import failure and its public mapping primary if the
+            # best-effort failure audit cannot be persisted.
+            pass
+
+    def rollback_import() -> None:
+        nonlocal transaction_started
+        if not transaction_started:
+            return
+        transaction_started = False
+        try:
+            connection.rollback()
+        except BaseException:
+            pass
 
     try:
         if args.json_file:
@@ -1209,6 +1225,8 @@ def _run_import_feed(connection, args: argparse.Namespace, preloaded_jobs: list[
                 finish_failure("source import failed")
                 raise _CliFailure("workflow_error") from exc
 
+        connection.execute("BEGIN")
+        transaction_started = True
         if isinstance(raw_jobs, (list, tuple)):
             returned = len(raw_jobs)
             seen = returned
@@ -1224,17 +1242,22 @@ def _run_import_feed(connection, args: argparse.Namespace, preloaded_jobs: list[
             jobs_updated=updated,
             error=None,
         )
+        transaction_started = False
         print(json.dumps({"seen": seen, "inserted": inserted, "updated": updated}, sort_keys=True))
         return 0
     except _CliFailure:
+        rollback_import()
         raise
     except (RecursionError, TypeError, ValueError) as exc:
+        rollback_import()
         finish_failure("source payload rejected")
         raise _CliFailure("invalid_input") from exc
     except sqlite3.DatabaseError:
+        rollback_import()
         finish_failure("database operation failed")
         raise
     except Exception as exc:
+        rollback_import()
         finish_failure("source import failed")
         raise _CliFailure("workflow_error") from exc
 

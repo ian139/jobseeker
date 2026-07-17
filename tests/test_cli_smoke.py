@@ -1,4 +1,5 @@
 import httpx
+import sqlite3
 import json
 
 import pytest
@@ -828,6 +829,94 @@ def test_cli_import_feed_failure_rolls_back_jobs_but_audits_attempt(tmp_path: Pa
         assert run["error"] == "source payload rejected"
     finally:
         connection.close()
+
+def test_cli_import_feed_success_audit_failure_rolls_back_jobs_and_audits_failure(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text(
+        '{"jobs":[{"id":"audit-fail","title":"Audit Engineer","company":"Acme",'
+        '"apply_url":"https://jobs.example.com/audit-fail"}]}',
+        encoding="utf-8",
+    )
+    real_update_sync_run = cli_mod.update_sync_run
+    calls: list[bool] = []
+
+    def fail_success_audit(connection, run_id: int, **kwargs):
+        calls.append(bool(kwargs["success"]))
+        if kwargs["success"]:
+            raise sqlite3.DatabaseError("injected terminal success audit failure")
+        return real_update_sync_run(connection, run_id, **kwargs)
+
+    monkeypatch.setattr(cli_mod, "update_sync_run", fail_success_audit)
+
+    assert main(["--db", str(db), "import-feed", "--json-file", str(fixture), "--source", "file-feed"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error": {"code": "database_error", "message": "database operation failed"}
+    }
+    assert calls == [True, False]
+
+    connection = connect(db)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        run = connection.execute(
+            "SELECT jobs_seen, jobs_returned, jobs_inserted, jobs_updated, finished_at, success, error "
+            "FROM sync_runs"
+        ).fetchone()
+        assert (run["jobs_seen"], run["jobs_returned"], run["jobs_inserted"], run["jobs_updated"]) == (1, 1, 0, 0)
+        assert run["finished_at"]
+        assert run["success"] == 0
+        assert run["error"] == "database operation failed"
+    finally:
+        connection.close()
+
+
+def test_cli_import_feed_double_audit_failure_preserves_original_error_mapping(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text(
+        '{"jobs":[{"id":"double-audit-fail","title":"Database Engineer","company":"Acme",'
+        '"apply_url":"https://jobs.example.com/double-audit-fail"}]}',
+        encoding="utf-8",
+    )
+    calls: list[bool] = []
+
+    def fail_both_audits(connection, run_id: int, **kwargs):
+        calls.append(bool(kwargs["success"]))
+        if kwargs["success"]:
+            raise sqlite3.DatabaseError("injected terminal success audit failure")
+        raise RuntimeError("injected failure audit failure")
+
+    monkeypatch.setattr(cli_mod, "update_sync_run", fail_both_audits)
+
+    assert main(["--db", str(db), "import-feed", "--json-file", str(fixture), "--source", "file-feed"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error": {"code": "database_error", "message": "database operation failed"}
+    }
+    assert calls == [True, False]
+
+    connection = connect(db)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        run = connection.execute(
+            "SELECT jobs_seen, jobs_returned, jobs_inserted, jobs_updated, finished_at, success, error "
+            "FROM sync_runs"
+        ).fetchone()
+        assert (run["jobs_seen"], run["jobs_returned"], run["jobs_inserted"], run["jobs_updated"]) == (0, 0, 0, 0)
+        assert run["finished_at"] is None
+        assert run["success"] == 0
+        assert run["error"] is None
+    finally:
+        connection.close()
+
+
 
 
 class FakeTheirStackClient:

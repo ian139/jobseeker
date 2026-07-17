@@ -1193,20 +1193,21 @@ def _run_import_feed(connection, args: argparse.Namespace, preloaded_jobs: list[
                 jobs_updated=0,
                 error=error,
             )
-        except BaseException:
+        except Exception:
             # Keep the import failure and its public mapping primary if the
             # best-effort failure audit cannot be persisted.
             pass
 
-    def rollback_import() -> None:
+    def rollback_import() -> bool:
         nonlocal transaction_started
         if not transaction_started:
-            return
-        transaction_started = False
+            return True
         try:
             connection.rollback()
-        except BaseException:
-            pass
+        except Exception:
+            return False
+        transaction_started = False
+        return True
 
     try:
         if args.json_file:
@@ -1249,16 +1250,16 @@ def _run_import_feed(connection, args: argparse.Namespace, preloaded_jobs: list[
         rollback_import()
         raise
     except (RecursionError, TypeError, ValueError) as exc:
-        rollback_import()
-        finish_failure("source payload rejected")
+        if rollback_import():
+            finish_failure("source payload rejected")
         raise _CliFailure("invalid_input") from exc
     except sqlite3.DatabaseError:
-        rollback_import()
-        finish_failure("database operation failed")
+        if rollback_import():
+            finish_failure("database operation failed")
         raise
     except Exception as exc:
-        rollback_import()
-        finish_failure("source import failed")
+        if rollback_import():
+            finish_failure("source import failed")
         raise _CliFailure("workflow_error") from exc
 
 def _validate_backlog_list_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:

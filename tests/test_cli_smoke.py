@@ -919,6 +919,74 @@ def test_cli_import_feed_double_audit_failure_preserves_original_error_mapping(
 
 
 
+def test_cli_import_feed_rollback_failure_skips_failure_audit(tmp_path: Path, capsys, monkeypatch) -> None:
+    db = tmp_path / "jobs.sqlite3"
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text(
+        '{"jobs":[{"id":"rollback-fail","title":"Rollback Engineer","company":"Acme",'
+        '"apply_url":"https://jobs.example.com/rollback-fail"}]}',
+        encoding="utf-8",
+    )
+
+    class RollbackFailureConnection:
+        def __init__(self, inner):
+            self.inner = inner
+            self.rollback_calls = 0
+
+        def rollback(self):
+            self.rollback_calls += 1
+            raise sqlite3.DatabaseError("injected rollback failure")
+
+        def close(self):
+            self.inner.close()
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+    real_connect = cli_mod.connect
+    connections: list[RollbackFailureConnection] = []
+
+    def fail_connect(path):
+        connection = RollbackFailureConnection(real_connect(path))
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(cli_mod, "connect", fail_connect)
+    real_update_sync_run = cli_mod.update_sync_run
+    calls: list[bool] = []
+
+    def fail_success_audit(connection, run_id: int, **kwargs):
+        calls.append(bool(kwargs["success"]))
+        if kwargs["success"]:
+            raise sqlite3.DatabaseError("injected terminal success audit failure")
+        return real_update_sync_run(connection, run_id, **kwargs)
+
+    monkeypatch.setattr(cli_mod, "update_sync_run", fail_success_audit)
+
+    assert main(["--db", str(db), "import-feed", "--json-file", str(fixture), "--source", "file-feed"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "error": {"code": "database_error", "message": "database operation failed"}
+    }
+    assert calls == [True]
+    assert connections[0].rollback_calls == 1
+
+    connection = connect(db)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 0
+        run = connection.execute(
+            "SELECT jobs_seen, jobs_returned, jobs_inserted, jobs_updated, finished_at, success, error "
+            "FROM sync_runs"
+        ).fetchone()
+        assert (run["jobs_seen"], run["jobs_returned"], run["jobs_inserted"], run["jobs_updated"]) == (0, 0, 0, 0)
+        assert run["finished_at"] is None
+        assert run["success"] == 0
+        assert run["error"] is None
+    finally:
+        connection.close()
+
+
 class FakeTheirStackClient:
     """Fake TheirStackClient that returns a canned response without HTTP."""
 

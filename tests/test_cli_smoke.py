@@ -1,6 +1,7 @@
 import httpx
 import sqlite3
 import json
+import sys
 
 import pytest
 from pathlib import Path
@@ -982,6 +983,52 @@ def test_cli_import_feed_rollback_failure_skips_failure_audit(tmp_path: Path, ca
         assert (run["jobs_seen"], run["jobs_returned"], run["jobs_inserted"], run["jobs_updated"]) == (0, 0, 0, 0)
         assert run["finished_at"] is None
         assert run["success"] == 0
+        assert run["error"] is None
+    finally:
+        connection.close()
+
+
+def test_cli_import_feed_stdout_failure_preserves_success_audit_and_jobs(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    """A stdout failure after a committed success audit must not rewrite it or mutate jobs."""
+    db = tmp_path / "jobs.sqlite3"
+    fixture = tmp_path / "jobs.json"
+    fixture.write_text(
+        '{"jobs":[{"id":"stdout-fail","title":"Stdout Engineer","company":"Acme",'
+        '"apply_url":"https://jobs.example.com/stdout-fail"}]}',
+        encoding="utf-8",
+    )
+
+    class FailingStdout:
+        def write(self, s: str) -> int:
+            raise OSError(28, "stdout failure")
+
+        def flush(self) -> None:
+            pass
+
+    monkeypatch.setattr(sys, "stdout", FailingStdout())
+
+    with pytest.raises(OSError, match="stdout failure"):
+        main(["--db", str(db), "import-feed", "--json-file", str(fixture), "--source", "file-feed"])
+
+    connection = connect(db)
+    try:
+        assert connection.execute("SELECT COUNT(*) FROM jobs").fetchone()[0] == 1
+        run = connection.execute(
+            "SELECT source, mode, jobs_seen, jobs_returned, jobs_inserted, jobs_updated, "
+            "finished_at, success, error FROM sync_runs"
+        ).fetchone()
+        assert run["source"] == "file-feed"
+        assert run["mode"] == "json_file"
+        assert (
+            run["jobs_seen"],
+            run["jobs_returned"],
+            run["jobs_inserted"],
+            run["jobs_updated"],
+        ) == (1, 1, 1, 0)
+        assert run["finished_at"]
+        assert run["success"] == 1
         assert run["error"] is None
     finally:
         connection.close()

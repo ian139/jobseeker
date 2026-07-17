@@ -1244,8 +1244,6 @@ def _run_import_feed(connection, args: argparse.Namespace, preloaded_jobs: list[
             error=None,
         )
         transaction_started = False
-        print(json.dumps({"seen": seen, "inserted": inserted, "updated": updated}, sort_keys=True))
-        return 0
     except _CliFailure:
         rollback_import()
         raise
@@ -1261,6 +1259,9 @@ def _run_import_feed(connection, args: argparse.Namespace, preloaded_jobs: list[
         if rollback_import():
             finish_failure("source import failed")
         raise _CliFailure("workflow_error") from exc
+
+    print(json.dumps({"seen": seen, "inserted": inserted, "updated": updated}, sort_keys=True))
+    return 0
 
 def _validate_backlog_list_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Reject backlog-list controls before opening SQLite."""

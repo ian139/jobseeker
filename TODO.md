@@ -155,6 +155,41 @@ every future adapter and preference feature.
       checks pass; the independent Wave 31 safety review found no remaining
       actionable issue.
 
+- [x] Close inherited native/ARIA-disabled actionability at code checkpoint
+      `e4eea72`. Observation now propagates `aria-disabled="true"` ancestry,
+      and action-time guards reject drift before text/checkbox/select mutation,
+      event dispatch, staged upload, ordinary button dispatch, or same-job
+      continuation. Uploads clean rejected immutable staging; continuation
+      semantics, exact identity, visibility, hit testing, and disabled state
+      are revalidated while the one-use navigation permit is absent, then the
+      permit is created synchronously immediately before `page.goto`.
+      Token-gated browser regressions cover native fieldset inheritance,
+      direct ARIA state, ancestor state, fill/check/single-select/multi-select,
+      upload cleanup/no-dispatch, and semantic/ARIA continuation drift.
+      Full Python (722 passed, 67 skipped), full headed browser adapter
+      (99 passed, 2 skipped), lock, CLI, Ruff, protocol/self-tests, wheel,
+      Compose, and isolated container checks pass; two independent safety
+      reviews found no remaining actionable issue. Puppeteer's upload and
+      navigation CDP calls necessarily follow rather than share the renderer
+      evaluation; the guard-to-command boundary is immediate, and no concrete
+      bypass was established.
+
+- [x] Bind same-job continuation permits to coordinator navigation provenance
+      at code checkpoint `4c289db`. A permit now requires matching main-frame
+      `frameStartedNavigating`, network request/loader/frame identifiers, a
+      browser-initiated request, exact route identity, and committed
+      destination before post-commit static assets are eligible. Renderer
+      navigation intent revokes the permit terminally before transport.
+      Token-gated regressions cover `location.assign`, programmatic anchor
+      clicks, and meta refresh races with zero destination or final-submit
+      requests; legitimate continuation and post-commit static loading remain
+      allowed. Full Python (722 passed, 70 skipped), the repository browser
+      gate (103 passed, 1 intentionally deselected), focused race checks,
+      lock, CLI, Ruff, protocol/self-tests, wheel, and isolated container smoke
+      pass. One initial all-adapter run had a transient headed emergency-cleanup
+      failure; its exact parameter and the repository gate passed on rerun.
+      Independent safety review found no remaining actionable issue.
+
 ## Open gaps and blockers
 
 - [ ] Physical headed review-window survival remains a manual host gate requiring a benign human click and tab/window close. It is intentionally excluded by exact test name from `npm run puppeteer-verify`; no code path automates the physical action.

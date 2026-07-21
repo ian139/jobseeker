@@ -1038,6 +1038,13 @@ class PuppeteerSession:
         if not token:
             raise BrowserAdapterError("test_select_drift_unavailable")
         return self.request({"action": "test_aria_disabled_drift", "test_drift_token": token})
+    def _arm_navigation_race_for_test(self, mode: str) -> dict[str, Any]:
+        token = getattr(self, "_test_drift_token", None)
+        if not token:
+            raise BrowserAdapterError("test_select_drift_unavailable")
+        return self.request(
+            {"action": "test_navigation_race", "test_drift_token": token, "mode": mode}
+        )
     def _fill_receive_buffer(self, deadline: float) -> None:
         if self.process.stdout is None:
             raise BrowserAdapterError("adapter_stdout_missing")

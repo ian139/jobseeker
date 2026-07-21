@@ -198,6 +198,7 @@ let reviewPermit = null;
 let continuationNavigationPermit = null;
 let testButtonSemanticDriftArmed = false;
 let testAriaDisabledDriftArmed = false;
+let testNavigationRaceMode = null;
 let reviewLedger = new Map();
 let reviewEpoch = null;
 const proxyPermitUrls = new Map();
@@ -527,8 +528,7 @@ function continuationRouteAllowed(url, permit = activeContinuationPermit()) {
   const route = routeIdentityForUrl(url);
   return Boolean(route && sameDocumentRoute(route, permit.routeIdentity));
 }
-function continuationNavigationRequestAllowed(url, method = 'GET') {
-  const permit = activeContinuationPermit();
+function continuationNavigationCandidateAllowed(url, method = 'GET', permit = activeContinuationPermit()) {
   const parsed = safeUrl(url);
   return Boolean(
     permit
@@ -536,6 +536,18 @@ function continuationNavigationRequestAllowed(url, method = 'GET') {
       && parsed
       && parsed.href === permit.url
       && continuationRouteAllowed(parsed.href, permit),
+  );
+}
+function continuationNavigationRequestAllowed(url, method = 'GET') {
+  const permit = activeContinuationPermit();
+  return Boolean(
+    permit
+      && permit.navigationRequestId
+      && permit.navigationLoaderId
+      && permit.navigationFrameId
+      && permit.navigationStartedLoaderId
+      && permit.navigationStartedFrameId
+      && continuationNavigationCandidateAllowed(url, method, permit),
   );
 }
 function continuationDestinationCommitted(permit) {
@@ -1143,19 +1155,64 @@ async function installPageNetworkIntentGuard(targetPage) {
   const client = await targetPage.createCDPSession();
   await client.send('Network.enable');
   await client.send('Page.enable');
+  const frameTree = await client.send('Page.getFrameTree').catch(() => null);
+  let guardedMainFrameId = typeof frameTree?.frameTree?.frame?.id === 'string'
+    ? frameTree.frameTree.frame.id : null;
+  client.on('Page.frameRequestedNavigation', params => {
+    const permit = activeContinuationPermit();
+    if (!permit) return;
+    const frameId = typeof params?.frameId === 'string' ? params.frameId : '';
+    if (!guardedMainFrameId || !frameId || frameId === guardedMainFrameId) {
+      recordUnsafePageNetworkIntent('unsafe_navigation_target');
+    }
+  });
+  client.on('Page.frameStartedNavigating', params => {
+    const permit = activeContinuationPermit();
+    if (!permit) return;
+    const frameId = typeof params?.frameId === 'string' ? params.frameId : '';
+    const loaderId = typeof params?.loaderId === 'string' ? params.loaderId : '';
+    const url = safeUrl(params?.url)?.href || '';
+    if (!guardedMainFrameId || frameId !== guardedMainFrameId) return;
+    const sameBinding = permit.navigationStartedLoaderId === null || (
+      permit.navigationStartedLoaderId === loaderId
+      && permit.navigationStartedFrameId === frameId
+    );
+    if (!loaderId || url !== permit.url || !sameBinding) {
+      recordUnsafePageNetworkIntent('unsafe_navigation_target');
+      return;
+    }
+    permit.navigationStartedLoaderId = loaderId;
+    permit.navigationStartedFrameId = frameId;
+  });
   client.on('Network.requestWillBeSent', params => {
     const requestUrl = params?.request?.url;
     const requestMethod = String(params?.request?.method || 'GET').toUpperCase();
-    const continuationAllowed = continuationNavigationRequestAllowed(requestUrl, requestMethod)
-      || continuationStaticRequestAllowed(requestUrl, requestMethod, params?.type);
     const permit = activeContinuationPermit();
+    let controlledNavigationAllowed = false;
     if (permit && params?.type === 'Document'
-        && continuationNavigationRequestAllowed(requestUrl, requestMethod)
-        && params?.requestId && params?.loaderId && params?.frameId) {
-      permit.navigationRequestId = String(params.requestId);
-      permit.navigationLoaderId = String(params.loaderId);
-      permit.navigationFrameId = String(params.frameId);
+        && continuationNavigationCandidateAllowed(requestUrl, requestMethod, permit)) {
+      const requestId = typeof params?.requestId === 'string' ? params.requestId : '';
+      const loaderId = typeof params?.loaderId === 'string' ? params.loaderId : '';
+      const frameId = typeof params?.frameId === 'string' ? params.frameId : '';
+      const sameBinding = permit.navigationRequestId === null || (
+        permit.navigationRequestId === requestId
+        && permit.navigationLoaderId === loaderId
+        && permit.navigationFrameId === frameId
+      );
+      const startedBinding = permit.navigationStartedLoaderId === loaderId
+        && permit.navigationStartedFrameId === frameId;
+      if (params?.initiator?.type !== 'other' || !requestId || !loaderId || !frameId
+          || !startedBinding || !sameBinding) {
+        recordUnsafePageNetworkIntent('unsafe_navigation_target');
+        return;
+      }
+      permit.navigationRequestId = requestId;
+      permit.navigationLoaderId = loaderId;
+      permit.navigationFrameId = frameId;
+      controlledNavigationAllowed = true;
     }
+    const continuationAllowed = controlledNavigationAllowed
+      || continuationStaticRequestAllowed(requestUrl, requestMethod, params?.type);
     if (!firstApplicantMutation || reviewState === 'open_guarded'
         || continuationAllowed
         || isImplicitBrowserFaviconIntent(targetPage, params)) return;
@@ -1167,10 +1224,13 @@ async function installPageNetworkIntentGuard(targetPage) {
     recordUnsafePageNetworkIntent(reason);
   });
   client.on('Page.frameNavigated', params => {
-    const permit = activeContinuationPermit();
     const frame = params?.frame;
+    if (frame && !frame.parentId && typeof frame.id === 'string') guardedMainFrameId = frame.id;
+    const permit = activeContinuationPermit();
     if (!permit || !frame || frame.parentId || !frame.loaderId
+        || String(frame.loaderId) !== permit.navigationStartedLoaderId
         || String(frame.loaderId) !== permit.navigationLoaderId
+        || String(frame.id) !== permit.navigationStartedFrameId
         || String(frame.id) !== permit.navigationFrameId
         || safeUrl(frame.url)?.href !== permit.url
         || !continuationRouteAllowed(frame.url, permit)) return;
@@ -1333,9 +1393,11 @@ async function installRequestGuards(targetPage) {
     const redirectChain = typeof request.redirectChain === 'function' ? request.redirectChain() : [];
     const redirectExceeded = redirectChain.length > MAX_REDIRECTS;
     if (redirectExceeded) networkCounters.redirectsDenied += 1;
+    const requestInitiator = typeof request.initiator === 'function' ? request.initiator() : null;
     const continuationNavigationAllowed = navigation
       && request.frame?.() === targetPage.mainFrame()
       && continuationNavigationRequestAllowed(url, method)
+      && requestInitiator?.type === 'other'
       && continuationFrameRouteAllowed(request);
     const continuationStaticAllowed = !navigation
       && continuationStaticRequestAllowed(url, method, type)
@@ -2094,6 +2156,16 @@ function testAriaDisabledDrift(command) {
     throw new Error('test_select_drift_unavailable');
   }
   testAriaDisabledDriftArmed = true;
+  return { armed: true };
+}
+function testNavigationRace(command) {
+  const expected = process.env.JOBS_ASSISTANT_TEST_DRIFT_TOKEN;
+  const modes = new Set(['location_assign', 'anchor_click', 'meta_refresh']);
+  if (!expected || typeof command.test_drift_token !== 'string' || command.test_drift_token !== expected
+      || typeof command.mode !== 'string' || !modes.has(command.mode)) {
+    throw new Error('test_select_drift_unavailable');
+  }
+  testNavigationRaceMode = command.mode;
   return { armed: true };
 }
 
@@ -2925,6 +2997,8 @@ async function buttonAction(handle, info, command, frame, observedFrameChain) {
   testButtonSemanticDriftArmed = false;
   const forceAriaDisabledDrift = testAriaDisabledDriftArmed;
   testAriaDisabledDriftArmed = false;
+  const forceNavigationRaceMode = testNavigationRaceMode;
+  testNavigationRaceMode = null;
   if (navigationContinuation) {
     const atomicError = await handle.evaluate(atomicGuardedProgressAction, {
       expected: beforeActionInfo,
@@ -2944,9 +3018,33 @@ async function buttonAction(handle, info, command, frame, observedFrameChain) {
       navigationRequestId: null,
       navigationLoaderId: null,
       navigationFrameId: null,
+      navigationStartedLoaderId: null,
+      navigationStartedFrameId: null,
       committed: false,
       expires: Date.now() + 5000,
     };
+    if (forceNavigationRaceMode) {
+      await handle.evaluate((el, mode) => {
+        const hrefGetter = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'href')?.get;
+        if (typeof hrefGetter !== 'function') throw new Error('prototype_poisoned');
+        const href = String(hrefGetter.call(el) || '');
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+          if (mode === 'anchor_click') setTimeout(() => el.click(), 0);
+          else if (mode === 'meta_refresh') {
+            setTimeout(() => {
+              const meta = document.createElement('meta');
+              meta.httpEquiv = 'refresh';
+              meta.content = `0;url=${href}`;
+              document.head.append(meta);
+            }, 0);
+          } else setTimeout(() => window.location.assign(href), 0);
+        }
+      }, forceNavigationRaceMode).catch(() => {});
+      await new Promise(resolve => setTimeout(resolve, 25));
+      if (terminalReason || !activeContinuationPermit()) {
+        throw new Error(guardedMutationNetworkError());
+      }
+    }
     try {
       await page.goto(candidate.href, { waitUntil: 'domcontentloaded', timeout: 5000 });
       if (!continuationDestinationCommitted(continuationNavigationPermit)) {
@@ -3391,6 +3489,7 @@ async function handle(command) {
     case 'test_select_drift': return testSelectDrift(command);
     case 'test_button_semantic_drift': return testButtonSemanticDrift(command);
     case 'test_aria_disabled_drift': return testAriaDisabledDrift(command);
+    case 'test_navigation_race': return testNavigationRace(command);
     case 'close': await close(); return {};
     default: throw new Error(`unknown_action:${String(command.action || '')}`);
   }

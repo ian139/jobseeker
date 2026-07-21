@@ -1406,6 +1406,40 @@ def test_anchor_continuation_aria_disabled_drift_does_not_navigate(fixture_serve
 
 
 @BROWSER_INTEGRATION_SKIP
+@pytest.mark.parametrize("race_mode", ["location_assign", "anchor_click", "meta_refresh"])
+def test_anchor_continuation_rejects_renderer_navigation_racing_page_goto(
+    fixture_server,
+    race_mode,
+):
+    transport_url = fixture_server.replace("/clean", "/continue-anchor")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id=f"session-anchor-renderer-race-{race_mode}",
+        run_id=54,
+        job_id=123,
+        internal_transport_url=transport_url,
+        test_drift=True,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        continuation = next(
+            button
+            for button in observation["buttons"]
+            if button["element_id"] == "continue-anchor"
+        )
+        before_fixture_requests = FixtureHandler.fixture_requests
+
+        assert session._arm_navigation_race_for_test(race_mode)["armed"] is True
+        with pytest.raises(BrowserAdapterError, match="unsafe_navigation_target"):
+            session.click_offline(continuation["target_id"], continuation=True)
+
+        assert session.network_counters()["terminal_reason"] == "unsafe_navigation_target"
+        assert FixtureHandler.fixture_requests == before_fixture_requests
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
 def test_anchor_continuation_allows_approved_static_after_destination_commit(fixture_server):
     transport_url = fixture_server.replace("/clean", "/continue-anchor-static")
     logical_url = "https://boards.greenhouse.io/fixture/jobs/123"

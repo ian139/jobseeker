@@ -53,7 +53,10 @@ def _field(
     group_id: str | None = None,
     required: bool = False,
     readonly: bool = False,
+    visible: bool = True,
+    enabled: bool = True,
     safety_descriptors: tuple[str, ...] = (),
+    validity_flags: tuple[str, ...] = (),
     accept: tuple[str, ...] = (),
     options: tuple[ObservedOption, ...] = (),
     min_length: int | None = None,
@@ -79,13 +82,13 @@ def _field(
         safety_descriptors=safety_descriptors,
         selector=f"#{target_id}",
         required=required,
-        visible=True,
-        enabled=True,
+        visible=visible,
+        enabled=enabled,
         readonly=readonly,
         value=value,
         will_validate=True,
         valid=True,
-        validity_flags=(),
+        validity_flags=validity_flags,
         file_count=0,
         file_basenames=(),
         accept=accept,
@@ -736,10 +739,116 @@ def test_resume_requires_exact_label_and_emits_no_path(tmp_path: Path) -> None:
             _context(resume=True),
             resume_context=resume,
         ) == ()
-        assert canonical_greenhouse_fact(_field(kind="file", name="resume", label="")) is None
+        assert canonical_greenhouse_fact(_field(kind="file", name="resume", label="")) == "resume"
         assert adapter.deterministic_answers(exact, _context(resume=False), resume_context=resume) == ()
     finally:
         resume.close()
+
+def test_resume_name_identity_selects_only_resume_attach_input(tmp_path: Path) -> None:
+    resume_path = tmp_path / "Main_Resume.pdf"
+    resume_path.write_bytes(_valid_empty_pdf())
+    resume = load_resume_context(resume_path)
+    try:
+        accept = (".pdf", ".doc", ".docx", ".txt", ".rtf")
+        observation = _observation(
+            _field(
+                target_id="resume-upload",
+                kind="file",
+                name="resume",
+                label="Attach",
+                accept=accept,
+            ),
+            _field(
+                target_id="cover-letter-upload",
+                kind="file",
+                name="cover_letter",
+                label="Attach",
+                accept=accept,
+            ),
+            _field(
+                target_id="cover-letter-labeled-resume",
+                kind="file",
+                name="cover_letter",
+                label="Resume",
+                accept=accept,
+            ),
+            _field(
+                target_id="conflicting-upload",
+                kind="file",
+                name="resume",
+                label="Cover Letter",
+                accept=accept,
+            ),
+            _field(
+                target_id="generic-upload",
+                kind="file",
+                label="Attach",
+                accept=accept,
+            ),
+        )
+        answers = GreenhouseAdapter().deterministic_answers(
+            observation,
+            _context(resume=True),
+            resume_context=resume,
+        )
+        assert answers == (
+            FieldAnswer("resume-upload", "", 1.0, "configured resume upload", "configured"),
+        )
+    finally:
+        resume.close()
+
+def test_duplicate_resume_candidates_fail_closed(tmp_path: Path) -> None:
+    resume_path = tmp_path / "Main_Resume.pdf"
+    resume_path.write_bytes(_valid_empty_pdf())
+    resume = load_resume_context(resume_path)
+    try:
+        accept = (".pdf", ".doc", ".docx", ".txt", ".rtf")
+        observation = _observation(
+            _field(target_id="resume-upload-a", kind="file", name="resume", label="Attach", accept=accept),
+            _field(target_id="resume-upload-b", kind="file", name="cv", label="Attach", accept=accept),
+        )
+        assert GreenhouseAdapter().deterministic_answers(
+            observation,
+            _context(resume=True),
+            resume_context=resume,
+        ) == ()
+    finally:
+        resume.close()
+
+def test_resume_identity_collision_with_hidden_duplicate_is_manual(tmp_path: Path) -> None:
+    resume_path = tmp_path / "Main_Resume.pdf"
+    resume_path.write_bytes(_valid_empty_pdf())
+    resume = load_resume_context(resume_path)
+    try:
+        accept = (".pdf", ".doc", ".docx", ".txt", ".rtf")
+        observation = _observation(
+            _field(
+                target_id="visible-resume",
+                kind="file",
+                name="resume",
+                label="Attach",
+                accept=accept,
+                validity_flags=("field_identity_collision",),
+            ),
+            _field(
+                target_id="hidden-resume-duplicate",
+                kind="file",
+                name="cv",
+                label="Attach",
+                accept=accept,
+                visible=False,
+            ),
+        )
+        assert GreenhouseAdapter().deterministic_answers(
+            observation,
+            _context(resume=True),
+            resume_context=resume,
+        ) == ()
+    finally:
+        resume.close()
+
+
+
 
 
 def test_corrupt_pdf_is_rejected(tmp_path: Path) -> None:

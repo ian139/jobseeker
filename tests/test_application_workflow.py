@@ -732,6 +732,7 @@ def test_lever_eu_safe_action_origin_is_allowed() -> None:
         "click_key": "click-safe",
         "element_kind": "button",
         "button_type": "button",
+        "text": "Continue",
         "enabled": True,
         "visible": True,
     }
@@ -1169,6 +1170,279 @@ def test_workflow_dispatches_input_type_button_offline_with_no_continuation_perm
     assert evidence["continuation_permit"] is False
 
 
+def test_workflow_dispatches_anchor_get_continuation_before_mutation(monkeypatch, tmp_path: Path) -> None:
+    url = "https://boards.greenhouse.io/a/jobs/740"
+    destinations = (
+        f"{url}?gh_src=step-2",
+        f"{url}?gh_src=step-3",
+    )
+    claims = [ApplicationClaim(740, {"id": 740, "canonical_url": url, "title": "Anchor Continuation"})]
+    resolver_calls: list[tuple[str, str, str, str]] = []
+    resolver_selections: list[tuple[str, str]] = []
+
+    class AnchorContinuationSession(FakeSession):
+        observations = 0
+        clicks: list[tuple[str, bool]] = []
+        final_submit_calls = 0
+        current_url = url
+
+        @classmethod
+        def start(cls, **kwargs):
+            return cls(kwargs["session_manifest"])
+
+        def observe(self):
+            type(self).observations += 1
+            observation_number = type(self).observations
+            payload = _payload()
+            payload["observation_id"] = f"obs-{observation_number}"
+            payload["url"] = type(self).current_url
+            payload["final_submit_target_ids"] = ["final-submit"]
+            if observation_number in (1, 2):
+                destination = destinations[observation_number - 1]
+                payload["buttons"] = [
+                    {
+                        "target_id": "anchor-continue",
+                        "frame_id": "frame-0",
+                        "frame_url": payload["url"],
+                        "click_key": "shared-anchor-continue-key",
+                        "element_kind": "a",
+                        "button_type": "",
+                        "text": "Continue to application",
+                        "href_url": destination,
+                        "href_attribute": destination,
+                        "target": None,
+                        "download": False,
+                        "visible": True,
+                        "enabled": True,
+                        "safety_descriptors": [],
+                    },
+                    {
+                        "target_id": "final-submit",
+                        "frame_id": "frame-0",
+                        "frame_url": payload["url"],
+                        "click_key": "final-submit-key",
+                        "element_kind": "button",
+                        "button_type": "submit",
+                        "text": "Submit application",
+                        "visible": True,
+                        "enabled": True,
+                        "safety_descriptors": [],
+                    },
+                ]
+            else:
+                payload["buttons"] = [
+                    {
+                        "target_id": "final-submit",
+                        "frame_id": "frame-0",
+                        "frame_url": payload["url"],
+                        "click_key": "final-submit-key",
+                        "element_kind": "button",
+                        "button_type": "submit",
+                        "text": "Submit application",
+                        "visible": True,
+                        "enabled": True,
+                        "safety_descriptors": [],
+                    },
+                ]
+            return payload
+
+        def click_offline(self, target_id, continuation=False):
+            type(self).clicks.append((target_id, continuation))
+            assert target_id == "anchor-continue"
+            assert continuation is True
+            destination = destinations[len(type(self).clicks) - 1]
+            type(self).current_url = destination
+            return {"clicked": True, "counters": {}}
+
+    monkeypatch.setattr(app, "PuppeteerSession", AnchorContinuationSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in ("register_application_artifact", "register_application_session", "register_application_owner_process", "register_application_browser_process"):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+
+    def resolve(observation, *args, **kwargs):
+        assert len(observation.buttons) == 1
+        button = observation.buttons[0]
+        expected_destination = destinations[len(resolver_calls)]
+        assert observation.observation_id == f"obs-{len(resolver_calls) + 1}"
+        assert observation.url == (url if not resolver_calls else destinations[-2])
+        assert button.target_id == "anchor-continue"
+        assert button.click_key == "shared-anchor-continue-key"
+        assert button.text == "Continue to application"
+        assert button.href_url == expected_destination
+        resolver_calls.append((observation.observation_id, observation.url, button.target_id, button.href_url))
+        plan = app.AutofillPlan(
+            safe_click_target_id=button.target_id,
+            status="ready",
+            reason_code=app.PublicReasonCode.draft_ready,
+        )
+        resolver_selections.append((observation.observation_id, plan.safe_click_target_id))
+        return plan
+
+    monkeypatch.setattr(app, "resolve_with_llm", resolve)
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+    result = asyncio.run(app.run_application_workflow(object(), resume_file=resume, artifact_root=root))
+
+    assert result[0]["status"] == "review_ready"
+    assert AnchorContinuationSession.observations == 4
+    assert AnchorContinuationSession.clicks == [("anchor-continue", True), ("anchor-continue", True)]
+    assert resolver_calls == [
+        ("obs-1", url, "anchor-continue", destinations[0]),
+        ("obs-2", destinations[0], "anchor-continue", destinations[1]),
+    ]
+    assert resolver_selections == [("obs-1", "anchor-continue"), ("obs-2", "anchor-continue")]
+
+    run_root = root / "run-740"
+    first_observation_path = run_root / "iterations" / "0001" / "observation.json"
+    second_observation_path = run_root / "iterations" / "0002" / "observation.json"
+    first_observation = json.loads(first_observation_path.read_text(encoding="utf-8"))
+    second_observation = json.loads(second_observation_path.read_text(encoding="utf-8"))
+    assert first_observation["url"] == url
+    assert second_observation["url"] == destinations[0]
+    assert next(button["href_url"] for button in first_observation["buttons"] if button["target_id"] == "anchor-continue") == destinations[0]
+    assert next(button["href_url"] for button in second_observation["buttons"] if button["target_id"] == "anchor-continue") == destinations[1]
+
+    manifest = json.loads((run_root / "run.json").read_text(encoding="utf-8"))
+    for iteration, observation_path, expected_observation_id in (
+        (1, first_observation_path, "obs-1"),
+        (2, second_observation_path, "obs-2"),
+    ):
+        evidence_path = run_root / "iterations" / f"{iteration:04d}" / "action_evidence.json"
+        action_path = run_root / "iterations" / f"{iteration:04d}" / "action.json"
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        action = json.loads(action_path.read_text(encoding="utf-8"))
+        assert evidence["continuation_permit"] is True
+        assert evidence["observation_sha256"] == hashlib.sha256(observation_path.read_bytes()).hexdigest()
+        assert action["target_id"] == "anchor-continue"
+        assert action["continuation"] is True
+        assert action["generation"] == expected_observation_id
+        indexed = manifest["iterations"][str(iteration)]["artifacts"]
+        assert indexed["observation"]["sha256"] == hashlib.sha256(observation_path.read_bytes()).hexdigest()
+        assert indexed["action_evidence"]["sha256"] == hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+        assert indexed["action"]["sha256"] == hashlib.sha256(action_path.read_bytes()).hexdigest()
+
+    final_observation = json.loads((run_root / "observation.json").read_text(encoding="utf-8"))
+    assert final_observation["url_host"] == "boards.greenhouse.io"
+    assert AnchorContinuationSession.current_url == destinations[1]
+    actions = json.loads((run_root / "actions.json").read_text(encoding="utf-8"))
+    assert [action["continuation"] for action in actions["actions"]] == [True, True]
+    assert actions["final_submit_calls"] == 0
+    assert AnchorContinuationSession.final_submit_calls == 0
+
+
+def test_workflow_rejects_anchor_get_continuation_after_field_mutation(monkeypatch, tmp_path: Path) -> None:
+    url = "https://boards.greenhouse.io/a/jobs/741"
+    next_url = f"{url}?gh_src=step-2"
+    claims = [ApplicationClaim(741, {"id": 741, "canonical_url": url, "title": "Anchor After Mutation"})]
+
+    class AnchorAfterMutationSession(FakeSession):
+        observations = 0
+        clicks: list[tuple[str, bool]] = []
+        fills: list[tuple[str, str]] = []
+        final_submit_calls = 0
+        current_url = url
+
+        @classmethod
+        def start(cls, **kwargs):
+            return cls(kwargs["session_manifest"])
+
+        def observe(self):
+            type(self).observations += 1
+            payload = _payload()
+            payload["observation_id"] = f"obs-{self.observations}"
+            payload["url"] = type(self).current_url
+            if self.observations in (1, 2):
+                value = "" if self.observations == 1 else "custom-value"
+                payload["fields"] = [{
+                    "target_id": "custom-field",
+                    "field_key": "custom_field",
+                    "kind": "text",
+                    "label": "Custom Field",
+                    "visible": True,
+                    "enabled": True,
+                    "required": False,
+                    "valid": True,
+                    "value": value,
+                }]
+                payload["buttons"] = [
+                    {
+                        "target_id": "anchor-continue",
+                        "frame_id": "frame-0",
+                        "frame_url": payload["url"],
+                        "click_key": "anchor-continue-key",
+                        "element_kind": "a",
+                        "button_type": "",
+                        "text": "Continue to application",
+                        "href_url": next_url,
+                        "href_attribute": next_url,
+                        "target": None,
+                        "download": False,
+                        "visible": True,
+                        "enabled": True,
+                        "safety_descriptors": [],
+                    },
+                    {
+                        "target_id": "final-submit",
+                        "frame_id": "frame-0",
+                        "frame_url": payload["url"],
+                        "click_key": "final-submit-key",
+                        "element_kind": "button",
+                        "button_type": "submit",
+                        "text": "Submit application",
+                        "visible": True,
+                        "enabled": True,
+                        "safety_descriptors": [],
+                    },
+                ]
+                payload["final_submit_target_ids"] = ["final-submit"]
+            return payload
+
+        def click_offline(self, target_id, continuation=False):
+            type(self).clicks.append((target_id, continuation))
+            return {"clicked": True, "counters": {}}
+
+        def fill(self, target_id, value):
+            type(self).fills.append((target_id, value))
+            return {"filled": True, "counters": {}}
+
+    monkeypatch.setattr(app, "PuppeteerSession", AnchorAfterMutationSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in ("register_application_artifact", "register_application_session", "register_application_owner_process", "register_application_browser_process"):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+
+    def resolve(observation, *args, **kwargs):
+        if observation.observation_id == "obs-1":
+            return app.AutofillPlan(
+                answers=(
+                    app.FieldAnswer("custom-field", "custom-value", 1.0, "test", "inference"),
+                ),
+                safe_click_target_id="anchor-continue",
+                status="ready",
+                reason_code=app.PublicReasonCode.draft_ready,
+            )
+        return app.AutofillPlan()
+
+    monkeypatch.setattr(app, "resolve_with_llm", resolve)
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    root = tmp_path / "artifacts"
+    result = asyncio.run(app.run_application_workflow(object(), resume_file=resume, artifact_root=root))
+
+    assert result[0]["status"] == "blocked"
+    assert result[0]["reason_code"] == "unsafe_navigation_target"
+    assert AnchorAfterMutationSession.fills == [("custom-field", "custom-value")]
+    assert AnchorAfterMutationSession.clicks == []
+    assert AnchorAfterMutationSession.final_submit_calls == 0
+    assert AnchorAfterMutationSession.observations == 2
+    failure = json.loads((root / "run-741" / "browser_failure.json").read_text(encoding="utf-8"))
+    assert failure["stage"] == "mutation"
+    assert failure["operation"] == "route"
+    assert failure["code"] == "unsafe_navigation_target"
+
+
 
 
 def test_frame_origin_unknown_ats_policy_denies_greenhouse_origin() -> None:
@@ -1394,6 +1668,7 @@ def test_cached_safe_click_disappearance_fails_manual(monkeypatch, tmp_path):
                     "click_key": "click-key",
                     "element_kind": "button",
                     "button_type": "button",
+                    "text": "Continue",
                     "visible": True,
                     "enabled": True,
                     "safety_descriptors": [],
@@ -1759,6 +2034,7 @@ def test_each_mutation_failure_is_diagnostic_and_not_retried(monkeypatch, tmp_pa
                     "click_key": "button-key",
                     "element_kind": "button",
                     "button_type": "button",
+                    "text": "Continue",
                     "visible": True,
                     "enabled": True,
                     "safety_descriptors": [],
@@ -2186,6 +2462,55 @@ def test_workflow_preserves_ambiguous_select_for_page_validation(monkeypatch, tm
     ))
     assert result[0]["reason_code"] == "page_validation_error"
 
+
+def test_workflow_ignores_hidden_invalid_identity_collision(monkeypatch, tmp_path: Path) -> None:
+    class HiddenInvalidSession(FakeSession):
+        def observe(self):
+            payload = _payload()
+            payload["fields"] = [{
+                "target_id": "hidden-name",
+                "field_key": "hidden-name",
+                "kind": "text",
+                "label": "Name",
+                "required": True,
+                "visible": False,
+                "enabled": True,
+                "readonly": False,
+                "valid": False,
+                "validity_flags": ["field_identity_collision"],
+                "value": None,
+            }]
+            payload["final_submit_target_ids"] = []
+            return payload
+
+    claims = [ApplicationClaim(
+        306,
+        {"id": 306, "canonical_url": "https://boards.greenhouse.io/a/jobs/306", "title": "Hidden invalid"},
+    )]
+    monkeypatch.setattr(app, "PuppeteerSession", HiddenInvalidSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in (
+        "register_application_artifact",
+        "register_application_session",
+        "register_application_owner_process",
+        "register_application_browser_process",
+    ):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+
+    result = asyncio.run(app.run_application_workflow(
+        object(),
+        limit=1,
+        resume_file=resume,
+        artifact_root=tmp_path / "artifacts",
+        headed=True,
+    ))
+
+    assert result[0]["reason_code"] != "page_validation_error"
+    assert result[0]["status"] == "manual"
+
 def test_workflow_retention_requires_exact_multi_select_tuple(monkeypatch, tmp_path: Path) -> None:
     class DriftingMultiSelectSession(FakeSession):
         def __init__(self, manifest, screenshot_root=None):
@@ -2503,3 +2828,507 @@ def test_workflow_nonempty_invalid_multi_select_is_page_validation_error(monkeyp
     ))
     assert result[0]["status"] == "manual"
     assert result[0]["reason_code"] == "page_validation_error"
+
+def test_workflow_default_preferences_retain_profile_fills_without_submit(monkeypatch, tmp_path: Path) -> None:
+    url = "https://boards.greenhouse.io/acme/jobs/307"
+    claims = [ApplicationClaim(307, {"id": 307, "canonical_url": url, "title": "Profile identity"})]
+
+    class ProfileIdentitySession(FakeSession):
+        instances: list["ProfileIdentitySession"] = []
+
+        @classmethod
+        def start(cls, **kwargs):
+            session = cls(kwargs["session_manifest"], kwargs.get("screenshot_root"))
+            cls.instances.append(session)
+            return session
+
+        def __init__(self, manifest, screenshot_root=None):
+            super().__init__(manifest, screenshot_root)
+            self.values: dict[str, str] = {}
+            self.fills: list[tuple[str, str]] = []
+            self.observed_values: list[tuple[str | None, ...]] = []
+
+        def observe(self):
+            payload = _payload()
+            payload["observation_id"] = f"obs-{len(self.observed_values) + 1}"
+            payload["url"] = url
+            payload["site_markers"] = ["greenhouse"]
+            canonical = (
+                {
+                    "target_id": "first",
+                    "field_key": "first_name",
+                    "kind": "text",
+                    "name": "first_name",
+                    "label": "First Name",
+                },
+                {
+                    "target_id": "last",
+                    "field_key": "last_name",
+                    "kind": "text",
+                    "name": "last_name",
+                    "label": "Last Name",
+                },
+                {
+                    "target_id": "email",
+                    "field_key": "email",
+                    "kind": "email",
+                    "name": "email",
+                    "label": "Email",
+                },
+                {
+                    "target_id": "phone",
+                    "field_key": "phone",
+                    "kind": "tel",
+                    "name": "phone",
+                    "label": "Phone",
+                },
+            )
+            fields = [
+                {
+                    **item,
+                    "frame_id": "frame-0",
+                    "frame_url": url,
+                    "visible": True,
+                    "enabled": True,
+                    "readonly": False,
+                    "required": True,
+                    "value": self.values.get(item["target_id"]),
+                    "will_validate": True,
+                    "valid": True,
+                }
+                for item in canonical
+            ]
+            fields.extend(
+                [
+                    {
+                        "target_id": "hidden-collision",
+                        "field_key": "hidden-name",
+                        "frame_id": "frame-0",
+                        "frame_url": url,
+                        "kind": "text",
+                        "name": "question_1234",
+                        "label": "Name",
+                        "required": True,
+                        "visible": False,
+                        "enabled": True,
+                        "readonly": False,
+                        "value": None,
+                        "will_validate": True,
+                        "valid": False,
+                        "validity_flags": ["field_identity_collision"],
+                    },
+                    {
+                        "target_id": "opaque",
+                        "field_key": "opaque",
+                        "frame_id": "frame-0",
+                        "frame_url": url,
+                        "kind": "text",
+                        "name": "question_5678",
+                        "label": "Question 5678",
+                        "visible": True,
+                        "enabled": True,
+                        "readonly": False,
+                        "value": None,
+                        "will_validate": True,
+                        "valid": True,
+                    },
+                    {
+                        "target_id": "sensitive",
+                        "field_key": "ssn",
+                        "frame_id": "frame-0",
+                        "frame_url": url,
+                        "kind": "text",
+                        "name": "ssn",
+                        "label": "Social Security Number",
+                        "visible": True,
+                        "enabled": True,
+                        "readonly": False,
+                        "value": None,
+                        "will_validate": True,
+                        "valid": True,
+                    },
+                    {
+                        "target_id": "unsupported",
+                        "field_key": "password",
+                        "frame_id": "frame-0",
+                        "frame_url": url,
+                        "kind": "password",
+                        "name": "password",
+                        "label": "Password",
+                        "visible": True,
+                        "enabled": True,
+                        "readonly": False,
+                        "value": None,
+                        "will_validate": True,
+                        "valid": True,
+                    },
+                    {
+                        "target_id": "resume",
+                        "field_key": "resume",
+                        "frame_id": "frame-0",
+                        "frame_url": url,
+                        "kind": "file",
+                        "name": "resume",
+                        "label": "Resume",
+                        "visible": True,
+                        "enabled": True,
+                        "readonly": False,
+                        "value": None,
+                        "will_validate": True,
+                        "valid": True,
+                        "file_count": 0,
+                        "file_basenames": [],
+                        "accept": [".pdf"],
+                    },
+                ]
+            )
+            self.observed_values.append(tuple(self.values.get(target_id) for target_id in ("first", "last", "email", "phone")))
+            payload["fields"] = fields
+            payload["buttons"] = [{
+                "target_id": "final-submit",
+                "frame_id": "frame-0",
+                "frame_url": url,
+                "click_key": "final-submit-key",
+                "element_kind": "button",
+                "button_type": "submit",
+                "text": "Submit Application",
+                "visible": True,
+                "enabled": True,
+            }]
+            payload["final_submit_target_ids"] = ["final-submit"]
+            return payload
+
+        def fill(self, target_id, value):
+            self.fills.append((target_id, value))
+            self.values[target_id] = value
+
+    monkeypatch.setattr(app, "PuppeteerSession", ProfileIdentitySession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in (
+        "register_application_artifact",
+        "register_application_session",
+        "register_application_owner_process",
+        "register_application_browser_process",
+    ):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, "resolve_with_llm", lambda *args, **kwargs: app.AutofillPlan())
+
+    resume = tmp_path / "resume.txt"
+    resume.write_text("resume")
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({
+        "first_name": "Ada",
+        "last_name": "Lovelace",
+        "email": "ada@example.test",
+        "phone": "+1 555 0100",
+    }))
+    root = tmp_path / "artifacts"
+
+    result = asyncio.run(app.run_application_workflow(
+        object(),
+        resume_file=resume,
+        application_profile_json=profile,
+        artifact_root=root,
+        headed=True,
+    ))
+
+    assert result[0]["status"] == "review_ready"
+    assert result[0]["reason_code"] == "draft_ready"
+    session = ProfileIdentitySession.instances[0]
+    assert session.fills
+    assert {target_id for target_id, _value in session.fills} == {"first", "last", "email", "phone"}
+    assert len(session.observed_values) > 1
+    assert session.observed_values[-1] == ("Ada", "Lovelace", "ada@example.test", "+1 555 0100")
+    actions = json.loads((root / "run-307" / "actions.json").read_text())
+    assert actions["mutation_count"] == 4
+    assert actions["final_submit_calls"] == 0
+
+
+def test_non_click_page_scope_change_invalidates_inference_cache(monkeypatch, tmp_path: Path) -> None:
+    initial_url = "https://boards.greenhouse.io/acme/jobs/309"
+    next_url = f"{initial_url}?gh_src=step-2"
+    claims = [ApplicationClaim(
+        309,
+        {"id": 309, "canonical_url": initial_url, "title": "Page-scoped inference"},
+    )]
+    resolver_urls: list[str] = []
+
+    class PageScopeSession(FakeSession):
+        instances: list["PageScopeSession"] = []
+
+        @classmethod
+        def start(cls, **kwargs):
+            session = cls(kwargs["session_manifest"], kwargs.get("screenshot_root"))
+            cls.instances.append(session)
+            return session
+
+        def __init__(self, manifest, screenshot_root=None):
+            super().__init__(manifest, screenshot_root)
+            self.current_url = initial_url
+            self.value: str | None = None
+            self.observations = 0
+            self.fills: list[tuple[str, str]] = []
+            self.clicks: list[tuple[str, bool]] = []
+            self.done = False
+
+        def observe(self):
+            self.observations += 1
+            payload = _payload()
+            payload["observation_id"] = f"obs-{self.observations}"
+            payload["url"] = self.current_url
+            if not self.done:
+                payload["fields"] = [{
+                    "target_id": "shared-target",
+                    "field_key": "shared-question",
+                    "frame_id": "frame-0",
+                    "frame_url": self.current_url,
+                    "form_action_url": self.current_url,
+                    "kind": "text",
+                    "name": "question_309",
+                    "label": "Portfolio blurb",
+                    "selector": "#shared-question",
+                    "required": True,
+                    "visible": True,
+                    "enabled": True,
+                    "readonly": False,
+                    "value": self.value,
+                    "will_validate": True,
+                    "valid": self.value is not None,
+                    "validity_flags": [] if self.value is not None else ["valueMissing"],
+                }]
+                payload["buttons"] = [{
+                    "target_id": "shared-button",
+                    "frame_id": "frame-0",
+                    "frame_url": self.current_url,
+                    "click_key": "shared-click-key",
+                    "element_kind": "button",
+                    "button_type": "button",
+                    "text": "Next",
+                    "visible": True,
+                    "enabled": True,
+                    "safety_descriptors": [],
+                }]
+            payload["final_submit_target_ids"] = ["final-submit"]
+            return payload
+
+        def fill(self, target_id, value):
+            assert target_id == "shared-target"
+            assert isinstance(value, str)
+            self.fills.append((target_id, value))
+            self.value = value
+            if len(self.fills) == 1:
+                self.current_url = next_url
+            return {"filled": True, "counters": {}}
+
+        def click_offline(self, target_id, continuation=False):
+            assert target_id == "shared-button"
+            assert continuation is False
+            self.clicks.append((target_id, continuation))
+            self.done = True
+            return {"clicked": True, "counters": {}}
+
+    def resolve(observation, *args, **kwargs):
+        resolver_urls.append(observation.url)
+        if len(resolver_urls) == 2:
+            assert observation.fields == ()
+            assert len(observation.buttons) == 1
+            return app.AutofillPlan(
+                safe_click_target_id=observation.buttons[0].target_id,
+                status="ready",
+                reason_code=app.PublicReasonCode.draft_ready,
+            )
+        item = observation.fields[0]
+        return app.AutofillPlan(
+            answers=(
+                app.FieldAnswer(
+                    target_id=item.target_id,
+                    value="first-page answer",
+                    confidence=1.0,
+                    reason="page-specific fixture",
+                    source="inference",
+                ),
+            ),
+            status="ready",
+            reason_code=app.PublicReasonCode.draft_ready,
+        )
+
+    monkeypatch.setattr(app, "PuppeteerSession", PageScopeSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in (
+        "register_application_artifact",
+        "register_application_session",
+        "register_application_owner_process",
+        "register_application_browser_process",
+    ):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, "resolve_with_llm", resolve)
+
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    result = asyncio.run(app.run_application_workflow(
+        object(),
+        resume_file=resume,
+        artifact_root=tmp_path / "artifacts",
+        headed=True,
+    ))
+
+    assert result[0]["status"] == "review_ready"
+    assert resolver_urls == [initial_url, next_url]
+    assert PageScopeSession.instances[0].fills == [
+        ("shared-target", "first-page answer"),
+    ]
+    assert PageScopeSession.instances[0].clicks == [("shared-button", False)]
+
+
+def test_scope_change_executes_new_deterministic_action_before_stale_click_stop(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    url = "https://boards.greenhouse.io/acme/jobs/310"
+    claims = [ApplicationClaim(
+        310,
+        {"id": 310, "canonical_url": url, "title": "Deterministic scope change"},
+    )]
+    resolver_calls = 0
+
+    class DeterministicScopeSession(FakeSession):
+        instances: list["DeterministicScopeSession"] = []
+
+        @classmethod
+        def start(cls, **kwargs):
+            session = cls(kwargs["session_manifest"], kwargs.get("screenshot_root"))
+            cls.instances.append(session)
+            return session
+
+        def __init__(self, manifest, screenshot_root=None):
+            super().__init__(manifest, screenshot_root)
+            self.stage = 0
+            self.observations = 0
+            self.values: dict[str, str] = {}
+            self.fills: list[tuple[str, str]] = []
+
+        def observe(self):
+            self.observations += 1
+            payload = _payload()
+            payload["observation_id"] = f"obs-{self.observations}"
+            payload["url"] = url
+            fields = [{
+                "target_id": "custom-target",
+                "field_key": "custom-question",
+                "frame_id": "frame-0",
+                "frame_url": url,
+                "kind": "text",
+                "name": "question_310",
+                "label": "Portfolio blurb",
+                "selector": "#custom-question",
+                "required": True,
+                "visible": True,
+                "enabled": True,
+                "readonly": False,
+                "value": self.values.get("custom-target"),
+                "will_validate": True,
+                "valid": "custom-target" in self.values,
+                "validity_flags": (
+                    [] if "custom-target" in self.values else ["valueMissing"]
+                ),
+            }]
+            if self.stage >= 1:
+                fields.append({
+                    "target_id": "first-name-target",
+                    "field_key": "first_name",
+                    "frame_id": "frame-0",
+                    "frame_url": url,
+                    "kind": "text",
+                    "name": "first_name",
+                    "label": "First Name",
+                    "selector": "#first-name",
+                    "required": True,
+                    "visible": True,
+                    "enabled": True,
+                    "readonly": False,
+                    "value": self.values.get("first-name-target"),
+                    "will_validate": True,
+                    "valid": "first-name-target" in self.values,
+                    "validity_flags": (
+                        [] if "first-name-target" in self.values else ["valueMissing"]
+                    ),
+                })
+            payload["fields"] = fields
+            if self.stage == 0:
+                payload["buttons"] = [{
+                    "target_id": "cached-button",
+                    "frame_id": "frame-0",
+                    "frame_url": url,
+                    "click_key": "cached-click-key",
+                    "element_kind": "button",
+                    "button_type": "button",
+                    "text": "Next",
+                    "visible": True,
+                    "enabled": True,
+                    "safety_descriptors": [],
+                }]
+            payload["final_submit_target_ids"] = ["final-submit"]
+            return payload
+
+        def fill(self, target_id, value):
+            assert isinstance(value, str)
+            self.fills.append((target_id, value))
+            self.values[target_id] = value
+            if target_id == "custom-target":
+                self.stage = 1
+            elif target_id == "first-name-target":
+                self.stage = 2
+            return {"filled": True, "counters": {}}
+
+    def resolve(observation, *args, **kwargs):
+        nonlocal resolver_calls
+        resolver_calls += 1
+        assert len(observation.fields) == 1
+        assert len(observation.buttons) == 1
+        return app.AutofillPlan(
+            answers=(
+                app.FieldAnswer(
+                    target_id="custom-target",
+                    value="First answer",
+                    confidence=1.0,
+                    reason="fixture",
+                    source="inference",
+                ),
+            ),
+            safe_click_target_id="cached-button",
+            status="ready",
+            reason_code=app.PublicReasonCode.draft_ready,
+        )
+
+    monkeypatch.setattr(app, "PuppeteerSession", DeterministicScopeSession)
+    monkeypatch.setattr(app, "claim_next_application_job", lambda conn, owner: claims.pop(0) if claims else None)
+    for name in (
+        "register_application_artifact",
+        "register_application_session",
+        "register_application_owner_process",
+        "register_application_browser_process",
+    ):
+        monkeypatch.setattr(app, name, lambda *args, **kwargs: True)
+    monkeypatch.setattr(app, "finish_application_run", lambda *args, **kwargs: None)
+    monkeypatch.setattr(app, "resolve_with_llm", resolve)
+
+    resume = tmp_path / "resume.txt"
+    resume.write_text("A resume")
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"first_name": "Ada"}))
+    result = asyncio.run(app.run_application_workflow(
+        object(),
+        resume_file=resume,
+        application_profile_json=profile,
+        artifact_root=tmp_path / "artifacts",
+        headed=True,
+    ))
+
+    assert result[0]["status"] == "review_ready"
+    assert resolver_calls == 1
+    assert DeterministicScopeSession.instances[0].fills == [
+        ("custom-target", "First answer"),
+        ("first-name-target", "Ada"),
+    ]

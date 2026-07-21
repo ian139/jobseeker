@@ -25,8 +25,9 @@ RUNNER = Path(__file__).with_name("puppeteer_runner.js").resolve(strict=True)
 MAX_IN_FRAME = 256 * 1024
 MAX_OUT_FRAME = 2 * 1024 * 1024
 MAX_OUT_FRAME_DIGITS = len(str(MAX_OUT_FRAME))
-# Keep observations and plans comfortably below the protocol frame ceiling.
-MAX_OBSERVATION_BYTES = 1_900_000
+# The runner caps the bare JSON observation at 2,000,000 bytes. Python reads
+# the complete response body, including its envelope, with a 2,048,000-byte cap.
+MAX_RESPONSE_BYTES = 2_048_000
 FINAL_ROUTE_TOKENS = ("submit", "complete", "confirm", "finish", "send", "final")
 GREENHOUSE_HOSTS = {"boards.greenhouse.io", "job-boards.greenhouse.io"}
 SAFE_BROWSER_ERROR_CODES = {
@@ -1022,6 +1023,11 @@ class PuppeteerSession:
         if not token:
             raise BrowserAdapterError("test_select_drift_unavailable")
         return self.request({"action": "test_select_drift", "test_drift_token": token})
+    def _arm_button_semantic_drift_for_test(self) -> dict[str, Any]:
+        token = getattr(self, "_test_drift_token", None)
+        if not token:
+            raise BrowserAdapterError("test_select_drift_unavailable")
+        return self.request({"action": "test_button_semantic_drift", "test_drift_token": token})
     def _fill_receive_buffer(self, deadline: float) -> None:
         if self.process.stdout is None:
             raise BrowserAdapterError("adapter_stdout_missing")
@@ -1067,7 +1073,7 @@ class PuppeteerSession:
             self._poisoned = True
             raise
         body = self._take_exact(length, deadline)
-        if length > MAX_OBSERVATION_BYTES:
+        if length > MAX_RESPONSE_BYTES:
             self._poisoned = True
             raise BrowserAdapterError("output_frame_too_large")
         try:

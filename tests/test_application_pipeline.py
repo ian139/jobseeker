@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 import jobs_assistant.application as app
+from jobs_assistant.application_preferences import PreferenceOptOut
 from jobs_assistant.application import (
     _configured_and_profile_plan,
     _merge_blocked_target_ids,
@@ -253,10 +254,9 @@ def test_button_only_lever_inference_is_resolved(monkeypatch) -> None:
             pass
 
     monkeypatch.setattr(app.httpx, "Client", Client)
-
     def client_json(*args, **kwargs):
-        calls.append(json.loads(kwargs["body"]["messages"][0]["content"]) if isinstance(kwargs["body"], dict) else None)
-        return {"answers": [], "safe_click_target_id": safe.target_id}
+        calls.append(kwargs["body"] if isinstance(kwargs["body"], dict) else None)
+        return {"message": {"role": "assistant", "content": json.dumps({"answers": [], "safe_click_target_id": safe.target_id})}, "done": True}
 
     monkeypatch.setattr(app, "_client_json", client_json)
     result = resolve_with_llm(
@@ -271,8 +271,98 @@ def test_button_only_lever_inference_is_resolved(monkeypatch) -> None:
     assert result.reason_code is PublicReasonCode.draft_ready
     assert result.safe_click_target_id == safe.target_id
     assert len(calls) == 1
-    assert calls[0]["fields"] == []
-    assert calls[0]["buttons"][0]["target_id"] == safe.target_id
+    body = calls[0]
+    assert [message["role"] for message in body["messages"]] == ["system", "user"]
+    assert "safe_click_target_id" in body["messages"][0]["content"]
+    assert "Engineer" not in body["messages"][0]["content"]
+    assert "format" not in body
+    assert len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= app.MAX_REQUEST_BYTES
+    projected = json.loads(body["messages"][1]["content"])
+    assert projected["job"]["title"] == "Engineer"
+    assert projected["fields"] == []
+    assert projected["buttons"][0]["target_id"] == safe.target_id
+
+
+def test_resolver_rejects_body_that_only_exceeds_cap_after_contract(monkeypatch) -> None:
+    item = field()
+    request = build_inference_request(
+        observation(item),
+        job={"title": "Engineer"},
+        resume_text="safe",
+        profile_facts={},
+    )
+    request_bytes = len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    monkeypatch.setattr(app, "MAX_REQUEST_BYTES", request_bytes + 1)
+    monkeypatch.setattr(app.socket, "getaddrinfo", lambda *args, **kwargs: pytest.fail("network must not run"))
+
+    result = resolve_with_llm(
+        observation(item),
+        job={"title": "Engineer"},
+        resume_context="safe",
+        api_key="token",
+        base_url="https://ollama.example.test",
+    )
+
+    assert result.reason_code is PublicReasonCode.inference_context_too_large
+
+
+def test_native_click_requires_explicit_application_progress_semantics() -> None:
+    allowed = (
+        button(target_id="continue", click_key="click-continue", text="Continue"),
+        button(target_id="next", click_key="click-next", text="Next step"),
+        button(target_id="proceed", click_key="click-proceed", text="Proceed"),
+        button(target_id="save", click_key="click-save", text="Save and continue"),
+    )
+    denied = tuple(
+        button(target_id=f"denied-{index}", click_key=f"click-denied-{index}", text=text)
+        for index, text in enumerate(
+            (
+                "Apply",
+                "Create alert",
+                "Quick Apply with MyGreenhouse",
+                "Add another",
+                "Continue with MyGreenhouse",
+                "Sign in to continue",
+                "Continue with Google",
+                "Continue with LinkedIn",
+                "Continue with email",
+                "Continue with ExampleID",
+                "Continue via Google",
+                "Continue using ExampleID",
+                "Next with Google",
+                "Submit application",
+            )
+        )
+    )
+    denied += (
+        replace(
+            button(target_id="denied-mixed-oauth", click_key="click-denied-mixed-oauth", text="Next"),
+            safety_descriptors=("Next", "Continue with Google"),
+        ),
+        replace(
+            button(target_id="denied-mixed-via", click_key="click-denied-mixed-via", text="Next"),
+            safety_descriptors=("Next", "Continue via ExampleID"),
+        ),
+    )
+    observed = observation(buttons=(*allowed, *denied))
+
+    eligible = [
+        item.target_id
+        for item in observed.buttons
+        if app._safe_click_is_eligible(
+            item,
+            ats_policy="greenhouse",
+            page_url=observed.url,
+        )
+    ]
+    assert eligible == [item.target_id for item in allowed]
+    request = build_inference_request(
+        observed,
+        job={"title": "Engineer"},
+        resume_text="resume",
+        profile_facts={},
+    )
+    assert [item["target_id"] for item in request["buttons"]] == eligible
 
 
 def test_input_type_button_eligibility_and_descriptor_rejection() -> None:
@@ -299,6 +389,7 @@ def test_input_type_button_eligibility_and_descriptor_rejection() -> None:
         )
     ]
     assert eligible_ids == [safe.target_id]
+
     request = build_inference_request(
         observed,
         job={"title": "Engineer"},
@@ -307,11 +398,46 @@ def test_input_type_button_eligibility_and_descriptor_rejection() -> None:
         ats_policy="greenhouse",
     )
     assert [item["target_id"] for item in request["buttons"]] == [safe.target_id]
+def test_same_job_anchor_get_is_a_guarded_continuation_only() -> None:
+    url = "https://boards.greenhouse.io/fixture/jobs/123"
+    anchor = replace(
+        button(target_id="apply", text="Apply"),
+        element_kind="a",
+        button_type="anchor",
+        href_url=url,
+        href_attribute="/fixture/jobs/123",
+    )
+    identity = app._application_route_identity(url, "greenhouse")
+    assert app._navigation_continuation_permitted(
+        anchor,
+        (),
+        ats_policy="greenhouse",
+        page_url=url,
+        approved_route_identity=identity,
+    )
+    assert app._safe_click_is_eligible(anchor, ats_policy="greenhouse", page_url=url)
+    child_frame = replace(anchor, frame_id="frame-1")
+    assert not app._navigation_continuation_permitted(
+        child_frame,
+        (),
+        ats_policy="greenhouse",
+        page_url=url,
+        approved_route_identity=identity,
+    )
+    assert not app._safe_click_is_eligible(child_frame, ats_policy="greenhouse", page_url=url)
+    cross_job = replace(anchor, href_url="https://boards.greenhouse.io/other/jobs/999")
+    assert not app._navigation_continuation_permitted(
+        cross_job,
+        (),
+        ats_policy="greenhouse",
+        page_url=url,
+        approved_route_identity=identity,
+    )
 
 
 def test_input_type_button_value_does_not_pollute_field_descriptors() -> None:
     text_field = field(name="first_name", label="First Name", value="Ada")
-    input_btn = input_button(value="Submit")
+    input_btn = input_button(value="Next")
     observed = observation(text_field, buttons=(input_btn,))
     request = build_inference_request(
         observed,
@@ -321,7 +447,7 @@ def test_input_type_button_value_does_not_pollute_field_descriptors() -> None:
         ats_policy="greenhouse",
     )
     assert [item["target_id"] for item in request["buttons"]] == [input_btn.target_id]
-    assert "Submit" not in json.dumps(request["fields"])
+    assert "Next" not in json.dumps(request["fields"])
     assert "Ada" not in json.dumps(request["fields"])
 
 
@@ -647,6 +773,36 @@ def test_hidden_sensitive_required_field_does_not_force_manual_reason():
         resume=resume,
     )
     assert plan.reason_code is not PublicReasonCode.required_sensitive_fields_manual
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "blocks_page_validation"),
+    (
+        ({"valid": False, "visible": False, "validity_flags": ("field_identity_collision",)}, False),
+        ({"valid": False, "enabled": False, "validity_flags": ("customError",)}, False),
+        ({"valid": False, "readonly": True, "validity_flags": ("customError",)}, False),
+        ({"valid": False, "validity_flags": ("valueMissing",)}, True),
+        ({"valid": False, "required": True, "value": None, "validity_flags": ("valueMissing",)}, False),
+    ),
+)
+def test_configured_plan_uses_live_field_validation_activity(
+    kwargs: dict[str, object],
+    blocks_page_validation: bool,
+) -> None:
+    item = field(**kwargs)
+    resume = ResumeContext("resume.txt", "text/plain", "", "0" * 64, -1, facts=ResumeFacts())
+
+    assert app._field_blocks_page_validation(item) is blocks_page_validation
+    plan = _configured_and_profile_plan(
+        observation(item),
+        adapter=GreenhouseAdapter(),
+        context=ApplicationContext(),
+        profile=ApplicationProfile(),
+        resume=resume,
+    )
+    assert (plan.reason_code is PublicReasonCode.page_validation_error) is blocks_page_validation
+    if not item.visible or not item.enabled or item.readonly:
+        assert not app._field_is_llm_eligible(item)
 
 def test_optional_value_missing_is_not_exempt_from_page_validation() -> None:
     item = field(valid=False, validity_flags=("valueMissing",), value=None, required=False)
@@ -1079,3 +1235,95 @@ def test_inference_request_advertises_multiple_for_multi_select() -> None:
     assert field_payload["multiple"] is True
     assert "enabled" in field_payload["options"][0]
     assert request["answers"] == []
+
+def test_empty_preferences_preserve_profile_answers_around_filtered_controls() -> None:
+    fields = (
+        field(target_id="first", name="first_name", label="First Name", required=True),
+        field(target_id="last", name="last_name", label="Last Name", required=True),
+        field(target_id="email", kind="email", name="email", label="Email", required=True),
+        field(target_id="phone", kind="tel", name="phone", label="Phone", required=True),
+        field(
+            target_id="hidden-collision",
+            name="question_1234",
+            label="Name",
+            required=True,
+            visible=False,
+            valid=False,
+            validity_flags=("field_identity_collision",),
+        ),
+        field(target_id="opaque", name="question_5678", label="Question 5678"),
+        field(target_id="sensitive", name="ssn", label="Social Security Number"),
+        field(target_id="unsupported", kind="password", name="password", label="Password"),
+        field(target_id="resume", kind="file", name="resume", label="Resume"),
+    )
+    observed = observation(*fields)
+    profile = ApplicationProfile(
+        facts={
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "email": "ada@example.test",
+            "phone": "+1 555 0100",
+        }
+    )
+    resume = ResumeContext("resume.txt", "text/plain", "", "0" * 64, -1, facts=ResumeFacts())
+    adapter = GreenhouseAdapter()
+    context = ApplicationContext()
+
+    without_preferences = _configured_and_profile_plan(
+        observed,
+        adapter=adapter,
+        context=context,
+        profile=profile,
+        resume=resume,
+    )
+    with_empty_preferences = _configured_and_profile_plan(
+        observed,
+        adapter=adapter,
+        context=context,
+        profile=profile,
+        resume=resume,
+        preferences=app.ApplicationPreferences(1, (), (), ()),
+    )
+
+    expected = {
+        "first": "Ada",
+        "last": "Lovelace",
+        "email": "ada@example.test",
+        "phone": "+1 555 0100",
+    }
+    assert {answer.target_id: answer.value for answer in without_preferences.answers} == expected
+    assert with_empty_preferences.answers == without_preferences.answers
+    assert with_empty_preferences.status == without_preferences.status == "ready"
+
+def test_required_empty_value_missing_optout_remains_fail_closed() -> None:
+    item = field(
+        target_id="required-first",
+        name="first_name",
+        label="First Name",
+        required=True,
+        value=None,
+        valid=False,
+        validity_flags=("valueMissing",),
+    )
+    profile = ApplicationProfile(facts={"first_name": "Ada"})
+    resume = ResumeContext("resume.txt", "text/plain", "", "0" * 64, -1, facts=ResumeFacts())
+    preferences = app.ApplicationPreferences(
+        1,
+        (),
+        (PreferenceOptOut("greenhouse", "first_name", None, "text"),),
+        (),
+    )
+
+    plan = _configured_and_profile_plan(
+        observation(item),
+        adapter=GreenhouseAdapter(),
+        context=ApplicationContext(),
+        profile=profile,
+        resume=resume,
+        preferences=preferences,
+    )
+
+    assert plan.answers == ()
+    assert plan.status == "manual"
+    assert plan.reason_code is PublicReasonCode.required_safe_fields_unresolved
+    assert item.target_id in plan.skipped_target_ids

@@ -477,6 +477,27 @@ def test_sensitive_terms_and_compact_aliases_are_manual(descriptors: tuple[str, 
     decision = classify_descriptors(descriptors)
     assert decision == DescriptorSafety.SENSITIVE
 
+@pytest.mark.parametrize(
+    "descriptor",
+    [
+        "Are you a U.S. citizen?",
+        "usCitizen",
+        "citizenStatus",
+        "uscitizen",
+        "Citizenship Status*",
+        "citizenshipStatus",
+        "citizenshipstatus",
+        "Nationality",
+        "nationalityStatus",
+        "nationalitystatus",
+        "Immigration Status",
+        "immigrationStatus",
+        "immigrationstatus",
+    ],
+)
+def test_citizenship_nationality_immigration_descriptors_are_manual(descriptor: str) -> None:
+    assert classify_descriptors((descriptor,)) == DescriptorSafety.SENSITIVE
+
 
 @pytest.mark.parametrize(
     ("unsafe_class", "descriptors"),
@@ -561,6 +582,7 @@ def test_option_only_eeo_and_demographic_values_are_manual(options: tuple[tuple[
         (("racecar project",), ()),
         (("banking experience",), ()),
         (("startups",), ()),
+        (("internationality",), ()),
     ],
 )
 def test_benign_near_boundaries_remain_safe(

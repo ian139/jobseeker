@@ -44,6 +44,7 @@ from .application_preferences import (
     PreferenceValidationError,
     apply_preferences,
     load_application_preferences,
+    normalize_field_descriptor,
     order_actions,
 )
 from .application_profiles import load_application_profile_preset
@@ -86,6 +87,18 @@ COMPLETED_STATUS = "review_ready"
 FAILED_STATUS = "failed"
 DEFAULT_LLM_MODEL = "deepseek-v4-flash"
 DEFAULT_LLM_THINK = "low"
+LLM_RESPONSE_CONTRACT = (
+    "You are a constrained job-application draft resolver. Return exactly one JSON object and no markdown or commentary. "
+    "The object must have exactly the keys answers and safe_click_target_id. answers must be an array; every item must "
+    "have exactly target_id, value, confidence, and reason. target_id must exactly match one listed field. value must be "
+    "a string for text-like fields, a boolean for checkbox/radio fields, and a string or array of unique strings for "
+    "select fields according to multiple; every select string must exactly match an enabled option value. confidence "
+    "must be a number from 0.7 through 1.0 and reason must be a string no longer than 2000 characters. Use only explicit "
+    "evidence in the provided job and context. Omit ambiguous, unsupported, unproven, sensitive, legal, protected-class, "
+    "financial, authentication, CAPTCHA, or assessment answers; never invent. safe_click_target_id must be null unless "
+    "exactly one listed button clearly advances the current application without submitting or authenticating, otherwise "
+    "it must exactly match that listed button target_id. Do not output any extra keys."
+)
 MAX_AUTOFILL_ITERATIONS = 100
 MAX_LLM_BYTES = 1024 * 1024
 MAX_REQUEST_BYTES = 512 * 1024
@@ -635,6 +648,72 @@ def _observation_semantic_signature(observation: PageObservation) -> tuple[Any, 
     )
 
 
+def _observation_page_scope_signature(observation: PageObservation) -> tuple[Any, ...]:
+    """Identify page-scoped controls while ignoring values changed by filling."""
+    final_target_ids = frozenset(observation.final_submit_target_ids)
+    return (
+        observation.url,
+        observation.title,
+        observation.site_markers,
+        tuple(
+            (
+                field.field_key,
+                field.frame_id,
+                field.frame_url,
+                field.form_action_url,
+                field.kind,
+                field.name,
+                field.label,
+                field.group_id,
+                field.option_value,
+                field.safety_descriptors,
+                field.selector,
+                field.required,
+                field.visible,
+                field.enabled,
+                field.readonly,
+                field.multiple,
+                field.will_validate,
+                field.accept,
+                field.min_length,
+                field.max_length,
+                field.pattern,
+                field.min_value,
+                field.max_value,
+                field.step,
+                tuple((option.value, option.label, option.enabled) for option in field.options),
+            )
+            for field in observation.fields
+        ),
+        tuple(
+            (
+                button.frame_id,
+                button.frame_url,
+                button.click_key,
+                button.element_id,
+                button.element_kind,
+                button.text,
+                button.button_type,
+                button.name,
+                button.value,
+                button.target,
+                button.download,
+                button.effective_action_url,
+                button.effective_method,
+                button.href_url,
+                button.href_attribute,
+                button.visible,
+                button.enabled,
+                button.safety_descriptors,
+                button.target_id in final_target_ids,
+            )
+            for button in observation.buttons
+        ),
+    )
+
+
+
+
 def _plan_summary(plan: AutofillPlan) -> dict[str, Any]:
     return {
         "status": plan.status, "reason_code": _enum_reason(plan.reason_code).value,
@@ -778,6 +857,17 @@ def _validate_llm_answer(field: ObservedField, item: Mapping[str, Any]) -> bool:
     elif type(value) is not str:
         return False
     return validate_answer_value(field, value, kind=field.kind)
+
+
+def _field_blocks_page_validation(field: ObservedField) -> bool:
+    """Return whether an observed invalid control must stop the workflow."""
+    if field.valid is not False or not field.visible or not field.enabled or field.readonly:
+        return False
+    return not (
+        field.required
+        and field.value in (None, "", False, ())
+        and field.validity_flags == ("valueMissing",)
+    )
 
 
 def _field_is_llm_eligible(field: ObservedField) -> bool:
@@ -996,6 +1086,78 @@ def _same_origin(left: str, right: str) -> bool:
 
 
 
+def _navigation_candidate_url(button: ObservedButton) -> str | None:
+    """Return only an observed anchor href eligible for guarded GET navigation."""
+    if str(button.element_kind).lower() != "a" or not isinstance(button.href_url, str) or not button.href_url:
+        return None
+    # Form/action metadata is deliberately excluded: this branch never submits
+    # a form, including a form whose method happens to be GET.
+    if button.effective_action_url or button.effective_method:
+        return None
+    return button.href_url
+
+
+def _navigation_continuation_permitted(
+    button: ObservedButton,
+    final_submit_target_ids: tuple[str, ...],
+    *,
+    ats_policy: str,
+    page_url: str | None,
+    approved_route_identity: tuple[Any, ...] | None = None,
+) -> bool:
+    """Permit one observed, same-job, non-final anchor GET continuation."""
+    candidate = _navigation_candidate_url(button)
+    if (
+        candidate is None
+        or button.frame_id != "frame-0"
+        or button.target_id in final_submit_target_ids
+        or not isinstance(button.click_key, str)
+        or not button.click_key
+        or not _frame_origin_allowed(button.frame_url, ats_policy)
+        or not button.visible
+        or not button.enabled
+        or _field_is_sensitive_button(button)
+        or button.target not in (None, "")
+        or button.download
+        or page_url is None
+        or not _same_origin(button.frame_url, page_url)
+        or not _same_origin(candidate, page_url)
+    ):
+        return False
+    current_route = _application_route_identity(page_url, ats_policy)
+    candidate_route = _application_route_identity(candidate, ats_policy)
+    expected_route = approved_route_identity or current_route
+    return _continuation_route_is_approved(expected_route, candidate_route)
+
+
+def _native_progress_button_is_allowed(button: ObservedButton) -> bool:
+    """Allow only explicit non-final application-progress button semantics."""
+    raw = " ".join(
+        item
+        for item in (
+            button.text,
+            button.value,
+            button.name,
+            *button.safety_descriptors,
+        )
+        if isinstance(item, str) and item.strip()
+    )
+    normalized = " ".join(re.sub(r"[^a-z0-9]+", " ", raw.lower()).split())
+    if (
+        not normalized
+        or re.search(r"\b(?:continue|next|proceed|save and continue)\s+(?:with|via|using)\b", normalized)
+        or re.search(
+            r"\b(?:apply|alert|another|quick|mygreenhouse|sso|oauth|account|login|log in|sign in|auth|authenticate|authentication|submit|confirm|finish|send|final|finalize)\b",
+            normalized,
+        )
+    ):
+        return False
+    return bool(
+        re.match(r"^(?:continue|next|proceed)(?:\b|$)", normalized)
+        or re.match(r"^save and continue(?:\b|$)", normalized)
+    )
+
+
 def _safe_click_is_eligible(
     button: ObservedButton,
     final_submit_target_ids: tuple[str, ...] = (),
@@ -1011,7 +1173,6 @@ def _safe_click_is_eligible(
     )
     common = bool(
         button.target_id not in final_submit_target_ids
-        and is_native_offline
         and isinstance(button.click_key, str)
         and bool(button.click_key)
         and _frame_origin_allowed(button.frame_url, ats_policy)
@@ -1020,20 +1181,32 @@ def _safe_click_is_eligible(
         and not _field_is_sensitive_button(button)
         and button.target in (None, "")
         and not button.download
+    )
+    if not common:
+        return False
+    if _navigation_continuation_permitted(
+        button,
+        final_submit_target_ids,
+        ats_policy=ats_policy,
+        page_url=page_url,
+    ):
+        return True
+    is_native_without_navigation = (
+        is_native_offline
         and not button.effective_action_url
         and not button.effective_method
         and not button.href_url
         and not button.href_attribute
+        and (page_url is None or _same_origin(button.frame_url, page_url))
+        and _native_progress_button_is_allowed(button)
     )
-    if not common:
-        return False
-    if page_url is not None and not _same_origin(button.frame_url, page_url):
+    if not is_native_without_navigation:
         return False
     if button_type == "button":
         return True
     # A submit-typed continuation is only safe when it cannot submit a form:
     # the runner proves this by requiring a native button with no form action.
-    return page_url is not None and _same_origin(button.frame_url, page_url)
+    return _same_origin(button.frame_url, page_url)
 
 
 def _continuation_permitted(
@@ -1042,17 +1215,29 @@ def _continuation_permitted(
     *,
     ats_policy: str,
     page_url: str | None,
+    approved_route_identity: tuple[Any, ...] | None = None,
 ) -> bool:
-    """Return the explicit protocol permit for a native submit continuation."""
+    """Return the explicit permit for a native submit or anchor GET continuation."""
     return (
-        str(button.button_type).lower() == "submit"
-        and _safe_click_is_eligible(
+        (
+            str(button.button_type).lower() == "submit"
+            and _safe_click_is_eligible(
+                button,
+                final_submit_target_ids,
+                ats_policy=ats_policy,
+                page_url=page_url,
+            )
+        )
+        or _navigation_continuation_permitted(
             button,
             final_submit_target_ids,
             ats_policy=ats_policy,
             page_url=page_url,
+            approved_route_identity=approved_route_identity,
         )
     )
+
+
 
 
 def _application_route_identity(url: str, ats_policy: str) -> tuple[Any, ...] | None:
@@ -1270,12 +1455,18 @@ def resolve_with_llm(
     token = api_key or os.environ.get("OLLAMA_CLOUD_API_KEY") or os.environ.get("OLLAMA_API_KEY")
     if not token:
         return AutofillPlan(status="manual", reason_code=PublicReasonCode.missing_llm_api_key)
+    user_content = json.dumps(request, ensure_ascii=False, separators=(",", ":"))
     body = {
         "model": model or os.environ.get("OLLAMA_CLOUD_MODEL") or os.environ.get("DEEPSEEK_MODEL") or DEFAULT_LLM_MODEL,
-        "messages": [{"role": "user", "content": json.dumps(request, ensure_ascii=False)}],
+        "messages": [
+            {"role": "system", "content": LLM_RESPONSE_CONTRACT},
+            {"role": "user", "content": user_content},
+        ],
         "think": os.environ.get("OLLAMA_CLOUD_THINK") or os.environ.get("OLLAMA_CLOUD_REASONING") or DEFAULT_LLM_THINK,
         "stream": True,
     }
+    if len(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MAX_REQUEST_BYTES:
+        return AutofillPlan(status="manual", reason_code=PublicReasonCode.inference_context_too_large)
     endpoint = (base_url or os.environ.get("OLLAMA_CLOUD_BASE_URL") or "https://ollama.com").rstrip("/") + "/api/chat"
     parsed = urlsplit(endpoint)
     if parsed.scheme != "https" or parsed.username or parsed.password or not parsed.hostname:
@@ -1353,18 +1544,7 @@ def _configured_and_profile_plan(
     resume: ResumeContext,
     preferences: ApplicationPreferences | None = None,
 ) -> AutofillPlan:
-    if any(
-        field.valid is False
-        and not (
-            field.visible
-            and field.enabled
-            and field.required
-            and not field.readonly
-            and field.value in (None, "", False, ())
-            and field.validity_flags == ("valueMissing",)
-        )
-        for field in observation.fields
-    ):
+    if any(_field_blocks_page_validation(field) for field in observation.fields):
         return AutofillPlan(status="manual", reason_code=PublicReasonCode.page_validation_error)
     deterministic = adapter.deterministic_answers(
         observation,
@@ -1376,12 +1556,31 @@ def _configured_and_profile_plan(
     preference_optouts: set[str] = set()
     if preferences is not None:
         try:
-            preference_fields = tuple(
-                field
-                for field in observation.fields
-                if str(field.kind).lower() != "file"
-            )
-            pref_result = apply_preferences(preferences, preference_fields, deterministic, ats=adapter.name)
+            preference_fields: list[ObservedField] = []
+            for field in observation.fields:
+                if (
+                    not field.visible
+                    or not field.enabled
+                    or field.readonly
+                    or (
+                        field.valid is False
+                        and not (
+                            field.required
+                            and field.value in (None, "", False, ())
+                            and field.validity_flags == ("valueMissing",)
+                        )
+                    )
+                    or str(field.kind).lower() == "file"
+                    or "field_identity_collision" in field.validity_flags
+                    or _field_is_sensitive(field)
+                ):
+                    continue
+                try:
+                    normalize_field_descriptor(field, ats=adapter.name)
+                except PreferenceValidationError:
+                    continue
+                preference_fields.append(field)
+            pref_result = apply_preferences(preferences, tuple(preference_fields), deterministic, ats=adapter.name)
         except PreferenceValidationError:
             return AutofillPlan(status="manual", reason_code=PublicReasonCode.no_deterministic_next_step)
         deterministic = pref_result.selected_answers
@@ -2293,6 +2492,7 @@ async def run_application_workflow(
                 attempted_mutation: tuple[str, str, str | bool] | None = None
                 continuation_route_identity: tuple[Any, ...] | None = None
                 attempted_click_signature: tuple[Any, ...] | None = None
+                page_scope_signature: tuple[Any, ...] | None = None
                 executed_actions: list[dict[str, Any]] = []
                 final_plan: AutofillPlan | None = None
                 def persist_iteration_action_evidence(
@@ -2389,6 +2589,31 @@ async def run_application_workflow(
                     )
                     observation = _observation_from_browser_payload(payload, iteration=iteration)
                     final_observation = observation
+                    cached_click_disappeared_on_scope_change = False
+                    current_page_scope_signature = _observation_page_scope_signature(observation)
+                    if (
+                        page_scope_signature is not None
+                        and current_page_scope_signature != page_scope_signature
+                    ):
+                        cached_llm = None
+                        cached_inference_target_ids.clear()
+                        cached_inference_button_keys.clear()
+                        cached_inference.clear()
+                        cached_click_disappeared_on_scope_change = (
+                            cached_click_key is not None
+                            and not any(
+                                button.click_key == cached_click_key
+                                and _safe_click_is_eligible(
+                                    button,
+                                    observation.final_submit_target_ids,
+                                    ats_policy=adapter.name,
+                                    page_url=observation.url,
+                                )
+                                for button in observation.buttons
+                            )
+                        )
+                        cached_click_key = None
+                    page_scope_signature = current_page_scope_signature
                     if continuation_route_identity is not None:
                         expected_route_identity = continuation_route_identity
                         observed_route_identity = _application_route_identity(observation.url, adapter.name)
@@ -2413,18 +2638,7 @@ async def run_application_workflow(
                             final_plan = AutofillPlan(status="manual", reason_code=PublicReasonCode.field_value_not_retained)
                             reason = PublicReasonCode.field_value_not_retained
                             break
-                    if any(
-                        field.valid is False
-                        and not (
-                            field.visible
-                            and field.enabled
-                            and field.required
-                            and not field.readonly
-                            and field.value in (None, "", False, ())
-                            and field.validity_flags == ("valueMissing",)
-                        )
-                        for field in observation.fields
-                    ):
+                    if any(_field_blocks_page_validation(field) for field in observation.fields):
                         final_plan = AutofillPlan(status="manual", reason_code=PublicReasonCode.page_validation_error)
                         reason = PublicReasonCode.page_validation_error
                         break
@@ -2570,6 +2784,11 @@ async def run_application_workflow(
                                 )
                                 else None
                             )
+                    llm_reason = (
+                        cached_llm.reason_code
+                        if cached_llm is not None
+                        else PublicReasonCode.no_deterministic_next_step
+                    )
                     rebound = tuple(
                         FieldAnswer(
                             field.target_id,
@@ -2596,11 +2815,6 @@ async def run_application_workflow(
                             )
                         ),
                         None,
-                    )
-                    llm_reason = (
-                        cached_llm.reason_code
-                        if cached_llm is not None
-                        else PublicReasonCode.no_deterministic_next_step
                     )
                     llm = AutofillPlan(
                         answers=rebound,
@@ -2648,10 +2862,28 @@ async def run_application_workflow(
                         )
                         rank = {target_id: index for index, target_id in enumerate(ordered_ids)}
                         planned.sort(key=lambda item: rank.get(item["target_id"], len(rank)))
+                    optional_inference_reasons = {
+                        PublicReasonCode.no_deterministic_next_step,
+                        PublicReasonCode.missing_llm_api_key,
+                        PublicReasonCode.invalid_llm_response,
+                        PublicReasonCode.llm_request_failed,
+                        PublicReasonCode.inference_context_too_large,
+                    }
                     conflict = any(item.get("reason") == "preexisting_value_conflict" for item in rejected)
                     if conflict:
                         plan = AutofillPlan(status="manual", reason_code=PublicReasonCode.preexisting_value_conflict, skipped_target_ids=plan.skipped_target_ids)
                         planned = []
+                    if (
+                        cached_click_disappeared_on_scope_change
+                        and not planned
+                        and plan.reason_code
+                        in optional_inference_reasons | {PublicReasonCode.draft_ready}
+                    ):
+                        plan = AutofillPlan(
+                            status="manual",
+                            reason_code=PublicReasonCode.safe_click_no_progress,
+                            skipped_target_ids=plan.skipped_target_ids,
+                        )
                     continuation_permit: bool | None = None
                     click_button_for_action: ObservedButton | None = None
                     if planned and planned[0].get("action") == "click":
@@ -2669,6 +2901,7 @@ async def run_application_workflow(
                                 observation.final_submit_target_ids,
                                 ats_policy=adapter.name,
                                 page_url=observation.url,
+                                approved_route_identity=application_route_identity,
                             )
                             if click_button_for_action is not None
                             else False
@@ -2708,14 +2941,42 @@ async def run_application_workflow(
                             click_continuation = bool(continuation_permit)
                             if click_continuation:
                                 observed_route_identity = _application_route_identity(observation.url, adapter.name)
-                                if not _continuation_route_is_approved(application_route_identity, observed_route_identity):
-                                    raise _BrowserFailure(
-                                        "mutation",
-                                        "route",
-                                        "unsafe_navigation_target",
-                                        iteration,
-                                    )
-                                continuation_route_identity = observed_route_identity
+                                navigation_candidate = _navigation_candidate_url(click_button)
+                                if navigation_candidate is not None:
+                                    if mutation_count != 0:
+                                        raise _BrowserFailure(
+                                            "mutation",
+                                            "route",
+                                            "unsafe_navigation_target",
+                                            iteration,
+                                        )
+                                    candidate_route_identity = _application_route_identity(navigation_candidate, adapter.name)
+                                    if (
+                                        not _continuation_route_is_approved(application_route_identity, candidate_route_identity)
+                                        or not _navigation_continuation_permitted(
+                                            click_button,
+                                            observation.final_submit_target_ids,
+                                            ats_policy=adapter.name,
+                                            page_url=observation.url,
+                                            approved_route_identity=application_route_identity,
+                                        )
+                                    ):
+                                        raise _BrowserFailure(
+                                            "mutation",
+                                            "route",
+                                            "unsafe_navigation_target",
+                                            iteration,
+                                        )
+                                    continuation_route_identity = candidate_route_identity
+                                else:
+                                    if not _continuation_route_is_approved(application_route_identity, observed_route_identity):
+                                        raise _BrowserFailure(
+                                            "mutation",
+                                            "route",
+                                            "unsafe_navigation_target",
+                                            iteration,
+                                        )
+                                    continuation_route_identity = observed_route_identity
                             await _invoke_browser(
                                 "click_offline",
                                 "mutation",
@@ -2725,6 +2986,11 @@ async def run_application_workflow(
                                     continuation=click_continuation,
                                 ),
                             )
+                            cached_llm = None
+                            cached_inference_target_ids.clear()
+                            cached_inference_button_keys.clear()
+                            cached_inference.clear()
+                            cached_click_key = None
                         else:
                             field = next(item for item in observation.fields if item.target_id == action["target_id"])
                             expected_value: FieldValue | None = resume.basename if action["action"] == "upload" else next(item.value for item in plan.answers if item.target_id == field.target_id)
@@ -2805,13 +3071,6 @@ async def run_application_workflow(
                         _write_run_manifest(run, manifest_payload)
                         final_plan = plan
                         continue
-                    optional_inference_reasons = {
-                        PublicReasonCode.no_deterministic_next_step,
-                        PublicReasonCode.missing_llm_api_key,
-                        PublicReasonCode.invalid_llm_response,
-                        PublicReasonCode.llm_request_failed,
-                        PublicReasonCode.inference_context_too_large,
-                    }
                     ready_candidate = (
                         plan.reason_code == PublicReasonCode.draft_ready
                         or (

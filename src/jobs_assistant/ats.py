@@ -665,6 +665,18 @@ class GreenhouseAdapter:
             for field in observation.fields
             if _field_kind(field) == "checkbox" and field.value is True
         }
+        resume_candidates = tuple(
+            field
+            for field in observation.fields
+            if _is_resume_field(field)
+            and field.visible
+            and field.enabled
+            and not field.readonly
+            and not _field_is_manual(field)
+            and "field_identity_collision" not in field.validity_flags
+        )
+        resume_field = resume_candidates[0] if len(resume_candidates) == 1 else None
+
         answers: list[FieldAnswer] = []
         for field in observation.fields:
             if (
@@ -676,8 +688,11 @@ class GreenhouseAdapter:
                 continue
             target_id = field.target_id
             if _is_resume_field(field):
+                if "field_identity_collision" in field.validity_flags:
+                    continue
                 if (
-                    context.resume_available
+                    field is resume_field
+                    and context.resume_available
                     and resume_context is not None
                     and field_accepts_resume(field, resume_context)
                 ):
@@ -834,6 +849,10 @@ _NAME_ALIASES = {
     "personal site": "website",
     "personal_site": "website",
     "job_application[website]": "website",
+    "resume": "resume",
+    "cv": "resume",
+    "job_application[resume]": "resume",
+    "job_application[cv]": "resume",
     "address": "address",
     "street": "address",
     "street address": "address",
@@ -1340,7 +1359,19 @@ def field_accepts_resume(field: ObservedField, context: ResumeContext, accept: t
 
 
 def _is_resume_field(field: ObservedField) -> bool:
-    return _field_kind(field) == "file" and _norm_label(field.label) in {"resume", "resume/cv", "cv"}
+    if _field_kind(field) != "file":
+        return False
+
+    name = _norm_name(field.name) if field.name else ""
+    label = _norm_label(field.label)
+    if re.search(r"\bcover[-_ ]*letter\b", name) or re.search(r"\bcover[-_ ]*letter\b", label):
+        return False
+
+    name_identity = _canonical_descriptor("name", field.name) if field.name else None
+    label_identity = _canonical_descriptor("label", field.label)
+    if name_identity == "resume":
+        return label_identity in {None, "resume"}
+    return label_identity == "resume"
 
 
 def _field_kind(field: ObservedField) -> str:

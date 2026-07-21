@@ -13,7 +13,11 @@ const { URL } = require('node:url');
 
 const MAX_IN_FRAME = 256 * 1024;
 const MAX_OUT_FRAME = 2 * 1024 * 1024;
-const MAX_OBSERVATION_BYTES = 1_900_000;
+// Keep the JSON observation below the 2,000,000-byte bare-observation cap.
+const MAX_OBSERVATION_BYTES = 2_000_000;
+// Fields are capped across the complete observation; buttons are capped per frame.
+const MAX_FIELDS = 1000;
+const MAX_BUTTONS_PER_FRAME = 400;
 const STATIC_TYPES = new Set(['stylesheet', 'script', 'image', 'font', 'media']);
 const POLICY_PATH = path.join(__dirname, 'safety_policy.json');
 const POLICY_HASH = crypto.createHash('sha256').update(fs.readFileSync(POLICY_PATH)).digest('hex');
@@ -184,12 +188,15 @@ let documentRouteIdentity = null;
 let documentRedirectCount = 0;
 let internalTransportUrl = null;
 let staticRequests = 0;
+const observedStaticUrls = new Set();
 let staticBytes = 0;
 let reviewState = 'closed';
 let reviewToken = null;
 // A permit is retained until both the request interception and the strict
 // proxy validate the same navigation.  Ancillary fetches never consume it.
 let reviewPermit = null;
+let continuationNavigationPermit = null;
+let testButtonSemanticDriftArmed = false;
 let reviewLedger = new Map();
 let reviewEpoch = null;
 const proxyPermitUrls = new Map();
@@ -498,6 +505,63 @@ function consumeProxyAuthorization(url, method) {
   proxyPermitUrls.delete(key);
   return true;
 }
+function activeContinuationPermit() {
+  const permit = continuationNavigationPermit;
+  if (!permit || terminalReason || permit.expires <= Date.now() || !permit.routeIdentity || !documentRouteIdentity
+      || !sameDocumentRoute(permit.routeIdentity, documentRouteIdentity)) return null;
+  return permit;
+}
+function revokeContinuationCapability(reason = null) {
+  continuationNavigationPermit = null;
+  if (reason && !terminalReason) terminalReason = reason;
+  freezeProxy();
+}
+function guardedMutationNetworkError() {
+  return ['unsafe_navigation_target', 'observation_too_large'].includes(terminalReason)
+    ? terminalReason
+    : 'unsafe_network_attempt';
+}
+function continuationRouteAllowed(url, permit = activeContinuationPermit()) {
+  if (!permit) return false;
+  const route = routeIdentityForUrl(url);
+  return Boolean(route && sameDocumentRoute(route, permit.routeIdentity));
+}
+function continuationNavigationRequestAllowed(url, method = 'GET') {
+  const permit = activeContinuationPermit();
+  const parsed = safeUrl(url);
+  return Boolean(
+    permit
+      && String(method || 'GET').toUpperCase() === 'GET'
+      && parsed
+      && parsed.href === permit.url
+      && continuationRouteAllowed(parsed.href, permit),
+  );
+}
+function continuationDestinationCommitted(permit) {
+  return Boolean(permit && permit.committed === true);
+}
+function approvedContinuationStaticUrl(url, method = 'GET') {
+  const permit = activeContinuationPermit();
+  const parsed = safeUrl(url);
+  const normalizedMethod = String(method || 'GET').toUpperCase();
+  if (!permit || !parsed || !['GET', 'HEAD'].includes(normalizedMethod)
+      || !continuationRouteAllowed(permit.url, permit)
+      || !validateRequestUrl(parsed.href, { staticRequest: true })) return false;
+  // Old-page beforeunload/pagehide handlers run during page.goto.  They must
+  // not reuse even previously observed assets; destination static loading is
+  // authorized only after the exact main-frame candidate has committed.
+  return continuationDestinationCommitted(permit)
+    && (!parsed.search || permit.staticUrls?.has(parsed.href) === true);
+}
+function continuationStaticRequestAllowed(url, method, type) {
+  return STATIC_TYPES.has(String(type || '').toLowerCase()) && approvedContinuationStaticUrl(url, method);
+}
+function continuationFrameRouteAllowed(request, permit = activeContinuationPermit()) {
+  if (!permit) return false;
+  const frame = request?.frame?.();
+  const frameUrl = frame?.url?.() || page?.url?.();
+  return Boolean(frameUrl && continuationRouteAllowed(frameUrl, permit));
+}
 
 function chromiumExecutable() {
   const configured = process.env.JOBS_ASSISTANT_CHROMIUM_EXECUTABLE;
@@ -649,31 +713,46 @@ async function resolvePinnedAddress(hostname) {
 function currentConnectAuthorization(authority, host, localTunnel, localParsed, parsed) {
   const normalizedAuthority = String(authority || '').toLowerCase();
   const logicalParsed = logicalInitialUrl ? safeUrl(logicalInitialUrl) : null;
-  const logicalAuthority = logicalParsed ? `${logicalParsed.hostname}:443` : '';
+  const logicalAuthority = logicalParsed ? absoluteAuthority(logicalParsed).toLowerCase() : '';
   const permitUrl = reviewPermit && reviewPermit.expires > Date.now() ? safeUrl(reviewPermit.url) : null;
-  const permitAuthority = permitUrl ? `${permitUrl.hostname}:${permitUrl.port || 443}` : null;
+  const permitAuthority = permitUrl ? absoluteAuthority(permitUrl).toLowerCase() : null;
   const epoch = reviewEpoch && reviewEpoch.expires > Date.now() && sameDocumentRoute(reviewEpoch.routeIdentity, documentRouteIdentity)
     ? reviewEpoch : null;
   const epochExpiresAt = epoch ? epoch.expires : null;
-  const reviewExpiry = permitAuthority && normalizedAuthority === permitAuthority.toLowerCase()
-    ? reviewPermit.expires : epochExpiresAt;
-  const initialAllowed = !proxyFrozen && !firstApplicantMutation && !terminalReason && (
-    localTunnel
-    || normalizedAuthority === logicalAuthority.toLowerCase()
-    || STATIC_HOSTS.has(host)
+  const parsedAuthority = parsed ? absoluteAuthority(parsed).toLowerCase() : '';
+  const continuation = activeContinuationPermit();
+  const continuationUrl = continuation ? safeUrl(continuation.url) : null;
+  const continuationAuthority = continuationUrl ? absoluteAuthority(continuationUrl).toLowerCase() : '';
+  const continuationAllowed = Boolean(
+    continuation
+      && (
+        normalizedAuthority === continuationAuthority
+        || (STATIC_HOSTS.has(host) && normalizedAuthority === parsedAuthority)
+      ),
   );
   const reviewAllowed = reviewState === 'open_guarded' && !terminalReason && (
-    (permitAuthority && normalizedAuthority === permitAuthority.toLowerCase())
-    || (epoch && STATIC_HOSTS.has(host))
+    (permitAuthority && normalizedAuthority === permitAuthority)
+    || (epoch && STATIC_HOSTS.has(host) && normalizedAuthority === parsedAuthority)
   );
+  const initialAllowed = !proxyFrozen && !firstApplicantMutation && !terminalReason && (
+    localTunnel
+    || normalizedAuthority === logicalAuthority
+    || (STATIC_HOSTS.has(host) && normalizedAuthority === parsedAuthority)
+  );
+  const reviewExpiry = permitAuthority && normalizedAuthority === permitAuthority
+    ? reviewPermit.expires : epochExpiresAt;
+  const capabilityExpiry = continuationAllowed ? continuation.expires : (reviewAllowed ? reviewExpiry : null);
   const shapeAllowed = Boolean(parsed && parsed.pathname === '/' && !parsed.search && !parsed.hash && !parsed.username
     && !parsed.password && (!parsed.port || parsed.port === '443')
     && (localTunnel || STATIC_HOSTS.has(host) || ALLOWED_ATS_HOSTS.has(host)));
   return {
-    allowed: shapeAllowed && (initialAllowed || reviewAllowed),
+    allowed: shapeAllowed && (initialAllowed || reviewAllowed || continuationAllowed),
     initialAllowed,
     reviewAllowed,
+    continuationAllowed,
     reviewExpiry,
+    continuationExpiry: continuationAllowed ? continuation.expires : null,
+    capabilityExpiry,
   };
 }
 
@@ -693,7 +772,13 @@ async function startProxy() {
         ? internalTransportUrl && validateRequestUrl(parsed.href, { local: true })
         : validateRequestUrl(parsed.href, { initial: true }) || validateRequestUrl(parsed.href, { staticRequest: true })
     ));
-    const permitAllowed = Boolean(authorized && reviewState === 'open_guarded' && !terminalReason);
+    const continuationAllowed = Boolean(parsed && (
+      continuationNavigationRequestAllowed(parsed.href, method)
+      || approvedContinuationStaticUrl(parsed.href, method)
+    ));
+    const permitAllowed = Boolean(
+      (authorized && reviewState === 'open_guarded' && !terminalReason) || continuationAllowed
+    );
     if ((!permitAllowed && (proxyFrozen || firstApplicantMutation || terminalReason))
         || (!permitAllowed && !preMutationAllowed)
         || (!permitAllowed && method !== 'GET' && method !== 'HEAD')) {
@@ -704,6 +789,18 @@ async function startProxy() {
     const transport = local && localBase ? localBase : parsed;
     const finish = async () => {
       try {
+        const chunks = [];
+        let requestBytes = 0;
+        await new Promise((resolve, reject) => {
+          req.on('data', chunk => {
+            requestBytes += chunk.length;
+            if (requestBytes > 256 * 1024) req.destroy(new Error('request_body_too_large'));
+            else chunks.push(chunk);
+          });
+          req.once('end', resolve);
+          req.once('error', reject);
+          req.once('aborted', () => reject(new Error('request_aborted')));
+        });
         let target;
         if (local && localBase) {
           const family = net.isIP(localBase.hostname);
@@ -713,8 +810,20 @@ async function startProxy() {
           target = await resolvePinnedAddress(parsed.hostname);
         }
         const requestAuthority = absoluteAuthority(parsed);
+        const refreshedContinuationAllowed = Boolean(parsed && (
+          continuationNavigationRequestAllowed(parsed.href, method)
+          || approvedContinuationStaticUrl(parsed.href, method)
+        ));
         const refreshedAuthorization = local && localBase
-          ? { allowed: Boolean(internalTransportUrl && !proxyFrozen && !firstApplicantMutation && !terminalReason), reviewAllowed: false, reviewExpiry: null }
+          ? {
+            allowed: Boolean(internalTransportUrl && !proxyFrozen && !firstApplicantMutation && !terminalReason)
+              || refreshedContinuationAllowed,
+            initialAllowed: Boolean(internalTransportUrl && !proxyFrozen && !firstApplicantMutation && !terminalReason),
+            reviewAllowed: false,
+            continuationAllowed: refreshedContinuationAllowed,
+            reviewExpiry: null,
+            continuationExpiry: refreshedContinuationAllowed ? activeContinuationPermit()?.expires : null,
+          }
           : currentConnectAuthorization(requestAuthority, parsed.hostname.toLowerCase(), false, null, parsed);
         const routeIdentity = !local ? routeIdentityForUrl(parsed.href) : null;
         const routeUnchanged = local
@@ -722,28 +831,34 @@ async function startProxy() {
           : (routeIdentity && documentRouteIdentity
             ? sameDocumentRoute(routeIdentity, documentRouteIdentity)
             : STATIC_HOSTS.has(parsed.hostname.toLowerCase()));
-        const permitUnexpired = !authorized || (
-          reviewState === 'open_guarded'
-          && refreshedAuthorization.reviewAllowed
-          && refreshedAuthorization.reviewExpiry
-          && refreshedAuthorization.reviewExpiry > Date.now()
-        );
+        const permitUnexpired = refreshedContinuationAllowed
+          || (!authorized && refreshedAuthorization.initialAllowed)
+          || (
+            reviewState === 'open_guarded'
+            && refreshedAuthorization.reviewAllowed
+            && refreshedAuthorization.reviewExpiry
+            && refreshedAuthorization.reviewExpiry > Date.now()
+          );
         if (req.destroyed || res.destroyed || !refreshedAuthorization.allowed || !routeUnchanged || !permitUnexpired) {
-          if (firstApplicantMutation && !terminalReason) terminalReason = 'unsafe_network_attempt';
+          if (firstApplicantMutation) revokeContinuationCapability('unsafe_network_attempt');
           throw new Error('proxy_authorization_revoked');
         }
         const tls = transport.protocol === 'https:';
         const transportProtocol = tls ? require('node:https') : http;
-        const chunks = [];
-        let requestBytes = 0;
-        req.on('data', chunk => {
-          requestBytes += chunk.length;
-          if (requestBytes > 256 * 1024) req.destroy(new Error('request_body_too_large'));
-          else chunks.push(chunk);
-        });
-        await new Promise(resolve => req.once('end', resolve));
+        const latestContinuationAllowed = Boolean(parsed && (
+          continuationNavigationRequestAllowed(parsed.href, method)
+          || approvedContinuationStaticUrl(parsed.href, method)
+        ));
         const latestAuthorization = local && localBase
-          ? { allowed: Boolean(internalTransportUrl && !proxyFrozen && !firstApplicantMutation && !terminalReason), reviewAllowed: false, reviewExpiry: null }
+          ? {
+            allowed: Boolean(internalTransportUrl && !proxyFrozen && !firstApplicantMutation && !terminalReason)
+              || latestContinuationAllowed,
+            initialAllowed: Boolean(internalTransportUrl && !proxyFrozen && !firstApplicantMutation && !terminalReason),
+            reviewAllowed: false,
+            continuationAllowed: latestContinuationAllowed,
+            reviewExpiry: null,
+            continuationExpiry: latestContinuationAllowed ? activeContinuationPermit()?.expires : null,
+          }
           : currentConnectAuthorization(requestAuthority, parsed.hostname.toLowerCase(), false, null, parsed);
         const latestRoute = !local ? routeIdentityForUrl(parsed.href) : null;
         const latestRouteUnchanged = local
@@ -751,14 +866,16 @@ async function startProxy() {
           : (latestRoute && documentRouteIdentity
             ? sameDocumentRoute(latestRoute, documentRouteIdentity)
             : STATIC_HOSTS.has(parsed.hostname.toLowerCase()));
-        const latestPermit = !authorized || (
-          reviewState === 'open_guarded'
-          && latestAuthorization.reviewAllowed
-          && latestAuthorization.reviewExpiry
-          && latestAuthorization.reviewExpiry > Date.now()
-        );
+        const latestPermit = latestContinuationAllowed
+          || (!authorized && latestAuthorization.initialAllowed)
+          || (
+            reviewState === 'open_guarded'
+            && latestAuthorization.reviewAllowed
+            && latestAuthorization.reviewExpiry
+            && latestAuthorization.reviewExpiry > Date.now()
+          );
         if (req.destroyed || res.destroyed || !latestAuthorization.allowed || !latestRouteUnchanged || !latestPermit) {
-          if (firstApplicantMutation && !terminalReason) terminalReason = 'unsafe_network_attempt';
+          if (firstApplicantMutation) revokeContinuationCapability('unsafe_network_attempt');
           throw new Error('proxy_authorization_revoked');
         }
         const options = {
@@ -780,7 +897,7 @@ async function startProxy() {
             transferred += chunk.length;
             if (transferred > MAX_STATIC_BYTES || staticBytes + chunk.length > MAX_STATIC_BYTES) {
               networkCounters.responseBytesRejected += 1;
-              if (!terminalReason) terminalReason = 'observation_too_large';
+              revokeContinuationCapability('observation_too_large');
               upstream.destroy(); res.destroy(); return;
             }
             staticBytes += chunk.length;
@@ -827,7 +944,7 @@ async function startProxy() {
     const connect = target => {
       const authorization = currentConnectAuthorization(authority, host, localTunnel, localParsed, parsed);
       if (client.destroyed || !authorization.allowed
-          || (authorization.reviewAllowed && (!authorization.reviewExpiry || authorization.reviewExpiry <= Date.now()))) {
+          || (authorization.capabilityExpiry && authorization.capabilityExpiry <= Date.now())) {
         client.destroy(); return;
       }
       networkCounters.upstreamConnectAttempts += 1;
@@ -871,14 +988,13 @@ async function startProxy() {
           recordWriteError();
           closeTunnel();
           return false;
-        }
+      }
       };
       client.once('error', onSocketError);
       socket = net.connect({ port: destinationPort, host: configuredTestHost || target.address, family: target.family }, () => {
         const connectedAuthorization = currentConnectAuthorization(authority, host, localTunnel, localParsed, parsed);
         if (state.closed || client.destroyed || socket.destroyed || !connectedAuthorization.allowed
-            || (connectedAuthorization.reviewAllowed
-              && (!connectedAuthorization.reviewExpiry || connectedAuthorization.reviewExpiry <= Date.now()))) {
+            || (connectedAuthorization.capabilityExpiry && connectedAuthorization.capabilityExpiry <= Date.now())) {
           closeTunnel(); return;
         }
         if (!safeWrite(client, Buffer.from('HTTP/1.1 200 Connection Established\r\n\r\n', 'ascii'))) return;
@@ -890,13 +1006,13 @@ async function startProxy() {
               closeTunnel(); return;
             }
             const relayAuthorization = currentConnectAuthorization(authority, host, localTunnel, localParsed, parsed);
-            if (relayAuthorization.reviewAllowed
-                && (!relayAuthorization.reviewExpiry || relayAuthorization.reviewExpiry <= Date.now())) {
+            if (!relayAuthorization.allowed
+                || (relayAuthorization.capabilityExpiry && relayAuthorization.capabilityExpiry <= Date.now())) {
               closeTunnel(); return;
             }
             if (transferred + chunk.length > MAX_STATIC_BYTES || staticBytes + chunk.length > MAX_STATIC_BYTES) {
               networkCounters.responseBytesRejected += 1;
-              if (!terminalReason) terminalReason = 'observation_too_large';
+              revokeContinuationCapability('observation_too_large');
               closeTunnel(); return;
             }
             if (!safeWrite(destination, chunk)) return;
@@ -909,8 +1025,8 @@ async function startProxy() {
         relay(socket, client); relay(client, socket);
       });
       socket.on('error', onSocketError);
-      trackProxyTunnel(socket, authorization.reviewExpiry);
-      trackProxyTunnel(client, authorization.reviewExpiry);
+      trackProxyTunnel(socket, authorization.capabilityExpiry);
+      trackProxyTunnel(client, authorization.capabilityExpiry);
     };
     void (async () => {
       try {
@@ -925,7 +1041,7 @@ async function startProxy() {
         if (client.destroyed) { client.destroy(); return; }
         const authorization = currentConnectAuthorization(authority, host, localTunnel, localParsed, parsed);
         if (!authorization.allowed
-            || (authorization.reviewAllowed && (!authorization.reviewExpiry || authorization.reviewExpiry <= Date.now()))) {
+            || (authorization.capabilityExpiry && authorization.capabilityExpiry <= Date.now())) {
           client.destroy(); return;
         }
         connect(target);
@@ -979,7 +1095,7 @@ function enforceBudgets() {
 function requestTerminalCleanup(trigger, exitCode, reason = null) {
   detachedCloseRequested = true;
   cleanupTrigger = cleanupTrigger || trigger;
-  if (reason && !terminalReason) terminalReason = reason;
+  if (reason) revokeContinuationCapability(reason);
   void close(trigger).then(() => process.exit(exitCode)).catch(() => process.exit(exitCode));
 }
 function installBudgetWatcher() {
@@ -987,7 +1103,7 @@ function installBudgetWatcher() {
   budgetTimer = setInterval(() => {
     try { enforceBudgets(); }
     catch (error) {
-      if (!terminalReason) terminalReason = error?.message || 'artifact_error';
+      revokeContinuationCapability(error?.message || 'artifact_error');
       clearInterval(budgetTimer); budgetTimer = null;
       requestTerminalCleanup('budget_exceeded', 1);
     }
@@ -1015,18 +1131,32 @@ function isImplicitBrowserFaviconIntent(targetPage, params) {
 }
 
 function recordUnsafePageNetworkIntent(reason = 'unsafe_network_attempt') {
+  if (terminalReason) { revokeContinuationCapability(); return; }
   networkRequestSequence += 1;
   lastNetworkActivity = Date.now();
-  if (terminalReason) return;
-  terminalReason = reason;
+  revokeContinuationCapability(reason);
   setTimeout(() => { if (!cleanupStarted) void close(); }, 1000).unref?.();
 }
 
 async function installPageNetworkIntentGuard(targetPage) {
   const client = await targetPage.createCDPSession();
   await client.send('Network.enable');
+  await client.send('Page.enable');
   client.on('Network.requestWillBeSent', params => {
+    const requestUrl = params?.request?.url;
+    const requestMethod = String(params?.request?.method || 'GET').toUpperCase();
+    const continuationAllowed = continuationNavigationRequestAllowed(requestUrl, requestMethod)
+      || continuationStaticRequestAllowed(requestUrl, requestMethod, params?.type);
+    const permit = activeContinuationPermit();
+    if (permit && params?.type === 'Document'
+        && continuationNavigationRequestAllowed(requestUrl, requestMethod)
+        && params?.requestId && params?.loaderId && params?.frameId) {
+      permit.navigationRequestId = String(params.requestId);
+      permit.navigationLoaderId = String(params.loaderId);
+      permit.navigationFrameId = String(params.frameId);
+    }
     if (!firstApplicantMutation || reviewState === 'open_guarded'
+        || continuationAllowed
         || isImplicitBrowserFaviconIntent(targetPage, params)) return;
     let reason = 'unsafe_network_attempt';
     if (params?.type === 'Document') {
@@ -1034,6 +1164,21 @@ async function installPageNetworkIntentGuard(targetPage) {
       catch (error) { reason = error?.message || 'unsafe_navigation_target'; }
     }
     recordUnsafePageNetworkIntent(reason);
+  });
+  client.on('Page.frameNavigated', params => {
+    const permit = activeContinuationPermit();
+    const frame = params?.frame;
+    if (!permit || !frame || frame.parentId || !frame.loaderId
+        || String(frame.loaderId) !== permit.navigationLoaderId
+        || String(frame.id) !== permit.navigationFrameId
+        || safeUrl(frame.url)?.href !== permit.url
+        || !continuationRouteAllowed(frame.url, permit)) return;
+    permit.committed = true;
+  });
+  client.on('Page.windowOpen', () => {
+    if (firstApplicantMutation && reviewState !== 'open_guarded') {
+      recordUnsafePageNetworkIntent('unsafe_network_attempt');
+    }
   });
   client.on('Network.webSocketCreated', () => {
     if (firstApplicantMutation && reviewState !== 'open_guarded') recordUnsafePageNetworkIntent();
@@ -1187,13 +1332,21 @@ async function installRequestGuards(targetPage) {
     const redirectChain = typeof request.redirectChain === 'function' ? request.redirectChain() : [];
     const redirectExceeded = redirectChain.length > MAX_REDIRECTS;
     if (redirectExceeded) networkCounters.redirectsDenied += 1;
+    const continuationNavigationAllowed = navigation
+      && request.frame?.() === targetPage.mainFrame()
+      && continuationNavigationRequestAllowed(url, method)
+      && continuationFrameRouteAllowed(request);
+    const continuationStaticAllowed = !navigation
+      && continuationStaticRequestAllowed(url, method, type)
+      && continuationFrameRouteAllowed(request);
+    const continuationAllowed = continuationNavigationAllowed || continuationStaticAllowed;
     let documentAllowed = true; let documentError = null; let reviewAllowed = false;
     if (navigation && reviewState !== 'open_guarded') {
       try { validateDocumentNavigation(url, { redirectCount: redirectChain.length }); }
       catch (error) {
         documentAllowed = false;
         documentError = error?.message || 'unsafe_navigation_target';
-        if (!terminalReason) terminalReason = documentError;
+        revokeContinuationCapability(documentError);
       }
     }
     if (reviewState === 'open_guarded' && !documentError) {
@@ -1204,32 +1357,37 @@ async function installRequestGuards(targetPage) {
             && sameBoardJobUrl(url, reviewEpoch.routeIdentity, { confirmation: /\/confirmation(?:[/?]|$)/.test(parsed?.pathname || '') });
           if (reviewAllowed) reviewEpoch.redirects = Math.max(reviewEpoch.redirects, redirectChain.length);
         } else {
-          reviewAllowed = STATIC_TYPES.has(type) && !redirectExceeded
-            && validateRequestUrl(url, { staticRequest: true }) && reviewEpoch.staticRequests < MAX_STATIC_REQUESTS;
+          reviewAllowed = ['GET', 'HEAD'].includes(method)
+            && STATIC_TYPES.has(type)
+            && !redirectExceeded
+            && validateRequestUrl(url, { staticRequest: true })
+            && reviewEpoch.staticRequests < MAX_STATIC_REQUESTS;
         }
       }
     }
+    if (continuationAllowed) reviewAllowed = true;
+    const reviewNavigationDenied = navigation && reviewState === 'open_guarded'
+      && !reviewAllowed && !continuationNavigationAllowed;
     if (navigation && reviewAllowed && currentGeneration) invalidateGeneration('navigation_invalidated');
     const initialLocal = Boolean(local && internalTransportUrl && validateRequestUrl(url, { local: true }));
     const productionAllowed = type === 'document'
-      ? documentAllowed && validateRequestUrl(url, { initial: true })
+      ? method === 'GET' && !reviewNavigationDenied && documentAllowed && validateRequestUrl(url, { initial: true })
       : STATIC_TYPES.has(type)
-        ? !redirectExceeded && validateRequestUrl(url, { staticRequest: true })
+        ? ['GET', 'HEAD'].includes(method) && !redirectExceeded && validateRequestUrl(url, { staticRequest: true })
         : type === 'other'
-          ? !redirectExceeded && validateOtherRequest(url)
+          ? ['GET', 'HEAD'].includes(method) && !redirectExceeded && validateOtherRequest(url)
           : false;
     const transportAllowed = initialLocal && type !== 'other';
-    let allowed = !attacker && !finalLike && !terminalReason && !documentError
-      && (transportAllowed || productionAllowed)
+    let allowed = !attacker && (!finalLike || reviewAllowed) && !terminalReason && !documentError
+      && !reviewNavigationDenied
+      && (transportAllowed || productionAllowed || reviewAllowed || continuationAllowed)
       && (type === 'document' || STATIC_TYPES.has(type) || type === 'other');
-    if (firstApplicantMutation) allowed = false;
-    if (reviewState === 'open_guarded' && reviewAllowed) allowed = true;
+    if (firstApplicantMutation && !continuationAllowed && !reviewAllowed) allowed = false;
     if (!allowed) {
       networkCounters.denied += 1;
-      if (firstApplicantMutation && !terminalReason) {
-        terminalReason = 'unsafe_network_attempt';
+      if (firstApplicantMutation && !continuationAllowed && !reviewAllowed && !terminalReason) {
+        recordUnsafePageNetworkIntent('unsafe_network_attempt');
         request.abort('blockedbyclient').catch(() => {});
-        setTimeout(() => { if (!cleanupStarted) void close(); }, 1000).unref?.();
       } else request.abort('blockedbyclient').catch(() => {});
       markComplete(request);
       return;
@@ -1237,19 +1395,23 @@ async function installRequestGuards(targetPage) {
     if (type !== 'document') {
       staticRequests += 1;
       if (staticRequests > MAX_STATIC_REQUESTS) {
+        networkCounters.denied += 1;
+        revokeContinuationCapability('observation_too_large');
         request.abort('blockedbyclient').catch(() => {});
         markComplete(request);
         return;
       }
       if (reviewEpoch) reviewEpoch.staticRequests = staticRequests;
+      if (STATIC_TYPES.has(type) && !firstApplicantMutation && parsed && observedStaticUrls.size < MAX_STATIC_REQUESTS) {
+        observedStaticUrls.add(parsed.href);
+      }
     }
     if (reviewState === 'open_guarded' && reviewAllowed && parsed) authorizeProxyRequest(url, method);
     // The local fixture is a capability substitution, but it still passed all
-    // the same strict state and route gates above.
-    if (internalTransportUrl && safeUrl(internalTransportUrl)?.protocol === 'http:' && (initialLocal || productionAllowed)
-        && method === 'GET' && (!firstApplicantMutation || reviewAllowed)) {
+    if (internalTransportUrl && safeUrl(internalTransportUrl)?.protocol === 'http:' && (initialLocal || productionAllowed || continuationAllowed)
+        && ['GET', 'HEAD'].includes(method) && (!firstApplicantMutation || reviewAllowed || continuationAllowed)) {
       try {
-        const internal = await fetchInternalDocument(url);
+        const internal = await fetchInternalDocument(url, method);
         staticBytes += internal.body.length;
         if (staticBytes > MAX_STATIC_BYTES) throw new Error('response_body_too_large');
         const headers = { ...internal.headers };
@@ -1258,7 +1420,7 @@ async function installRequestGuards(targetPage) {
         networkCounters.allowed += 1;
       } catch (error) {
         networkCounters.denied += 1;
-        if (error?.message === 'response_body_too_large' && !terminalReason) terminalReason = 'observation_too_large';
+        if (error?.message === 'response_body_too_large') revokeContinuationCapability('observation_too_large');
         await request.abort('failed').catch(() => {});
       }
       markComplete(request);
@@ -1270,7 +1432,12 @@ async function installRequestGuards(targetPage) {
   targetPage.on('requestfinished', request => markComplete(request));
   targetPage.on('requestfailed', request => markComplete(request));
   targetPage.on('dialog', dialog => dialog.dismiss().catch(() => {}));
-  targetPage.on('popup', popup => popup.close().catch(() => {}));
+  targetPage.on('popup', popup => {
+    if (firstApplicantMutation && reviewState !== 'open_guarded') {
+      recordUnsafePageNetworkIntent('unsafe_network_attempt');
+    }
+    popup.close().catch(() => {});
+  });
 }
 async function waitForInitialQuiet(timeoutMs = 10000) {
   if (!page) throw new Error('Puppeteer page is not initialized');
@@ -1303,6 +1470,8 @@ function observationSemanticKey(value) {
 
 async function goto(command) {
   assertPage();
+  continuationNavigationPermit = null;
+  observedStaticUrls.clear();
   if (command.ats_policy !== undefined && command.ats_policy !== selectedPolicyName) throw new Error('ats_policy_mismatch');
   const route = validateInitialUrl(command.url);
   logicalInitialUrl = route.url;
@@ -1412,6 +1581,166 @@ function reviewClickKey(frameUrl, info) {
   const value = (buttonLikeInput && !text) ? String(info.buttonValue || '').replace(/\s+/g, ' ').trim() : text;
   return hash([origin, info.isAnchor ? 'a' : 'button', identity, value].join('\u001f')).slice(0, 24);
 }
+function noNavigationTarget(value) {
+  return value === null || value === '';
+}
+function navigationMetadataMatches(observed, live) {
+  if (!observed || !live || Boolean(observed.isAnchor) !== Boolean(live.isAnchor)) return false;
+  return ['hrefUrl', 'hrefAttribute', 'target', 'download', 'formActionUrl', 'effectiveMethod']
+    .every(key => Object.is(observed[key] ?? null, live[key] ?? null));
+}
+function nativeProgressButtonAllowed(info) {
+  const raw = [
+    info?.text,
+    info?.buttonValue,
+    info?.name,
+    ...(Array.isArray(info?.descriptors) ? info.descriptors : []),
+  ].filter(value => typeof value === 'string' && value.trim()).join(' ');
+  const normalized = raw.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+  if (!normalized
+      || /\b(?:continue|next|proceed|save and continue)\s+(?:with|via|using)\b/.test(normalized)
+      || /\b(?:apply|alert|another|quick|mygreenhouse|sso|oauth|account|login|log in|sign in|auth|authenticate|authentication|submit|confirm|finish|send|final|finalize)\b/.test(normalized)) {
+    return false;
+  }
+  return /^(?:continue|next|proceed)(?:\b|$)/.test(normalized)
+    || /^save and continue(?:\b|$)/.test(normalized);
+}
+function atomicGuardedProgressDispatch(el, params) {
+  if (params.forceSemanticDrift) {
+    const setter = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent')?.set;
+    if (typeof setter !== 'function') return 'prototype_poisoned';
+    setter.call(el, 'Submit application');
+  }
+  const getAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'getAttribute')?.value;
+  const hasAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'hasAttribute')?.value;
+  const parentElement = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get;
+  const matches = Object.getOwnPropertyDescriptor(Element.prototype, 'matches')?.value;
+  const localName = Object.getOwnPropertyDescriptor(Element.prototype, 'localName')?.get;
+  const inputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get;
+  const buttonValueGetter = Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'value')?.get;
+  const dispatchEvent = Object.getOwnPropertyDescriptor(EventTarget.prototype, 'dispatchEvent')?.value;
+  const elementFromPoint = Object.getOwnPropertyDescriptor(Document.prototype, 'elementFromPoint')?.value;
+  if (![getAttribute, hasAttribute, parentElement, localName, matches, dispatchEvent, elementFromPoint]
+    .every(item => typeof item === 'function')) return 'prototype_poisoned';
+  const attr = name => getAttribute.call(el, name);
+  const tag = String(localName.call(el) || '').toLowerCase();
+  const input = tag === 'input';
+  const button = tag === 'button';
+  if ((!input && !button) || tag.includes('-')) return 'stale_generation';
+  const type = String(attr('type') || (button ? 'submit' : 'text')).toLowerCase();
+  const form = el.form || null;
+  const valueGetter = input ? inputValue : buttonValueGetter;
+  if (typeof valueGetter !== 'function') return 'prototype_poisoned';
+  let effectivelyDisabled;
+  try { effectivelyDisabled = Boolean(matches.call(el, ':disabled')); }
+  catch { return 'prototype_poisoned'; }
+  const buttonValue = ['submit', 'button', 'reset', 'image'].includes(type)
+    ? String(valueGetter.call(el) ?? '') : '';
+  const text = button ? String(el.innerText || el.textContent || '').trim().slice(0, 2048) : '';
+  const name = attr('name') || el.id || null;
+  const ownNames = ['name', 'id', 'autocomplete', 'placeholder', 'title', 'aria-label'];
+  const finalOwn = ownNames.map(item => attr(item)).filter(Boolean);
+  const labels = [];
+  if (el.labels) for (const item of el.labels) labels.push(item.textContent || '');
+  const described = attr('aria-describedby');
+  if (described) {
+    for (const id of described.split(/\s+/)) {
+      const item = el.ownerDocument.getElementById(id);
+      if (item) labels.push(item.textContent || '');
+    }
+  }
+  const parentLabel = el.closest('label,fieldset');
+  if (parentLabel) labels.push(parentLabel.textContent || '');
+  const descriptors = [...finalOwn, ...labels, text, buttonValue]
+    .map(value => String(value).trim()).filter(Boolean);
+  const descriptorBytes = descriptors.reduce((total, value) => total + value.length, 0);
+  if (descriptors.length > 256 || descriptorBytes > 32768) return 'observation_too_large';
+  const target = attr('target');
+  const download = Boolean(hasAttribute.call(el, 'download'));
+  const formActionUrl = form ? (hasAttribute.call(el, 'formaction') ? el.formAction : form.action) : null;
+  const effectiveMethod = form
+    ? String(hasAttribute.call(el, 'formmethod') ? el.formMethod : form.method || 'get').toLowerCase()
+    : null;
+  const formIndex = form ? Array.from(el.ownerDocument.forms || []).indexOf(form) : -1;
+  const formIdentity = form
+    ? [form.id || '', form.getAttribute('name') || '', formActionUrl || '', effectiveMethod || '', formIndex].join('\u001f')
+    : null;
+  const formRegistry = globalThis.__JOBS_ASSISTANT_FORM_REGISTRY__
+    || (globalThis.__JOBS_ASSISTANT_FORM_REGISTRY__ = { tokens: new WeakMap(), next: 1 });
+  const formToken = form ? (() => {
+    let token = formRegistry.tokens.get(form);
+    if (!token) {
+      token = `form-${formRegistry.next++}`;
+      formRegistry.tokens.set(form, token);
+    }
+    return token;
+  })() : null;
+  const documentOrigin = el.ownerDocument?.location?.origin || null;
+  const isNativeOfflineButton = (button || input) && type === 'button';
+  const isNativeContinuationButton = button && type === 'submit' && !form;
+  const finalMaterial = [...finalOwn, ...labels, text, buttonValue, name, formActionUrl, attr('href')]
+    .filter(Boolean).join(' ');
+  const finalWords = new Set(finalMaterial.toLowerCase().match(/[a-z0-9]+/g) || []);
+  const finalLike = params.finalTokens.some(token => finalWords.has(String(token).toLowerCase()));
+  const semanticRaw = [text, buttonValue, name, ...descriptors]
+    .filter(value => typeof value === 'string' && value.trim()).join(' ');
+  const semantic = semanticRaw.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().replace(/\s+/g, ' ');
+  const semanticAllowed = Boolean(
+    semantic
+    && !/\b(?:continue|next|proceed|save and continue)\s+(?:with|via|using)\b/.test(semantic)
+    && !/\b(?:apply|alert|another|quick|mygreenhouse|sso|oauth|account|login|log in|sign in|auth|authenticate|authentication|submit|confirm|finish|send|final|finalize)\b/.test(semantic)
+    && (/^(?:continue|next|proceed)(?:\b|$)/.test(semantic)
+      || /^save and continue(?:\b|$)/.test(semantic)),
+  );
+  if (finalLike || !semanticAllowed) return 'final_or_anchor_not_automated';
+  const expected = params.expected;
+  const scalarSnapshot = {
+    kind: type,
+    buttonType: type,
+    name,
+    text,
+    buttonValue,
+    target,
+    download,
+    formActionUrl,
+    effectiveMethod,
+    formIdentity,
+    formToken,
+    documentOrigin,
+    isNativeOfflineButton,
+    isNativeContinuationButton,
+    finalLike,
+  };
+  if (Object.entries(scalarSnapshot).some(([key, value]) => !Object.is(value ?? null, expected[key] ?? null))
+      || JSON.stringify(descriptors) !== JSON.stringify(expected.descriptors || [])) {
+    return 'stale_generation';
+  }
+  const noDirectNavigation = !target && !download && !attr('href');
+  const noAction = !formActionUrl && !effectiveMethod && noDirectNavigation;
+  const shapeAllowed = params.mode === 'ordinary'
+    ? isNativeOfflineButton && type === 'button' && noDirectNavigation && documentOrigin === params.pageOrigin
+    : params.mode === 'submit'
+      && isNativeContinuationButton && type === 'submit' && noAction && documentOrigin === params.pageOrigin;
+  if (!shapeAllowed) return 'final_or_anchor_not_automated';
+  let current = el;
+  while (current) {
+    const ariaHidden = getAttribute.call(current, 'aria-hidden');
+    if (typeof ariaHidden === 'string' && ariaHidden.trim().toLowerCase() === 'true') {
+      return 'target_not_actionable';
+    }
+    current = parentElement.call(current);
+  }
+  const rect = el.getBoundingClientRect();
+  const style = getComputedStyle(el);
+  if (!rect.width || !rect.height || style.display === 'none' || style.visibility === 'hidden'
+      || style.pointerEvents === 'none' || effectivelyDisabled) return 'target_not_actionable';
+  const top = elementFromPoint.call(document, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  if (!(top === el || Boolean(top && el.contains(top)))) return 'button_not_hit_tested';
+  const event = new MouseEvent('click', { bubbles: true, cancelable: true, composed: true, view: window });
+  event.preventDefault();
+  dispatchEvent.call(el, event);
+  return null;
+}
 async function consumeRealmReviewPermit(request) {
   if (!page || request.frame() !== page.mainFrame() || !request.isNavigationRequest()) return false;
   let permit = null;
@@ -1466,7 +1795,9 @@ async function safeElementInfo(handle) {
     const selectOptionsDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options') : null;
     const selectDisabledDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'disabled') : null;
     const selectRequiredDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'required') : null;
-    const optionParentElementDescriptor = select ? Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement') : null;
+    const getAttributeDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'getAttribute');
+    const parentElementDescriptor = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement');
+    const optionParentElementDescriptor = select ? parentElementDescriptor : null;
     const elementLocalNameDescriptor = select ? Object.getOwnPropertyDescriptor(Element.prototype, 'localName') : null;
     const optionValueDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'value') : null;
     const optionSelectedDescriptor = select ? Object.getOwnPropertyDescriptor(HTMLOptionElement.prototype, 'selected') : null;
@@ -1478,8 +1809,31 @@ async function safeElementInfo(handle) {
     const nativeOptions = selectOptionsDescriptor && typeof selectOptionsDescriptor.get === 'function' ? selectOptionsDescriptor.get.call(el) : [];
     const nativeValue = valueDescriptor && typeof valueDescriptor.get === 'function' ? valueDescriptor.get.call(el) : null;
     const nativeChecked = checkedDescriptor && typeof checkedDescriptor.get === 'function' ? checkedDescriptor.get.call(el) : null;
-    const nativeSelectDisabled = selectDisabledDescriptor && typeof selectDisabledDescriptor.get === 'function' ? Boolean(selectDisabledDescriptor.get.call(el)) : false;
     const nativeSelectRequired = selectRequiredDescriptor && typeof selectRequiredDescriptor.get === 'function' ? Boolean(selectRequiredDescriptor.get.call(el)) : false;
+    const nativeGetAttribute = getAttributeDescriptor?.value;
+    const hasAttributeDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'hasAttribute');
+    const nativeHasAttribute = hasAttributeDescriptor?.value;
+    const matchesDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'matches');
+    const nativeMatches = matchesDescriptor?.value;
+    const anchorHrefDescriptor = anchor ? Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'href') : null;
+    const nativeAnchorHref = anchorHrefDescriptor?.get;
+    const nativeParentElement = parentElementDescriptor?.get;
+    const effectiveDisabledState = (() => {
+      if (typeof nativeMatches !== 'function') return { known: false, disabled: true };
+      try { return { known: true, disabled: Boolean(nativeMatches.call(el, ':disabled')) }; }
+      catch { return { known: false, disabled: true }; }
+    })();
+    const ariaHiddenState = (() => {
+      if (typeof nativeGetAttribute !== 'function' || typeof nativeParentElement !== 'function') return { known: false, hidden: true };
+      let current = el;
+      while (current) {
+        let raw;
+        try { raw = nativeGetAttribute.call(current, 'aria-hidden'); } catch { return { known: false, hidden: true }; }
+        if (typeof raw === 'string' && raw.trim().toLowerCase() === 'true') return { known: true, hidden: true };
+        try { current = nativeParentElement.call(current); } catch { return { known: false, hidden: true }; }
+      }
+      return { known: true, hidden: false };
+    })();
     let scalarValue;
     if (input && ['checkbox', 'radio'].includes(type)) scalarValue = Boolean(nativeChecked);
     else if (input && type === 'file') scalarValue = null;
@@ -1503,7 +1857,7 @@ async function safeElementInfo(handle) {
       ? String(nativeValue ?? '') : '';
     const text = (button || anchor) ? String(el.innerText || el.textContent || '').trim() : '';
     const buttonLikeInput = input && ['submit', 'button', 'reset', 'image'].includes(type);
-    const descriptors = [...own, ...labels, ...(button || anchor || buttonLikeInput ? [text, buttonValue] : [])].map(value => String(value).trim()).filter(Boolean);
+    const descriptors = [...(button || anchor || buttonLikeInput ? finalOwn : own), ...labels, ...(button || anchor || buttonLikeInput ? [text, buttonValue] : [])].map(value => String(value).trim()).filter(Boolean);
     const rect = typeof el.getBoundingClientRect === 'function' ? el.getBoundingClientRect() : { width: 0, height: 0 };
     const style = typeof getComputedStyle === 'function' ? getComputedStyle(el) : null;
     const options = select ? Array.from(nativeOptions || []).map(option => {
@@ -1546,6 +1900,11 @@ async function safeElementInfo(handle) {
       if (!token) { token = `form-${formRegistry.next++}`; formRegistry.tokens.set(form, token); }
       return token;
     })() : null;
+    const nativeAttribute = name => typeof nativeGetAttribute === 'function' ? nativeGetAttribute.call(el, name) : null;
+    const targetAttribute = nativeAttribute('target');
+    const hrefAttribute = anchor ? nativeAttribute('href') : null;
+    const hrefUrl = anchor && typeof nativeAnchorHref === 'function' ? String(nativeAnchorHref.call(el) || '') : null;
+    const downloadAttribute = anchor && typeof nativeHasAttribute === 'function' ? Boolean(nativeHasAttribute.call(el, 'download')) : false;
     const groupId = input && ['checkbox', 'radio'].includes(type) && name ? `${form ? (form.action || '') : ''}\u001f${name}` : null;
     const flat = [...finalOwn, ...labels, ...(button || anchor || buttonLikeInput ? [text, buttonValue] : []), name, action, el.getAttribute('href')].filter(Boolean).join(' ');
     const finalLike = finalTokens.some(token => new Set((flat.toLowerCase().match(/[a-z0-9]+/g) || [])).has(String(token).toLowerCase()));
@@ -1584,12 +1943,12 @@ async function safeElementInfo(handle) {
       isNativeOfflineButton: (button && type === 'button') || (input && type === 'button'),
       isNativeContinuationButton: button && type === 'submit' && !form,
       isAnchor: anchor, isFile: input && type === 'file', isCustomElement: tag.includes('-'),
-      prototypePoisoned: valueAccessPoisoned || checkedAccessPoisoned || selectAccessPoisoned,
+      prototypePoisoned: valueAccessPoisoned || checkedAccessPoisoned || selectAccessPoisoned || !effectiveDisabledState.known,
       kind: textarea ? 'textarea' : select ? 'select' : type, name, label, groupId, formIdentity, formToken, optionValue: input && ['checkbox', 'radio'].includes(type) ? String(nativeValue || '') : null, descriptors, selector: el.id ? `#${CSS.escape(el.id)}` : name ? `${tag}[name="${String(name).replaceAll('"', '\\"')}"]` : tag,
-      required: select ? nativeSelectRequired : Boolean(el.required || el.getAttribute('aria-required') === 'true'), visible: Boolean(rect.width && rect.height && (!style || (style.visibility !== 'hidden' && style.display !== 'none'))), enabled: select ? !nativeSelectDisabled : !el.disabled, readonly: Boolean(el.readOnly),
+      required: select ? nativeSelectRequired : Boolean(el.required || el.getAttribute('aria-required') === 'true'), visible: Boolean(ariaHiddenState.known && !ariaHiddenState.hidden && rect.width && rect.height && (!style || (style.visibility !== 'hidden' && style.display !== 'none'))), enabled: !effectiveDisabledState.disabled, readonly: Boolean(el.readOnly),
       value: scalarValue, multiple: select ? nativeMultiple : false, optionsAmbiguous, buttonValue, willValidate: Boolean(el.willValidate), valid: Boolean(el.validity ? el.validity.valid : true),
       validityFlags: el.validity ? ['valueMissing', 'typeMismatch', 'patternMismatch', 'tooLong', 'tooShort', 'rangeUnderflow', 'rangeOverflow', 'stepMismatch', 'badInput', 'customError'].filter(flag => Boolean(el.validity[flag])) : [],
-      formActionUrl: action, effectiveMethod: method, documentOrigin: el.ownerDocument?.location?.origin || null, text: text.slice(0, 2048), buttonType: input ? type : (button ? type : (anchor ? 'anchor' : null)), target: el.getAttribute('target'), download: Boolean(el.getAttribute('download')), hrefUrl: anchor ? el.href : null, hrefAttribute: anchor ? el.getAttribute('href') : null, finalLike,
+      formActionUrl: action, effectiveMethod: method, documentOrigin: el.ownerDocument?.location?.origin || null, text: text.slice(0, 2048), buttonType: input ? type : (button ? type : (anchor ? 'anchor' : null)), target: targetAttribute, download: downloadAttribute, hrefUrl, hrefAttribute, finalLike,
       fileCount: input && type === 'file' && el.files ? el.files.length : 0, fileBasenames: input && type === 'file' && el.files ? Array.from(el.files).map(file => file.name) : [], accept: input && type === 'file' ? String(el.accept || '').split(',').map(value => value.trim()).filter(Boolean) : [],
       minLength: Number.isInteger(el.minLength) && el.minLength >= 0 ? el.minLength : null, maxLength: Number.isInteger(el.maxLength) && el.maxLength >= 0 ? el.maxLength : null, pattern: el.pattern || null, minValue: el.min || null, maxValue: el.max || null, step: el.step || null, options,
     };
@@ -1615,6 +1974,8 @@ async function testProxySetup(command) {
   reviewPermit = null;
   reviewEpoch = null;
   proxyPermitUrls.clear();
+  continuationNavigationPermit = null;
+  observedStaticUrls.clear();
   const proxyPort = await startProxy();
   return { proxy_port: proxyPort };
 }
@@ -1652,6 +2013,15 @@ async function testSelectDrift(command) {
   }
   return { drifted: true };
 }
+function testButtonSemanticDrift(command) {
+  const expected = process.env.JOBS_ASSISTANT_TEST_DRIFT_TOKEN;
+  if (!expected || typeof command.test_drift_token !== 'string' || command.test_drift_token !== expected) {
+    throw new Error('test_select_drift_unavailable');
+  }
+  testButtonSemanticDriftArmed = true;
+  return { armed: true };
+}
+
 
 
 function invalidateGeneration(reason = 'stale_generation') {
@@ -1720,8 +2090,21 @@ async function scanVisibleBlockers(frame) {
       const blockers = [];
       const errors = [];
       const seen = new Set();
+      const nativeGetAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'getAttribute')?.value;
+      const nativeParentElement = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get;
+      const ariaHidden = element => {
+        if (typeof nativeGetAttribute !== 'function' || typeof nativeParentElement !== 'function') return true;
+        let current = element;
+        while (current) {
+          let raw;
+          try { raw = nativeGetAttribute.call(current, 'aria-hidden'); } catch { return true; }
+          if (typeof raw === 'string' && raw.trim().toLowerCase() === 'true') return true;
+          try { current = nativeParentElement.call(current); } catch { return true; }
+        }
+        return false;
+      };
       const visible = element => {
-        if (!element || typeof element.getBoundingClientRect !== 'function') return false;
+        if (!element || typeof element.getBoundingClientRect !== 'function' || ariaHidden(element)) return false;
         const rect = element.getBoundingClientRect();
         const style = typeof getComputedStyle === 'function' ? getComputedStyle(element) : null;
         return Boolean(rect.width && rect.height && (!style || (style.display !== 'none' && style.visibility !== 'hidden')));
@@ -1819,7 +2202,7 @@ async function observe() {
       const sensitive = classification.sensitive;
       info.sensitive = sensitive;
       if (info.isField) {
-        if (observation.fields.length >= 500) { observation.blockers.push({ code: 'observation_too_large', frame_id: frameId, text: 'field cap exceeded' }); await handle.dispose().catch(() => {}); continue; }
+        if (observation.fields.length >= MAX_FIELDS) { observation.blockers.push({ code: 'observation_too_large', frame_id: frameId, text: 'field cap exceeded' }); await handle.dispose().catch(() => {}); continue; }
         const targetId = `${currentGeneration}:${frameId}:field-${fieldIndex++}`;
         info.fieldKey = key; info.actionIdentity = actionIdentityKey(frame.url(), info); info.sensitive = sensitive; info.identity = identity;
         info.collisionCount = seen.get(identity) || 0;
@@ -1828,7 +2211,7 @@ async function observe() {
         fieldRecord.collision_count = info.collisionCount;
         observation.fields.push(fieldRecord);
       } else {
-        if (buttonIndex >= 200) { observation.blockers.push({ code: 'observation_too_large', frame_id: frameId, text: 'button cap exceeded' }); await handle.dispose().catch(() => {}); continue; }
+        if (buttonIndex >= MAX_BUTTONS_PER_FRAME) { observation.blockers.push({ code: 'observation_too_large', frame_id: frameId, text: 'button cap exceeded' }); await handle.dispose().catch(() => {}); continue; }
         const targetId = `${currentGeneration}:${frameId}:button-${buttonIndex++}`;
         info.clickKey = clickKey; info.identity = identity; info.collisionCount = seen.get(identity) || 0;
         handleCache.set(targetId, { handle, info, frame, frameUrl: frame.url(), frameChain: ancestry, generation: currentGeneration, kind: 'button' });
@@ -1903,12 +2286,28 @@ async function consumeTarget(command) {
   const live = frameTrusted ? await safeElementInfo(selected).catch(() => null) : null;
   const liveClassification = live ? descriptorClassification(live) : { overflow: false, sensitive: false };
   const isButton = entry.kind === 'button';
-    const identityMatches = isButton
-      ? reviewClickKey(entry.frame.url(), live || {}) === entry.info.clickKey
-      : actionIdentityKey(entry.frame.url(), live || {}) === entry.info.actionIdentity;
-  const forbiddenButton = isButton && (live?.finalLike || live?.isAnchor || entry.info.finalLike || entry.info.isAnchor);
+  const metadataMatches = !isButton || navigationMetadataMatches(entry.info, live);
+  const identityMatches = isButton
+    ? reviewClickKey(entry.frame.url(), live || {}) === entry.info.clickKey
+    : actionIdentityKey(entry.frame.url(), live || {}) === entry.info.actionIdentity;
+  const continuationAnchor = command.continuation === true && isButton && live?.isAnchor
+    && entry.frame === page.mainFrame()
+    && !live.finalLike && !live.formActionUrl && !live.effectiveMethod
+    && noNavigationTarget(live.target) && !live.download
+    && (() => {
+      try {
+        const candidate = safeUrl(live.hrefUrl);
+        return Boolean(candidate)
+          && sameOrigin(entry.frame.url(), candidate.href)
+          && sameDocumentRoute(documentRouteKey(validateInitialUrl(candidate.href)), documentRouteIdentity);
+      } catch {
+        return false;
+      }
+    })();
+  const forbiddenButton = isButton && (live?.finalLike || (live?.isAnchor && !continuationAnchor) || entry.info.finalLike || (entry.info.isAnchor && !continuationAnchor));
   if (!frameTrusted || !live || live.kind !== entry.info.kind
       || !identityMatches
+      || !metadataMatches
       || live.formIdentity !== entry.info.formIdentity
       || live.formToken !== entry.info.formToken
       || !validateFormAction(live.formActionUrl || live.hrefUrl, live.effectiveMethod, entry.frame.url())
@@ -1972,6 +2371,7 @@ async function nativeCandidateValid(handle, value) {
   }, value).catch(() => false);
 }
 function beginMutation() {
+  lastNetworkActivity = Date.now();
   if (!firstApplicantMutation) {
     firstApplicantMutation = true;
     freezeProxy();
@@ -2259,8 +2659,8 @@ async function action(command) {
       await settle();
     } catch (error) {
       if (isSelect && (networkRequestSequence !== beforeNetworkSequence || terminalReason)) {
-        const networkError = terminalReason === 'unsafe_navigation_target' ? 'unsafe_navigation_target' : 'unsafe_network_attempt';
-        if (!terminalReason) terminalReason = networkError;
+        const networkError = guardedMutationNetworkError();
+        revokeContinuationCapability(networkError);
         throw new Error(networkError);
       }
       throw error;
@@ -2269,8 +2669,8 @@ async function action(command) {
     if (isSelect) {
       const networkAttempted = networkRequestSequence !== beforeNetworkSequence;
       if (networkAttempted || terminalReason) {
-        const networkError = terminalReason === 'unsafe_navigation_target' ? 'unsafe_navigation_target' : 'unsafe_network_attempt';
-        if (!terminalReason) terminalReason = networkError;
+        const networkError = guardedMutationNetworkError();
+        revokeContinuationCapability(networkError);
         throw new Error(networkError);
       }
     }
@@ -2293,14 +2693,32 @@ async function buttonAction(handle, info, command, frame, observedFrameChain) {
   }
   const continuation = command.continuation === true;
   const buttonType = String(info.buttonType || '').toLowerCase();
-  const noAction = (info.isNativeOfflineButton || (!info.formActionUrl && !info.effectiveMethod))
-    && info.target == null && !info.download && !info.hrefUrl && !info.hrefAttribute;
+  const noDirectNavigation = noNavigationTarget(info.target)
+    && !info.download && !info.hrefUrl && !info.hrefAttribute;
+  const noAction = !info.formActionUrl && !info.effectiveMethod && noDirectNavigation;
   const sameDocumentOrigin = sameOrigin(page.url(), info.documentOrigin);
-  const ordinary = !continuation && info.isNativeOfflineButton && buttonType === 'button';
+  const nativeProgressAllowed = nativeProgressButtonAllowed(info);
+  const ordinary = !continuation && info.isNativeOfflineButton && buttonType === 'button'
+    && noDirectNavigation && sameDocumentOrigin && nativeProgressAllowed;
   const submitContinuation = continuation && info.isNativeContinuationButton
-    && buttonType === 'submit' && noAction && sameDocumentOrigin;
-  if (!command.offline || info.isAnchor || info.finalLike || !info.visible || !info.enabled
-      || !noAction || !sameDocumentOrigin || (!ordinary && !submitContinuation)) {
+    && buttonType === 'submit' && noAction && sameDocumentOrigin && nativeProgressAllowed;
+  const candidate = safeUrl(info.hrefUrl);
+  const navigationContinuation = continuation && info.isAnchor
+    && frame === page.mainFrame()
+    && candidate
+    && !info.formActionUrl && !info.effectiveMethod
+    && noNavigationTarget(info.target) && !info.download
+    && sameDocumentOrigin && sameOrigin(page.url(), candidate.href)
+    && !info.finalLike
+    && (() => {
+      try {
+        return sameDocumentRoute(documentRouteKey(validateInitialUrl(candidate.href)), documentRouteIdentity);
+      } catch {
+        return false;
+      }
+    })();
+  if (!command.offline || info.finalLike || !info.visible || !info.enabled
+      || (!ordinary && !submitContinuation && !navigationContinuation)) {
     throw new Error('final_or_anchor_not_automated');
   }
   const beforeUrl = page.url();
@@ -2317,39 +2735,91 @@ async function buttonAction(handle, info, command, frame, observedFrameChain) {
   }).catch(() => false);
   if (!hit) throw new Error('button_not_hit_tested');
   if (pendingNetwork !== 0) throw new Error('page_not_stable');
+  const beforeActionInfo = await safeElementInfo(handle).catch(() => null);
+  if (!beforeActionInfo) throw new Error('stale_generation');
+  const beforeActionClassification = descriptorClassification(beforeActionInfo);
+  if (beforeActionClassification.overflow) throw new Error('observation_too_large');
+  if (beforeActionClassification.sensitive) throw new Error('sensitive_field');
+  if (beforeActionInfo.finalLike || !beforeActionInfo.visible || !beforeActionInfo.enabled
+      || ((ordinary || submitContinuation) && !nativeProgressButtonAllowed(beforeActionInfo))) {
+    throw new Error('final_or_anchor_not_automated');
+  }
+  if (!navigationMetadataMatches(info, beforeActionInfo)
+      || reviewClickKey(frame.url(), beforeActionInfo) !== reviewClickKey(frame.url(), info)
+      || beforeActionInfo.kind !== info.kind
+      || beforeActionInfo.buttonType !== info.buttonType
+      || beforeActionInfo.isNativeOfflineButton !== info.isNativeOfflineButton
+      || beforeActionInfo.isNativeContinuationButton !== info.isNativeContinuationButton
+      || beforeActionInfo.formIdentity !== info.formIdentity
+      || beforeActionInfo.formToken !== info.formToken
+      || beforeActionInfo.documentOrigin !== info.documentOrigin) {
+    throw new Error('stale_generation');
+  }
   const beforeNetworkSequence = networkRequestSequence;
+  if (navigationContinuation) {
+    continuationNavigationPermit = {
+      url: candidate.href,
+      routeIdentity: documentRouteIdentity,
+      staticUrls: new Set(observedStaticUrls),
+      navigationRequestId: null,
+      navigationLoaderId: null,
+      navigationFrameId: null,
+      committed: false,
+      expires: Date.now() + 5000,
+    };
+  }
+  try {
   beginMutation();
-  await handle.evaluate(el => {
-    const click = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'click')?.value;
-    if (typeof click !== 'function') throw new Error('prototype_poisoned');
-    click.call(el);
-  });
+  if (navigationContinuation) {
+    try {
+      await page.goto(candidate.href, { waitUntil: 'domcontentloaded', timeout: 5000 });
+      if (!continuationDestinationCommitted(continuationNavigationPermit)) {
+        throw new Error('unsafe_navigation_target');
+      }
+      await waitForInitialQuiet(5000);
+    } catch (error) {
+      continuationNavigationPermit = null;
+      if (terminalReason) throw new Error(guardedMutationNetworkError());
+      if (error?.message === 'unsafe_navigation_target') throw error;
+      throw new Error('page_not_stable');
+    }
+  } else {
+    const forceSemanticDrift = testButtonSemanticDriftArmed;
+    testButtonSemanticDriftArmed = false;
+    const atomicError = await handle.evaluate(atomicGuardedProgressDispatch, {
+      expected: beforeActionInfo,
+      finalTokens: [...FINAL_LIKE_TOKENS],
+      forceSemanticDrift,
+      mode: ordinary ? 'ordinary' : 'submit',
+      pageOrigin: safeUrl(page.url())?.origin || '',
+    });
+    if (atomicError) throw new Error(atomicError);
+  }
   try {
     await settle();
   } catch (error) {
-    if (networkRequestSequence !== beforeNetworkSequence || terminalReason) {
-      const networkError = terminalReason === 'unsafe_navigation_target'
-        ? 'unsafe_navigation_target'
-        : 'unsafe_network_attempt';
-      if (!terminalReason) terminalReason = networkError;
+    if (terminalReason || (!navigationContinuation && networkRequestSequence !== beforeNetworkSequence)) {
+      const networkError = guardedMutationNetworkError();
+      revokeContinuationCapability(networkError);
+      continuationNavigationPermit = null;
       throw new Error(networkError);
     }
+    continuationNavigationPermit = null;
     throw error;
   }
+  continuationNavigationPermit = null;
   const afterUrl = page.url();
   const afterFrameUrl = frame?.url?.() || '';
   const urlChanged = afterUrl !== beforeUrl || afterFrameUrl !== beforeFrameUrl;
   const networkAttempted = networkRequestSequence !== beforeNetworkSequence;
-  if (networkAttempted) {
-    const networkError = terminalReason === 'unsafe_navigation_target'
-      ? 'unsafe_navigation_target'
-      : 'unsafe_network_attempt';
-    terminalReason = networkError;
+  if (networkAttempted && !navigationContinuation) {
+    const networkError = guardedMutationNetworkError();
+    revokeContinuationCapability(networkError);
     throw new Error(networkError);
   }
   if (urlChanged) {
-    if (!submitContinuation) {
-      terminalReason = 'unsafe_navigation_target';
+    if (!submitContinuation && !navigationContinuation) {
+      revokeContinuationCapability('unsafe_navigation_target');
       throw new Error('unsafe_navigation_target');
     }
     const currentFrameChain = frame ? frameAncestry(frame) : [];
@@ -2374,11 +2844,14 @@ async function buttonAction(handle, info, command, frame, observedFrameChain) {
       && sameOrigin(afterFrameUrl, afterUrl);
     const nonFinalLike = !isFinalLike(afterUrl) && !isFinalLike(afterFrameUrl);
     if (!routeAllowed || !sameRouteOrigin || !frameStable || !nonFinalLike) {
-      terminalReason = 'unsafe_navigation_target';
+      revokeContinuationCapability('unsafe_navigation_target');
       throw new Error('unsafe_navigation_target');
     }
   }
   return { clicked: true, counters: { ...networkCounters } };
+  } finally {
+    continuationNavigationPermit = null;
+  }
 }
 async function screenshot(command) {
   assertPage();
@@ -2535,19 +3008,32 @@ function manifestWrite(state, extra = {}) {
     }
   }
 }
+function handoffRuntimeEligible() {
+  return Boolean(browser && page && !page.isClosed() && !terminalReason);
+}
+
 async function prepareHandoff(command) {
   if (launchHeadless) { await close(); throw new Error('headless_handoff_forbidden'); }
   if (!startupIdentity || !browserIdentity) throw new Error('startup_identity_required');
-  if (!browser || (firstApplicantMutation && terminalReason)) throw new Error('handoff_not_eligible');
+  if (!handoffRuntimeEligible()) throw new Error('handoff_not_eligible');
   if (command.run_id !== startupIdentity.run_id || command.job_id !== startupIdentity.job_id || command.session_id !== startupIdentity.session_id) throw new Error('startup_identity_mismatch');
   reviewState = 'prepared'; manifestWrite('prepared'); return { state: reviewState, identity: startupIdentity };
 }
 async function commitHandoff(command) {
   if (!startupIdentity || !browserIdentity) throw new Error('startup_identity_required');
-  if (reviewState === 'open_guarded' && reviewToken === command.commit_token) return { state: reviewState, idempotent: true, identity: startupIdentity };
+  if (reviewState === 'open_guarded' && reviewToken === command.commit_token) {
+    if (!handoffRuntimeEligible()) throw new Error('handoff_not_eligible');
+    return { state: reviewState, idempotent: true, identity: startupIdentity };
+  }
   if (reviewState !== 'prepared' || typeof command.commit_token !== 'string' || command.commit_token.length < 16) throw new Error('handoff_state_conflict');
-  reviewToken = command.commit_token;
+  if (!handoffRuntimeEligible()) throw new Error('handoff_not_eligible');
   await installReviewGesture();
+  if (!handoffRuntimeEligible()) {
+    reviewToken = null;
+    reviewState = 'closed';
+    throw new Error('handoff_not_eligible');
+  }
+  reviewToken = command.commit_token;
   reviewState = 'open_guarded';
   manifestWrite('open_guarded');
   heartbeatTimer = setInterval(() => { if (reviewState === 'open_guarded') { try { manifestWrite('open_guarded', { detached: detachedOwner }); } catch { /* owner will observe failure */ } } }, 5000);
@@ -2628,6 +3114,7 @@ function removeStagedInputSafely(root, candidate) {
 }
 async function releaseHandoff() {
   if (reviewState !== 'open_guarded') throw new Error('handoff_state_conflict');
+  if (!handoffRuntimeEligible()) throw new Error('handoff_not_eligible');
   // The owner is now independent of its command transport.  Stop consuming
   // the parent's pipe before it can reach EOF; an EOF/SIGTERM from a
   // short-lived helper must not be interpreted as a browser close.
@@ -2650,6 +3137,7 @@ async function close(trigger = 'unknown') {
     closeRequested = true;
     clearInterval(heartbeatTimer); heartbeatTimer = null;
     reviewPermit = null; reviewLedger = new Map(); reviewEpoch = null; proxyPermitUrls.clear();
+    continuationNavigationPermit = null; observedStaticUrls.clear();
     const browserProcess = browser?.process?.() || null;
     freezeProxy();
     if (browser) await browser.close().catch(() => {});
@@ -2700,7 +3188,7 @@ async function settle() {
     try {
       mutationAt = await realm.evaluate(() => globalThis.__JOBS_ASSISTANT_QUIET_STATE__?.state?.lastMutation ?? Date.now());
     } catch { throw new Error('page_not_stable'); }
-    if (pendingNetwork === 0 && Date.now() - mutationAt >= 250) return;
+    if (pendingNetwork === 0 && Date.now() - mutationAt >= 250 && Date.now() - lastNetworkActivity >= 250) return;
     await new Promise(resolve => setTimeout(resolve, 25));
   }
   throw new Error('page_not_stable');
@@ -2725,6 +3213,7 @@ async function handle(command) {
     case 'test_proxy_setup': return testProxySetup(command);
     case 'test_proxy_freeze': return testProxyFreeze(command);
     case 'test_select_drift': return testSelectDrift(command);
+    case 'test_button_semantic_drift': return testButtonSemanticDrift(command);
     case 'close': await close(); return {};
     default: throw new Error(`unknown_action:${String(command.action || '')}`);
   }
@@ -2815,7 +3304,7 @@ async function runErrorCodeSelfTest() {
   return { passed: cases.length };
 }
 
-function runRequestGuardSelfTest() {
+async function runRequestGuardSelfTest() {
 
   selectRoutePolicy('greenhouse');
   documentRouteIdentity = { mode: 'greenhouse_job', host: 'boards.greenhouse.io', board: 'acme', job: '123' };
@@ -2886,9 +3375,55 @@ function runRequestGuardSelfTest() {
   if (identityKey('https://example.com/apply', collisionA) === identityKey('https://example.com/apply', collisionC)) throw new Error('request_guard_self_test_failed');
   if (actionIdentityKey('https://example.com/apply', collisionA) === actionIdentityKey('https://example.com/apply', collisionB)) throw new Error('request_guard_self_test_failed');
   if (actionIdentityKey('https://example.com/apply', collisionA) === actionIdentityKey('https://example.com/apply', collisionC)) throw new Error('request_guard_self_test_failed');
+  const priorHandoffState = {
+    browser,
+    page,
+    terminalReason,
+    startupIdentity,
+    browserIdentity,
+    reviewState,
+    reviewToken,
+  };
+  try {
+    browser = {};
+    page = { isClosed: () => false };
+    terminalReason = null;
+    if (!handoffRuntimeEligible()) throw new Error('request_guard_self_test_failed');
+    terminalReason = 'unsafe_network_attempt';
+    if (handoffRuntimeEligible()) throw new Error('request_guard_self_test_failed');
+    terminalReason = null;
+    page = { isClosed: () => true };
+    if (handoffRuntimeEligible()) throw new Error('request_guard_self_test_failed');
+    page = { isClosed: () => false };
+    terminalReason = 'unsafe_network_attempt';
+    startupIdentity = { run_id: 1, job_id: 2, session_id: 'self-test' };
+    browserIdentity = {};
+    reviewState = 'open_guarded';
+    reviewToken = 'self-test-commit-token';
+    for (const operation of [
+      () => commitHandoff({ commit_token: reviewToken }),
+      () => releaseHandoff(),
+    ]) {
+      let rejected = false;
+      try {
+        await operation();
+      } catch (error) {
+        rejected = error?.message === 'handoff_not_eligible';
+      }
+      if (!rejected) throw new Error('request_guard_self_test_failed');
+    }
+  } finally {
+    browser = priorHandoffState.browser;
+    page = priorHandoffState.page;
+    terminalReason = priorHandoffState.terminalReason;
+    startupIdentity = priorHandoffState.startupIdentity;
+    browserIdentity = priorHandoffState.browserIdentity;
+    reviewState = priorHandoffState.reviewState;
+    reviewToken = priorHandoffState.reviewToken;
+  }
   documentRouteIdentity = null;
   if (vectors.some(([actual, expected]) => actual !== expected)) throw new Error('request_guard_self_test_failed');
-  return { passed: vectors.length + 5 };
+  return { passed: vectors.length + 10 };
 }
 
 async function runSelectNativeSelfTest() {

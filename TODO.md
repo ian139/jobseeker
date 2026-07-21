@@ -141,9 +141,28 @@ every future adapter and preference feature.
 
 - [x] Deliver native `<select multiple>` ATS autofill with immutable tuple values, native descriptor-based mutation, fail-closed prototype poisoning, isolated-realm self-test, deterministic TOCTOU drift detection via child-only nonce, select-only post-mutation network gating, conventional placeholder exemption, observation quarantine for invalid/ambiguous evidence, and zero final-submit calls. Coverage is in `tests/test_puppeteer_adapter.py`, `tests/test_application_contracts.py`, `tests/test_application_pipeline.py`, `tests/test_application_preferences.py`, `tests/test_application_profile.py`, and `tests/test_application_workflow.py`; full package (726 passed, 2 skipped), select-native-self-test, and request-guard-self-test (9/9) pass, and both corrected independent Wave 30 reviews returned READY.
 
+- [x] Deliver guarded page-by-page ATS drafting at code checkpoint `b0598f4`:
+      reobserve every page, scope resolver caches to the current controls, map
+      profile/resume/job context through the validated LLM contract, dispatch
+      only action-time-revalidated non-final controls, permit exact same-job
+      anchor GET continuation behind route/network caps, and stop
+      manual/blocked on ambiguity, sensitive fields, authentication,
+      inherited disabled controls, unstable state, or oversized traffic.
+      The integrated three-page smoke reached `review_ready` after two resolver
+      pages and two continuations with zero final-submit calls. Full Python
+      (722 passed, 59 skipped), full headed browser adapter (91 passed,
+      2 skipped), lock, CLI, protocol, wheel, Compose, and isolated container
+      checks pass; the independent Wave 31 safety review found no remaining
+      actionable issue.
+
 ## Open gaps and blockers
 
 - [ ] Physical headed review-window survival remains a manual host gate requiring a benign human click and tab/window close. It is intentionally excluded by exact test name from `npm run puppeteer-verify`; no code path automates the physical action.
+
+- [ ] Live third-party ATS DOM/service-worker changes and real LLM streaming
+      remain environment-dependent compatibility gates. Deterministic fixtures
+      cover the safety contracts and fail closed, but provider compatibility
+      still requires benign credentialed live checks.
 
 ## Reference-only history
 

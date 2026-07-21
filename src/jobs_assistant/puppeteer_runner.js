@@ -197,6 +197,7 @@ let reviewToken = null;
 let reviewPermit = null;
 let continuationNavigationPermit = null;
 let testButtonSemanticDriftArmed = false;
+let testAriaDisabledDriftArmed = false;
 let reviewLedger = new Map();
 let reviewEpoch = null;
 const proxyPermitUrls = new Map();
@@ -1605,11 +1606,42 @@ function nativeProgressButtonAllowed(info) {
   return /^(?:continue|next|proceed)(?:\b|$)/.test(normalized)
     || /^save and continue(?:\b|$)/.test(normalized);
 }
-function atomicGuardedProgressDispatch(el, params) {
+function atomicDisabledStateError(el, params = {}) {
+  const setAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'setAttribute')?.value;
+  const getAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'getAttribute')?.value;
+  const parentElement = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get;
+  const matches = Object.getOwnPropertyDescriptor(Element.prototype, 'matches')?.value;
+  if (![getAttribute, parentElement, matches].every(item => typeof item === 'function')
+      || (params.forceAriaDisabledDrift && typeof setAttribute !== 'function')) return 'prototype_poisoned';
+  if (params.forceAriaDisabledDrift) setAttribute.call(el, 'aria-disabled', 'true');
+  let current = el;
+  try {
+    if (matches.call(el, ':disabled')) return 'target_not_actionable';
+    while (current) {
+      const raw = getAttribute.call(current, 'aria-disabled');
+      if (typeof raw === 'string' && raw.trim().toLowerCase() === 'true') {
+        return 'target_not_actionable';
+      }
+      current = parentElement.call(current);
+    }
+  } catch {
+    return 'prototype_poisoned';
+  }
+  return null;
+}
+function atomicGuardedProgressAction(el, params) {
+  if (params.mode === 'navigation' && params.continuationPermitAbsent !== true) {
+    return 'unsafe_navigation_target';
+  }
   if (params.forceSemanticDrift) {
     const setter = Object.getOwnPropertyDescriptor(Node.prototype, 'textContent')?.set;
     if (typeof setter !== 'function') return 'prototype_poisoned';
     setter.call(el, 'Submit application');
+  }
+  if (params.forceAriaDisabledDrift) {
+    const setter = Object.getOwnPropertyDescriptor(Element.prototype, 'setAttribute')?.value;
+    if (typeof setter !== 'function') return 'prototype_poisoned';
+    setter.call(el, 'aria-disabled', 'true');
   }
   const getAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'getAttribute')?.value;
   const hasAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'hasAttribute')?.value;
@@ -1618,6 +1650,7 @@ function atomicGuardedProgressDispatch(el, params) {
   const localName = Object.getOwnPropertyDescriptor(Element.prototype, 'localName')?.get;
   const inputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get;
   const buttonValueGetter = Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'value')?.get;
+  const anchorHrefGetter = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'href')?.get;
   const dispatchEvent = Object.getOwnPropertyDescriptor(EventTarget.prototype, 'dispatchEvent')?.value;
   const elementFromPoint = Object.getOwnPropertyDescriptor(Document.prototype, 'elementFromPoint')?.value;
   if (![getAttribute, hasAttribute, parentElement, localName, matches, dispatchEvent, elementFromPoint]
@@ -1626,17 +1659,19 @@ function atomicGuardedProgressDispatch(el, params) {
   const tag = String(localName.call(el) || '').toLowerCase();
   const input = tag === 'input';
   const button = tag === 'button';
-  if ((!input && !button) || tag.includes('-')) return 'stale_generation';
-  const type = String(attr('type') || (button ? 'submit' : 'text')).toLowerCase();
+  const anchor = tag === 'a';
+  if ((!input && !button && !anchor) || tag.includes('-')) return 'stale_generation';
+  const type = anchor ? 'a' : String(attr('type') || (button ? 'submit' : 'text')).toLowerCase();
   const form = el.form || null;
-  const valueGetter = input ? inputValue : buttonValueGetter;
-  if (typeof valueGetter !== 'function') return 'prototype_poisoned';
+  const valueGetter = input ? inputValue : button ? buttonValueGetter : null;
+  if ((!anchor && typeof valueGetter !== 'function')
+      || (anchor && typeof anchorHrefGetter !== 'function')) return 'prototype_poisoned';
   let effectivelyDisabled;
   try { effectivelyDisabled = Boolean(matches.call(el, ':disabled')); }
   catch { return 'prototype_poisoned'; }
-  const buttonValue = ['submit', 'button', 'reset', 'image'].includes(type)
+  const buttonValue = !anchor && ['submit', 'button', 'reset', 'image'].includes(type)
     ? String(valueGetter.call(el) ?? '') : '';
-  const text = button ? String(el.innerText || el.textContent || '').trim().slice(0, 2048) : '';
+  const text = (button || anchor) ? String(el.innerText || el.textContent || '').trim().slice(0, 2048) : '';
   const name = attr('name') || el.id || null;
   const ownNames = ['name', 'id', 'autocomplete', 'placeholder', 'title', 'aria-label'];
   const finalOwn = ownNames.map(item => attr(item)).filter(Boolean);
@@ -1657,6 +1692,10 @@ function atomicGuardedProgressDispatch(el, params) {
   if (descriptors.length > 256 || descriptorBytes > 32768) return 'observation_too_large';
   const target = attr('target');
   const download = Boolean(hasAttribute.call(el, 'download'));
+  const hrefAttribute = anchor ? attr('href') : null;
+  let hrefUrl = null;
+  try { hrefUrl = anchor ? String(anchorHrefGetter.call(el) || '') : null; }
+  catch { return 'prototype_poisoned'; }
   const formActionUrl = form ? (hasAttribute.call(el, 'formaction') ? el.formAction : form.action) : null;
   const effectiveMethod = form
     ? String(hasAttribute.call(el, 'formmethod') ? el.formMethod : form.method || 'get').toLowerCase()
@@ -1696,17 +1735,20 @@ function atomicGuardedProgressDispatch(el, params) {
   const expected = params.expected;
   const scalarSnapshot = {
     kind: type,
-    buttonType: type,
+    buttonType: anchor ? 'anchor' : type,
     name,
     text,
     buttonValue,
     target,
     download,
+    hrefUrl,
+    hrefAttribute,
     formActionUrl,
     effectiveMethod,
     formIdentity,
     formToken,
     documentOrigin,
+    isAnchor: anchor,
     isNativeOfflineButton,
     isNativeContinuationButton,
     finalLike,
@@ -1715,20 +1757,34 @@ function atomicGuardedProgressDispatch(el, params) {
       || JSON.stringify(descriptors) !== JSON.stringify(expected.descriptors || [])) {
     return 'stale_generation';
   }
-  const noDirectNavigation = !target && !download && !attr('href');
+  const noDirectNavigation = !target && !download && !hrefAttribute;
   const noAction = !formActionUrl && !effectiveMethod && noDirectNavigation;
   const shapeAllowed = params.mode === 'ordinary'
     ? isNativeOfflineButton && type === 'button' && noDirectNavigation && documentOrigin === params.pageOrigin
     : params.mode === 'submit'
-      && isNativeContinuationButton && type === 'submit' && noAction && documentOrigin === params.pageOrigin;
+      ? isNativeContinuationButton && type === 'submit' && noAction && documentOrigin === params.pageOrigin
+      : params.mode === 'navigation'
+        && anchor && type === 'a' && !target && !download
+        && Boolean(hrefAttribute) && hrefUrl === expected.hrefUrl
+        && !formActionUrl && !effectiveMethod && documentOrigin === params.pageOrigin;
   if (!shapeAllowed) return 'final_or_anchor_not_automated';
   let current = el;
   while (current) {
-    const ariaHidden = getAttribute.call(current, 'aria-hidden');
-    if (typeof ariaHidden === 'string' && ariaHidden.trim().toLowerCase() === 'true') {
+    let ariaHidden; let ariaDisabled;
+    try {
+      ariaHidden = getAttribute.call(current, 'aria-hidden');
+      ariaDisabled = getAttribute.call(current, 'aria-disabled');
+      current = parentElement.call(current);
+    } catch {
+      return 'prototype_poisoned';
+    }
+    if (
+      [ariaHidden, ariaDisabled].some(
+        value => typeof value === 'string' && value.trim().toLowerCase() === 'true',
+      )
+    ) {
       return 'target_not_actionable';
     }
-    current = parentElement.call(current);
   }
   const rect = el.getBoundingClientRect();
   const style = getComputedStyle(el);
@@ -1736,6 +1792,7 @@ function atomicGuardedProgressDispatch(el, params) {
       || style.pointerEvents === 'none' || effectivelyDisabled) return 'target_not_actionable';
   const top = elementFromPoint.call(document, rect.left + rect.width / 2, rect.top + rect.height / 2);
   if (!(top === el || Boolean(top && el.contains(top)))) return 'button_not_hit_tested';
+  if (params.mode === 'navigation') return null;
   const event = new MouseEvent('click', { bubbles: true, cancelable: true, composed: true, view: window });
   event.preventDefault();
   dispatchEvent.call(el, event);
@@ -1823,16 +1880,26 @@ async function safeElementInfo(handle) {
       try { return { known: true, disabled: Boolean(nativeMatches.call(el, ':disabled')) }; }
       catch { return { known: false, disabled: true }; }
     })();
-    const ariaHiddenState = (() => {
-      if (typeof nativeGetAttribute !== 'function' || typeof nativeParentElement !== 'function') return { known: false, hidden: true };
-      let current = el;
-      while (current) {
-        let raw;
-        try { raw = nativeGetAttribute.call(current, 'aria-hidden'); } catch { return { known: false, hidden: true }; }
-        if (typeof raw === 'string' && raw.trim().toLowerCase() === 'true') return { known: true, hidden: true };
-        try { current = nativeParentElement.call(current); } catch { return { known: false, hidden: true }; }
+    const accessibilityState = (() => {
+      if (typeof nativeGetAttribute !== 'function' || typeof nativeParentElement !== 'function') {
+        return { known: false, hidden: true, disabled: true };
       }
-      return { known: true, hidden: false };
+      let current = el;
+      let hidden = false;
+      let disabled = false;
+      while (current) {
+        let rawHidden; let rawDisabled;
+        try {
+          rawHidden = nativeGetAttribute.call(current, 'aria-hidden');
+          rawDisabled = nativeGetAttribute.call(current, 'aria-disabled');
+          current = nativeParentElement.call(current);
+        } catch {
+          return { known: false, hidden: true, disabled: true };
+        }
+        hidden ||= typeof rawHidden === 'string' && rawHidden.trim().toLowerCase() === 'true';
+        disabled ||= typeof rawDisabled === 'string' && rawDisabled.trim().toLowerCase() === 'true';
+      }
+      return { known: true, hidden, disabled };
     })();
     let scalarValue;
     if (input && ['checkbox', 'radio'].includes(type)) scalarValue = Boolean(nativeChecked);
@@ -1943,9 +2010,9 @@ async function safeElementInfo(handle) {
       isNativeOfflineButton: (button && type === 'button') || (input && type === 'button'),
       isNativeContinuationButton: button && type === 'submit' && !form,
       isAnchor: anchor, isFile: input && type === 'file', isCustomElement: tag.includes('-'),
-      prototypePoisoned: valueAccessPoisoned || checkedAccessPoisoned || selectAccessPoisoned || !effectiveDisabledState.known,
+      prototypePoisoned: valueAccessPoisoned || checkedAccessPoisoned || selectAccessPoisoned || !effectiveDisabledState.known || !accessibilityState.known,
       kind: textarea ? 'textarea' : select ? 'select' : type, name, label, groupId, formIdentity, formToken, optionValue: input && ['checkbox', 'radio'].includes(type) ? String(nativeValue || '') : null, descriptors, selector: el.id ? `#${CSS.escape(el.id)}` : name ? `${tag}[name="${String(name).replaceAll('"', '\\"')}"]` : tag,
-      required: select ? nativeSelectRequired : Boolean(el.required || el.getAttribute('aria-required') === 'true'), visible: Boolean(ariaHiddenState.known && !ariaHiddenState.hidden && rect.width && rect.height && (!style || (style.visibility !== 'hidden' && style.display !== 'none'))), enabled: !effectiveDisabledState.disabled, readonly: Boolean(el.readOnly),
+      required: select ? nativeSelectRequired : Boolean(el.required || el.getAttribute('aria-required') === 'true'), visible: Boolean(accessibilityState.known && !accessibilityState.hidden && rect.width && rect.height && (!style || (style.visibility !== 'hidden' && style.display !== 'none'))), enabled: Boolean(effectiveDisabledState.known && accessibilityState.known && !effectiveDisabledState.disabled && !accessibilityState.disabled), readonly: Boolean(el.readOnly),
       value: scalarValue, multiple: select ? nativeMultiple : false, optionsAmbiguous, buttonValue, willValidate: Boolean(el.willValidate), valid: Boolean(el.validity ? el.validity.valid : true),
       validityFlags: el.validity ? ['valueMissing', 'typeMismatch', 'patternMismatch', 'tooLong', 'tooShort', 'rangeUnderflow', 'rangeOverflow', 'stepMismatch', 'badInput', 'customError'].filter(flag => Boolean(el.validity[flag])) : [],
       formActionUrl: action, effectiveMethod: method, documentOrigin: el.ownerDocument?.location?.origin || null, text: text.slice(0, 2048), buttonType: input ? type : (button ? type : (anchor ? 'anchor' : null)), target: targetAttribute, download: downloadAttribute, hrefUrl, hrefAttribute, finalLike,
@@ -2019,6 +2086,14 @@ function testButtonSemanticDrift(command) {
     throw new Error('test_select_drift_unavailable');
   }
   testButtonSemanticDriftArmed = true;
+  return { armed: true };
+}
+function testAriaDisabledDrift(command) {
+  const expected = process.env.JOBS_ASSISTANT_TEST_DRIFT_TOKEN;
+  if (!expected || typeof command.test_drift_token !== 'string' || command.test_drift_token !== expected) {
+    throw new Error('test_select_drift_unavailable');
+  }
+  testAriaDisabledDriftArmed = true;
   return { armed: true };
 }
 
@@ -2416,26 +2491,70 @@ async function action(command) {
     let selectCanonical = undefined;
     const beforeNetworkSequence = networkRequestSequence;
     if (live.isButton) return await buttonAction(selected, live, command, frame, frameChain);
+    const forceAriaDisabledDrift = testAriaDisabledDriftArmed;
+    testAriaDisabledDriftArmed = false;
     if (command.action === 'fill') {
       if (live.isFile || live.kind === 'select' || !validateCandidateValue(command.value, live)
           || !(await nativeCandidateValid(selected, command.value))) throw new Error('invalid_field_value');
       beginMutation();
-      await selected.evaluate((el, next) => {
+      await selected.evaluate((el, payload) => {
+        const { next, forceAriaDisabledDrift } = payload;
         const proto = el.localName === 'textarea' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
         const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-        if (!setter) throw new Error('prototype_poisoned');
+        const setAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'setAttribute')?.value;
+        const getAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'getAttribute')?.value;
+        const parentElement = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get;
+        const matches = Object.getOwnPropertyDescriptor(Element.prototype, 'matches')?.value;
+        if (![setter, getAttribute, parentElement, matches].every(item => typeof item === 'function')
+            || (forceAriaDisabledDrift && typeof setAttribute !== 'function')) throw new Error('prototype_poisoned');
+        if (forceAriaDisabledDrift) setAttribute.call(el, 'aria-disabled', 'true');
+        let current = el;
+        try {
+          if (matches.call(el, ':disabled')) throw new Error('target_not_actionable');
+          while (current) {
+            const raw = getAttribute.call(current, 'aria-disabled');
+            if (typeof raw === 'string' && raw.trim().toLowerCase() === 'true') {
+              throw new Error('target_not_actionable');
+            }
+            current = parentElement.call(current);
+          }
+        } catch (error) {
+          if (error?.message === 'target_not_actionable') throw error;
+          throw new Error('prototype_poisoned');
+        }
         setter.call(el, next);
         el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
-      }, command.value);
+      }, { next: command.value, forceAriaDisabledDrift });
     } else if (command.action === 'check') {
       if (!['checkbox', 'radio'].includes(live.kind) || typeof command.value !== 'boolean') throw new Error('invalid_boolean_value');
       beginMutation();
-      await selected.evaluate((el, value) => {
+      await selected.evaluate((el, payload) => {
+        const { value, forceAriaDisabledDrift } = payload;
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'checked')?.set;
-        if (!setter) throw new Error('prototype_poisoned');
+        const setAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'setAttribute')?.value;
+        const getAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'getAttribute')?.value;
+        const parentElement = Object.getOwnPropertyDescriptor(Node.prototype, 'parentElement')?.get;
+        const matches = Object.getOwnPropertyDescriptor(Element.prototype, 'matches')?.value;
+        if (![setter, getAttribute, parentElement, matches].every(item => typeof item === 'function')
+            || (forceAriaDisabledDrift && typeof setAttribute !== 'function')) throw new Error('prototype_poisoned');
+        if (forceAriaDisabledDrift) setAttribute.call(el, 'aria-disabled', 'true');
+        let current = el;
+        try {
+          if (matches.call(el, ':disabled')) throw new Error('target_not_actionable');
+          while (current) {
+            const raw = getAttribute.call(current, 'aria-disabled');
+            if (typeof raw === 'string' && raw.trim().toLowerCase() === 'true') {
+              throw new Error('target_not_actionable');
+            }
+            current = parentElement.call(current);
+          }
+        } catch (error) {
+          if (error?.message === 'target_not_actionable') throw error;
+          throw new Error('prototype_poisoned');
+        }
         setter.call(el, value);
         el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
-      }, command.value);
+      }, { value: command.value, forceAriaDisabledDrift });
     } else if (command.action === 'select') {
       if (live.kind !== 'select' || live.optionsAmbiguous) throw new Error('invalid_select_value');
       const enabledByIndex = new Map();
@@ -2472,7 +2591,7 @@ async function action(command) {
         };
         beginMutation();
         await selected.evaluate((el, payload) => {
-          const { pairs, expected } = payload;
+          const { pairs, expected, forceAriaDisabledDrift } = payload;
           const multipleDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'multiple');
           const optionsDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options');
           const selectDisabledDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'disabled');
@@ -2542,6 +2661,26 @@ async function action(command) {
             const option = nativeOpts[index];
             if (current[index].value !== expectedValue || !current[index].enabled) throw new Error('prototype_poisoned');
           }
+          const setAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'setAttribute')?.value;
+          const getAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'getAttribute')?.value;
+          const matches = Object.getOwnPropertyDescriptor(Element.prototype, 'matches')?.value;
+          if (![getAttribute, matches].every(item => typeof item === 'function')
+              || (forceAriaDisabledDrift && typeof setAttribute !== 'function')) throw new Error('prototype_poisoned');
+          if (forceAriaDisabledDrift) setAttribute.call(el, 'aria-disabled', 'true');
+          let control = el;
+          try {
+            if (matches.call(el, ':disabled')) throw new Error('target_not_actionable');
+            while (control) {
+              const raw = getAttribute.call(control, 'aria-disabled');
+              if (typeof raw === 'string' && raw.trim().toLowerCase() === 'true') {
+                throw new Error('target_not_actionable');
+              }
+              control = parentElementDesc.get.call(control);
+            }
+          } catch (error) {
+            if (error?.message === 'target_not_actionable') throw error;
+            throw new Error('prototype_poisoned');
+          }
           for (let index = 0; index < nativeOpts.length; index += 1) {
             const option = nativeOpts[index];
             if (current[index].enabled && selectedDesc.get.call(option)) selectedDesc.set.call(option, false);
@@ -2551,7 +2690,7 @@ async function action(command) {
             if (!selectedDesc.get.call(option)) selectedDesc.set.call(option, true);
           }
           el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
-        }, { pairs, expected: expectedSelect });
+        }, { pairs, expected: expectedSelect, forceAriaDisabledDrift });
       } else {
         if (typeof command.value !== 'string' || !enabledByIndex.has(command.value)) throw new Error('invalid_select_value');
         const expectedSelect = {
@@ -2566,7 +2705,7 @@ async function action(command) {
         };
         beginMutation();
         await selected.evaluate((el, payload) => {
-          const { target, expected } = payload;
+          const { target, expected, forceAriaDisabledDrift } = payload;
           const multipleDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'multiple');
           const optionsDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'options');
           const disabledSelectDesc = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'disabled');
@@ -2634,9 +2773,29 @@ async function action(command) {
           if (!Number.isInteger(target.index) || target.index < 0 || target.index >= nativeOpts.length
               || String(valueDesc.get.call(nativeOpts[target.index]) ?? '') !== target.value
               || !expected.options[target.index].enabled) throw new Error('prototype_poisoned');
+          const setAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'setAttribute')?.value;
+          const getAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'getAttribute')?.value;
+          const matches = Object.getOwnPropertyDescriptor(Element.prototype, 'matches')?.value;
+          if (![getAttribute, matches].every(item => typeof item === 'function')
+              || (forceAriaDisabledDrift && typeof setAttribute !== 'function')) throw new Error('prototype_poisoned');
+          if (forceAriaDisabledDrift) setAttribute.call(el, 'aria-disabled', 'true');
+          let control = el;
+          try {
+            if (matches.call(el, ':disabled')) throw new Error('target_not_actionable');
+            while (control) {
+              const raw = getAttribute.call(control, 'aria-disabled');
+              if (typeof raw === 'string' && raw.trim().toLowerCase() === 'true') {
+                throw new Error('target_not_actionable');
+              }
+              control = parentElementDesc.get.call(control);
+            }
+          } catch (error) {
+            if (error?.message === 'target_not_actionable') throw error;
+            throw new Error('prototype_poisoned');
+          }
           setter.call(el, target.value);
           el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));
-        }, { target: expectedSelect.target, expected: expectedSelect });
+        }, { target: expectedSelect.target, expected: expectedSelect, forceAriaDisabledDrift });
       }
     } else if (command.action === 'upload') {
       if (!live.isFile || Object.hasOwn(command, 'path')) throw new Error('upload_path_forbidden');
@@ -2644,9 +2803,14 @@ async function action(command) {
       const candidate = process.env.JOBS_ASSISTANT_STAGED_INPUT_NAME;
       const mediaType = process.env.JOBS_ASSISTANT_STAGED_INPUT_MEDIA_TYPE;
       if (!acceptsStagedInput(live.accept, candidate, mediaType || '')) throw new Error('upload_accept_mismatch');
-      beginMutation();
       const staged = stageImmutableUpload(root, candidate, process.env.JOBS_ASSISTANT_STAGED_INPUT_SHA256);
       try {
+        const disabledError = await selected.evaluate(
+          atomicDisabledStateError,
+          { forceAriaDisabledDrift },
+        );
+        if (disabledError) throw new Error(disabledError);
+        beginMutation();
         await selected.uploadFile(staged.path);
       } catch (error) {
         try { fs.unlinkSync(staged.path); } catch {}
@@ -2756,7 +2920,23 @@ async function buttonAction(handle, info, command, frame, observedFrameChain) {
     throw new Error('stale_generation');
   }
   const beforeNetworkSequence = networkRequestSequence;
+  try {
+  const forceSemanticDrift = testButtonSemanticDriftArmed;
+  testButtonSemanticDriftArmed = false;
+  const forceAriaDisabledDrift = testAriaDisabledDriftArmed;
+  testAriaDisabledDriftArmed = false;
   if (navigationContinuation) {
+    const atomicError = await handle.evaluate(atomicGuardedProgressAction, {
+      expected: beforeActionInfo,
+      finalTokens: [...FINAL_LIKE_TOKENS],
+      forceSemanticDrift,
+      forceAriaDisabledDrift,
+      mode: 'navigation',
+      pageOrigin: safeUrl(page.url())?.origin || '',
+      continuationPermitAbsent: continuationNavigationPermit === null,
+    });
+    if (atomicError) throw new Error(atomicError);
+    beginMutation();
     continuationNavigationPermit = {
       url: candidate.href,
       routeIdentity: documentRouteIdentity,
@@ -2767,10 +2947,6 @@ async function buttonAction(handle, info, command, frame, observedFrameChain) {
       committed: false,
       expires: Date.now() + 5000,
     };
-  }
-  try {
-  beginMutation();
-  if (navigationContinuation) {
     try {
       await page.goto(candidate.href, { waitUntil: 'domcontentloaded', timeout: 5000 });
       if (!continuationDestinationCommitted(continuationNavigationPermit)) {
@@ -2784,12 +2960,12 @@ async function buttonAction(handle, info, command, frame, observedFrameChain) {
       throw new Error('page_not_stable');
     }
   } else {
-    const forceSemanticDrift = testButtonSemanticDriftArmed;
-    testButtonSemanticDriftArmed = false;
-    const atomicError = await handle.evaluate(atomicGuardedProgressDispatch, {
+    beginMutation();
+    const atomicError = await handle.evaluate(atomicGuardedProgressAction, {
       expected: beforeActionInfo,
       finalTokens: [...FINAL_LIKE_TOKENS],
       forceSemanticDrift,
+      forceAriaDisabledDrift,
       mode: ordinary ? 'ordinary' : 'submit',
       pageOrigin: safeUrl(page.url())?.origin || '',
     });
@@ -3214,6 +3390,7 @@ async function handle(command) {
     case 'test_proxy_freeze': return testProxyFreeze(command);
     case 'test_select_drift': return testSelectDrift(command);
     case 'test_button_semantic_drift': return testButtonSemanticDrift(command);
+    case 'test_aria_disabled_drift': return testAriaDisabledDrift(command);
     case 'close': await close(); return {};
     default: throw new Error(`unknown_action:${String(command.action || '')}`);
   }

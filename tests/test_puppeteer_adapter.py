@@ -178,19 +178,52 @@ NATIVE_PROGRESS_SEMANTICS_FIXTURE = b"""<!doctype html>
 <button type="submit" id="submit-final">Submit Application</button>
 </body></html>"""
 DISABLED_FIELDSET_FIXTURE = b"""<!doctype html>
-<html><head><title>Disabled Fieldset Fixture</title></head>
+<html><head><title>Disabled Controls Fixture</title></head>
 <body>
 <fieldset disabled>
   <button type="button" id="disabled-continue">Continue</button>
 </fieldset>
+<button type="button" id="aria-disabled-continue" aria-disabled="true">Next</button>
+<div aria-disabled="true">
+  <button type="button" id="aria-disabled-ancestor-continue">Proceed</button>
+</div>
+<button type="button" id="aria-disabled-drift-continue">Continue</button>
+<input type="text" id="aria-disabled-drift-field" name="aria_drift_field">
+<input type="file" id="aria-disabled-drift-upload" name="resume" accept=".pdf">
+<input type="checkbox" id="aria-disabled-drift-check" name="aria_drift_check">
+<select id="aria-disabled-drift-select" name="aria_drift_select">
+  <option value="">Choose</option><option value="us">United States</option>
+</select>
+<select id="aria-disabled-drift-multi" name="aria_drift_multi" multiple>
+  <option value="go">Go</option><option value="rust">Rust</option>
+</select>
 <script>
-document.getElementById("disabled-continue").addEventListener("click", () => {
-  const marker = document.createElement("button");
-  marker.type = "button";
-  marker.id = "disabled-listener-marker";
-  marker.textContent = "Next";
-  document.body.append(marker);
-});
+for (const id of [
+  "disabled-continue",
+  "aria-disabled-continue",
+  "aria-disabled-ancestor-continue",
+  "aria-disabled-drift-continue",
+  "aria-disabled-drift-field",
+  "aria-disabled-drift-upload",
+  "aria-disabled-drift-check",
+  "aria-disabled-drift-select",
+  "aria-disabled-drift-multi",
+]) {
+  const eventName = [
+    "aria-disabled-drift-field",
+    "aria-disabled-drift-upload",
+    "aria-disabled-drift-check",
+    "aria-disabled-drift-select",
+    "aria-disabled-drift-multi",
+  ].includes(id) ? "input" : "click";
+  document.getElementById(id).addEventListener(eventName, () => {
+    const marker = document.createElement("button");
+    marker.type = "button";
+    marker.id = `${id}-listener-marker`;
+    marker.textContent = "Next";
+    document.body.append(marker);
+  });
+}
 </script>
 </body></html>"""
 STATIC_CAP_CONTINUATION_FIXTURE = (
@@ -1297,6 +1330,81 @@ def test_same_job_anchor_next_navigation_uses_guarded_continuation(fixture_serve
         assert next_observation["terminal_reason"] is None
         assert FixtureHandler.final_like_requests == 0
 
+
+@BROWSER_INTEGRATION_SKIP
+def test_anchor_continuation_semantic_drift_does_not_navigate(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-anchor")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-anchor-semantic-drift",
+        run_id=53,
+        job_id=123,
+        internal_transport_url=transport_url,
+        test_drift=True,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        continuation = next(
+            button
+            for button in observation["buttons"]
+            if button["element_id"] == "continue-anchor"
+        )
+        assert continuation["text"] == "Next"
+
+        assert session._arm_button_semantic_drift_for_test()["armed"] is True
+        with pytest.raises(BrowserAdapterError, match="final_or_anchor_not_automated"):
+            session.click_offline(continuation["target_id"], continuation=True)
+
+        after = session.observe()
+        drifted = next(
+            button
+            for button in after["buttons"]
+            if button["element_id"] == "continue-anchor"
+        )
+        assert after["url"] == logical_url
+        assert drifted["text"] == "Submit application"
+        assert session.network_counters()["terminal_reason"] is None
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_anchor_continuation_aria_disabled_drift_does_not_navigate(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-anchor")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-anchor-aria-disabled-drift",
+        run_id=51,
+        job_id=123,
+        internal_transport_url=transport_url,
+        test_drift=True,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        continuation = next(
+            button
+            for button in observation["buttons"]
+            if button["element_id"] == "continue-anchor"
+        )
+        assert continuation["enabled"] is True
+
+        assert session._arm_button_aria_disabled_drift_for_test()["armed"] is True
+        with pytest.raises(BrowserAdapterError, match="target_not_actionable"):
+            session.click_offline(continuation["target_id"], continuation=True)
+
+        after = session.observe()
+        drifted = next(
+            button
+            for button in after["buttons"]
+            if button["element_id"] == "continue-anchor"
+        )
+        assert after["url"] == logical_url
+        assert drifted["enabled"] is False
+        assert session.network_counters()["terminal_reason"] is None
+        assert FixtureHandler.final_like_requests == 0
+
+
 @BROWSER_INTEGRATION_SKIP
 def test_anchor_continuation_allows_approved_static_after_destination_commit(fixture_server):
     transport_url = fixture_server.replace("/clean", "/continue-anchor-static")
@@ -1608,35 +1716,130 @@ def test_native_progress_button_semantics_reject_non_progress_controls(fixture_s
 
 
 @BROWSER_INTEGRATION_SKIP
-def test_inherited_disabled_button_is_observed_disabled_and_not_dispatched(fixture_server):
+def test_native_and_aria_disabled_buttons_are_observed_disabled_and_not_dispatched(fixture_server):
     transport_url = fixture_server.replace("/clean", "/continue-native-disabled-fieldset")
     logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
     with PuppeteerSession.start(
         headless=True,
-        session_id="session-native-disabled-fieldset",
+        session_id="session-disabled-controls",
         run_id=48,
         job_id=123,
         internal_transport_url=transport_url,
     ) as session:
         session.goto(logical_url)
-        observation = session.observe()
-        disabled = next(
-            button
-            for button in observation["buttons"]
-            if button["element_id"] == "disabled-continue"
-        )
-        assert disabled["enabled"] is False
+        for element_id in (
+            "disabled-continue",
+            "aria-disabled-continue",
+            "aria-disabled-ancestor-continue",
+        ):
+            observation = session.observe()
+            disabled = next(
+                button
+                for button in observation["buttons"]
+                if button["element_id"] == element_id
+            )
+            assert disabled["enabled"] is False
 
+            with pytest.raises(BrowserAdapterError, match="target_not_actionable"):
+                session.click_offline(disabled["target_id"], continuation=False)
+
+            after = session.observe()
+            assert not any(
+                button["element_id"] == f"{element_id}-listener-marker"
+                for button in after["buttons"]
+            )
+        assert session.network_counters()["terminal_reason"] is None
+        assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_action_time_aria_disabled_drift_is_not_dispatched(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-native-disabled-fieldset")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-aria-disabled-drift",
+        run_id=49,
+        job_id=123,
+        internal_transport_url=transport_url,
+        test_drift=True,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        button = next(
+            item
+            for item in observation["buttons"]
+            if item["element_id"] == "aria-disabled-drift-continue"
+        )
+        assert button["enabled"] is True
+
+        assert session._arm_button_aria_disabled_drift_for_test()["armed"] is True
         with pytest.raises(BrowserAdapterError, match="target_not_actionable"):
-            session.click_offline(disabled["target_id"], continuation=False)
+            session.click_offline(button["target_id"], continuation=False)
 
         after = session.observe()
+        drifted = next(
+            item
+            for item in after["buttons"]
+            if item["element_id"] == "aria-disabled-drift-continue"
+        )
+        assert drifted["enabled"] is False
         assert not any(
-            button["element_id"] == "disabled-listener-marker"
-            for button in after["buttons"]
+            item["element_id"] == "aria-disabled-drift-continue-listener-marker"
+            for item in after["buttons"]
         )
         assert session.network_counters()["terminal_reason"] is None
         assert FixtureHandler.final_like_requests == 0
+
+
+@BROWSER_INTEGRATION_SKIP
+@pytest.mark.parametrize(
+    ("field_name", "element_id", "action", "next_value", "initial_value"),
+    [
+        ("aria_drift_field", "aria-disabled-drift-field", "fill", "Ada", ""),
+        ("aria_drift_check", "aria-disabled-drift-check", "check", True, False),
+        ("aria_drift_select", "aria-disabled-drift-select", "select", "us", ""),
+        ("aria_drift_multi", "aria-disabled-drift-multi", "select", ("go", "rust"), []),
+    ],
+)
+def test_action_time_field_aria_disabled_drift_is_not_mutated_or_dispatched(
+    fixture_server,
+    field_name,
+    element_id,
+    action,
+    next_value,
+    initial_value,
+):
+    transport_url = fixture_server.replace("/clean", "/continue-native-disabled-fieldset")
+    logical_url = "https://boards.greenhouse.io/fixture/jobs/123"
+    with PuppeteerSession.start(
+        headless=True,
+        session_id=f"session-field-aria-disabled-drift-{action}-{field_name}",
+        run_id=50,
+        job_id=123,
+        internal_transport_url=transport_url,
+        test_drift=True,
+    ) as session:
+        session.goto(logical_url)
+        field = field_by_name(session.observe(), field_name)
+        assert field["enabled"] is True
+        assert field["value"] == initial_value
+
+        assert session._arm_field_aria_disabled_drift_for_test()["armed"] is True
+        with pytest.raises(BrowserAdapterError, match="target_not_actionable"):
+            getattr(session, action)(field["target_id"], next_value)
+
+        after = session.observe()
+        drifted = field_by_name(after, field_name)
+        assert drifted["enabled"] is False
+        assert drifted["value"] == initial_value
+        assert not any(
+            item["element_id"] == f"{element_id}-listener-marker"
+            for item in after["buttons"]
+        )
+        assert session.network_counters()["terminal_reason"] is None
+        assert FixtureHandler.final_like_requests == 0
+
 
 @BROWSER_INTEGRATION_SKIP
 def test_native_auth_controls_are_observation_blockers(fixture_server):
@@ -2629,6 +2832,49 @@ def test_upload_uses_registered_staged_file_without_caller_path(fixture_server, 
         session.goto("https://boards.greenhouse.io/fixture/jobs/123")
         resume = field_by_name(session.observe(), "resume")
         assert session.upload(resume["target_id"])["retained"] is True
+    finally:
+        session.close(force=True)
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_upload_aria_disabled_drift_cleans_staging_without_mutation_or_dispatch(fixture_server, tmp_path):
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    staged = input_root / "resume.pdf"
+    staged.write_bytes(b"fixture resume")
+    session = PuppeteerSession.start(
+        headless=True,
+        session_id="session-upload-aria-disabled-drift",
+        run_id=52,
+        job_id=124,
+        input_root=input_root,
+        staged_input=staged.name,
+        staged_sha256=hashlib.sha256(staged.read_bytes()).hexdigest(),
+        staged_media_type="application/pdf",
+        internal_transport_url=fixture_server.replace("/clean", "/continue-native-disabled-fieldset"),
+        test_drift=True,
+    )
+    try:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        resume = field_by_name(session.observe(), "resume")
+        assert resume["enabled"] is True
+        assert resume["file_count"] == 0
+
+        assert session._arm_field_aria_disabled_drift_for_test()["armed"] is True
+        with pytest.raises(BrowserAdapterError, match="target_not_actionable"):
+            session.upload(resume["target_id"])
+
+        after = field_by_name(session.observe(), "resume")
+        assert after["enabled"] is False
+        assert after["file_count"] == 0
+        assert not any(
+            item["element_id"] == "aria-disabled-drift-upload-listener-marker"
+            for item in session.observe()["buttons"]
+        )
+        assert session.network_counters()["terminal_reason"] is None
+        owner_roots = list((Path(session._child_root) / "tmp").glob("jobs-assistant-owner-*"))
+        assert len(owner_roots) == 1
+        assert not any(path.name.startswith(".upload-") for path in owner_roots[0].iterdir())
     finally:
         session.close(force=True)
 

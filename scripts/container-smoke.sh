@@ -14,6 +14,9 @@ ROOT=$(mktemp -d "${TMPDIR:-/tmp}/jobs-assistant-container-smoke.XXXXXX")
 DATA_ROOT="$ROOT/data"
 RESUME_ROOT="$ROOT/resume"
 RESUME_FILE="$RESUME_ROOT/Main_Resume.pdf"
+PROFILE_FILE="$RESUME_ROOT/profile.json"
+TEMPLATE_FILE="$RESUME_ROOT/Resume.tex"
+DB_PATH="$DATA_ROOT/jobs.sqlite3"
 OVERRIDE="$ROOT/compose.override.yml"
 COMPOSE_PROJECT_NAME="jobs-assistant-smoke-$$"
 cleanup() {
@@ -98,6 +101,9 @@ PY
 
 mkdir -p "$DATA_ROOT" "$RESUME_ROOT"
 chmod 700 "$DATA_ROOT" "$RESUME_ROOT"
+cp "$PWD/resume/profile.json" "$PROFILE_FILE"
+cp "$PWD/resume/Resume.tex" "$TEMPLATE_FILE"
+chmod 600 "$PROFILE_FILE" "$TEMPLATE_FILE"
 python3 - "$RESUME_FILE" <<'PY'
 from pathlib import Path
 import sys
@@ -175,6 +181,178 @@ with sqlite3.connect(db_path) as connection:
 assert (data_root / "application-runs").is_dir()
 assert stat.S_IMODE((data_root / "application-runs").stat().st_mode) == 0o700
 assert not (data_root / "protected-runtime").exists()
+PY
+
+python3 - "$DB_PATH" "$ROOT/resume-input.json" <<'PY'
+import json
+import sqlite3
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+db_path = Path(sys.argv[1])
+snapshot_path = Path(sys.argv[2])
+columns = (
+    "id",
+    "source",
+    "source_job_id",
+    "canonical_url",
+    "title",
+    "company",
+    "location",
+    "remote",
+    "posted_at",
+    "discovered_at",
+    "description",
+    "status",
+    "raw_json",
+    "first_seen_at",
+    "last_seen_at",
+)
+now = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+with sqlite3.connect(db_path) as connection:
+    assert connection.execute("SELECT count(*) FROM jobs").fetchone() == (0,)
+    cursor = connection.execute(
+        """
+        INSERT INTO jobs (
+            source, source_job_id, canonical_url, title, company, location,
+            remote, posted_at, discovered_at, description, status, raw_json,
+            first_seen_at, last_seen_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "container-smoke",
+            "container-smoke-job-1",
+            "https://example.test/jobs/container-smoke-job-1",
+            "Software Engineering Spring Co-op",
+            "Smoke Systems",
+            "Remote",
+            1,
+            now,
+            now,
+            "Spring co-op role building reliable Python services with Docker, Kubernetes, SQL, and JavaScript.",
+            "queued",
+            "{}",
+            now,
+            now,
+        ),
+    )
+    job_id = int(cursor.lastrowid)
+    row = connection.execute(
+        f"SELECT {', '.join(columns)} FROM jobs WHERE id = ?",
+        (job_id,),
+    ).fetchone()
+    assert row is not None
+    snapshot = dict(zip(columns, row))
+snapshot_path.write_text(json.dumps(snapshot, sort_keys=True), encoding="utf-8")
+PY
+
+HOST_UID="$UID_VALUE" HOST_GID="$GID_VALUE" docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml -f "$OVERRIDE" run --rm --no-deps --entrypoint resume-generate jobs-assistant \
+  --db /app/data/jobs.sqlite3 \
+  --profile /app/resume/profile.json \
+  --template /app/resume/Resume.tex \
+  --output-root /app/data/generated-resumes \
+  --limit 1 \
+  --compiler pdflatex >"$ROOT/resume-result.json"
+
+python3 - "$DATA_ROOT" "$RESUME_ROOT" "$ROOT/resume-input.json" "$ROOT/resume-result.json" <<'PY'
+import json
+import re
+import sqlite3
+import stat
+import sys
+from pathlib import Path
+
+data_root = Path(sys.argv[1])
+resume_root = Path(sys.argv[2])
+snapshot = json.loads(Path(sys.argv[3]).read_text(encoding="utf-8"))
+result = json.loads(Path(sys.argv[4]).read_text(encoding="utf-8"))
+assert set(result) == {"results"}
+assert len(result["results"]) == 1
+result_row = result["results"][0]
+assert result_row["job_id"] == snapshot["id"]
+assert result_row["pages"] == 1
+assert result_row["graduation_date"] == "May 2027"
+assert result_row["artifact_ref"].startswith(f"job-{snapshot['id']}/")
+
+assert stat.S_IMODE((resume_root / "profile.json").stat().st_mode) == 0o600
+assert stat.S_IMODE((resume_root / "Resume.tex").stat().st_mode) == 0o600
+artifact_root = data_root / "generated-resumes"
+assert stat.S_IMODE(artifact_root.stat().st_mode) == 0o700
+job_dirs = [path for path in artifact_root.iterdir() if path.is_dir() and not path.is_symlink()]
+assert len(job_dirs) == 1
+job_dir = job_dirs[0]
+assert job_dir.name == f"job-{snapshot['id']}"
+assert stat.S_IMODE(job_dir.stat().st_mode) == 0o700
+fingerprint_dirs = [path for path in job_dir.iterdir() if path.is_dir() and not path.is_symlink()]
+assert len(fingerprint_dirs) == 1
+artifact_dir = fingerprint_dirs[0]
+assert re.fullmatch(r"[0-9a-f]{16}", artifact_dir.name)
+assert stat.S_IMODE(artifact_dir.stat().st_mode) == 0o700
+expected_artifacts = {
+    "resume.tex",
+    "resume.pdf",
+    "optimization.json",
+    "job_description.txt",
+    "manifest.json",
+}
+children = list(artifact_dir.iterdir())
+assert {path.name for path in children} == expected_artifacts
+assert len(children) == len(expected_artifacts) == 5
+for path in children:
+    info = path.lstat()
+    assert stat.S_ISREG(info.st_mode)
+    assert stat.S_IMODE(info.st_mode) == 0o600
+
+pdf_path = artifact_dir / "resume.pdf"
+pdf = pdf_path.read_bytes()
+assert pdf.startswith(b"%PDF-")
+
+
+columns = (
+    "id",
+    "source",
+    "source_job_id",
+    "canonical_url",
+    "title",
+    "company",
+    "location",
+    "remote",
+    "posted_at",
+    "discovered_at",
+    "description",
+    "status",
+    "raw_json",
+    "first_seen_at",
+    "last_seen_at",
+)
+with sqlite3.connect(data_root / "jobs.sqlite3") as connection:
+    connection.row_factory = sqlite3.Row
+    rows = connection.execute(
+        f"SELECT {', '.join(columns)} FROM jobs"
+    ).fetchall()
+    assert len(rows) == 1
+    actual = dict(rows[0])
+    assert actual == snapshot
+    assert actual["status"] == "queued"
+    assert connection.execute("SELECT count(*) FROM application_runs").fetchone()[0] == 0
+assert stat.S_IMODE((data_root / "jobs.sqlite3").stat().st_mode) & 0o077 == 0
+assert stat.S_IMODE((data_root / "application-runs").stat().st_mode) == 0o700
+assert not (data_root / "protected-runtime").exists()
+PY
+
+HOST_UID="$UID_VALUE" HOST_GID="$GID_VALUE" docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml -f "$OVERRIDE" run --rm --no-deps -T --entrypoint python jobs-assistant - <<'PY'
+from pathlib import Path
+
+from pypdf import PdfReader
+
+pdf_paths = list(Path("/app/data/generated-resumes").glob("job-*/*/resume.pdf"))
+assert len(pdf_paths) == 1
+reader = PdfReader(str(pdf_paths[0]))
+assert len(reader.pages) == 1
+text = "\n".join(page.extract_text() or "" for page in reader.pages)
+for expected in ("Ian Rapko", "May 2027", "Python"):
+    assert expected in text
 PY
 
 echo '{"ok":true,"smoke":"container"}'

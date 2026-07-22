@@ -14,6 +14,65 @@ The application imports and deduplicates listings into a local SQLite backlog. T
 
 The hard boundary is permanent: the CLI does not submit applications. `--outcome submitted` records a submission the human already made; it does not perform one.
 
+## Resume generation
+
+`resume-generate` is a separate, non-mutating preparation step. It opens the
+SQLite backlog read-only, considers only queued jobs with non-empty
+descriptions, and never claims, changes, archives, applies to, or submits a
+job. A concrete run using the default profile and template is:
+
+```bash
+resume-generate --db data/jobs.sqlite3 --limit 10
+```
+
+The command defaults to `--db data/jobs.sqlite3` (or `DATABASE_URL`),
+`--profile resume/profile.json`, `--template resume/Resume.tex`,
+`--output-root data/generated-resumes`, and `--limit 10` (range `1-100`).
+`--job-id ID` is repeatable; specifying one or more positive, unique IDs
+overrides default ordering and requires every requested job to be queued and
+described. `--compiler VALUE` optionally overrides compiler auto-detection,
+which prefers Tectonic and supports `pdflatex` as the fallback. Missing,
+invalid, or unsafe inputs, unavailable compilers, compilation failures, and
+non-one-page output fail closed rather than publishing a partial resume.
+
+The profile is strict schema-versioned JSON: unknown keys, malformed values,
+unsafe URLs, oversized/deep input, and unsupported claims are rejected. It is
+the source of truth, not a prompt or an invitation to infer facts. Profile
+source records carry byte-exact SHA-256 provenance. Optimization reports retain
+the source IDs for every selected claim; manifests hash the job, profile,
+template, and published artifacts. Matching is deterministic and title-first:
+the title is checked for field signals before the description, and explicit
+requirement terms score exact source-backed claims. Education and experience
+remain prioritized; leadership, projects, and skills are included only when
+their profile evidence matches the job.
+Public GitHub metadata, repository inventories, and READMEs establish project/technology evidence only, not resume-ready
+impact or permission. LinkedIn content remains unresolved because retrieval
+failed; an export or plain text is still needed for any missing experience,
+skills, dates, or impact. Measurable impact and permission to promote Boarded
+or AVCPro also remain open questions.
+
+Graduation defaults to December 2026. The sole exception is May 2027, and it
+applies only when the combined title and description contain both a spring
+term and one of `co-op`, `coop`, or `internship`; otherwise the result remains
+December 2026.
+
+Each successful job is cached under
+`data/generated-resumes/job-<id>/<fingerprint>/` with exactly these five
+private artifacts:
+
+```text
+resume.tex
+resume.pdf
+optimization.json
+job_description.txt
+manifest.json
+```
+
+The generated `resume.pdf` may later be supplied explicitly to guarded
+`autofill` for a headed human-review handoff. Generation itself never opens an
+ATS, applies, or submits, and no generated artifact authorizes submission.
+
+
 ## Supported ATS scope
 
 `autofill --ats auto` (the default) selects the adapter whose exact route matches the queued URL. `--ats greenhouse` and `--ats lever` pin the route policy; a mismatch fails closed. Both adapters use the same public-HTTPS, network, safe-action, private-artifact, and no-final-submit gates.

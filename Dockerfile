@@ -8,7 +8,7 @@ ENV PUPPETEER_SKIP_DOWNLOAD=true \
 
 WORKDIR /app
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends nodejs npm chromium-headless-shell \
+    && apt-get install -y --no-install-recommends nodejs npm chromium-headless-shell texlive-latex-base texlive-latex-extra texlive-fonts-recommended \
     && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml package.json package-lock.json ./
 COPY src ./src

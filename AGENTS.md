@@ -75,6 +75,16 @@ These rules apply to current and future applier work even though archived implem
 - Personal site: `https://immemorized.com`
 - Profile JSON examples may live under `scraper/data/` or `data/`.
 
+Profile enrichment workflow:
+
+- Use the local `cmux` browser/device workflow for LinkedIn and other public
+  source pages when browser access is required.
+- Save retrieved source evidence and its exact provenance before promoting
+  any fact into `resume/profile.json`.
+- Treat blocked, partial, or ambiguous pages as open questions; cmux access
+  does not authorize inference or resume claims.
+
+
 ## Protected files and data
 
 Do not touch casually:

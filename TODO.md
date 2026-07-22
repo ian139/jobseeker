@@ -89,10 +89,11 @@ Verification at this checkpoint:
   one-page artifacts; the exact SQLite SHA-256 remained
   `1edaeac931e7dfaed6c58a85605e46594ffcbb520853d8967ec8c549bb4930dd`.
 
-Remaining evidence gaps are explicit profile questions: LinkedIn export/text
-and measurable-impact permission for Boarded and AVCPro. Automatic generated
-resume handoff into guarded autofill remains a separate future patch; final
-submission remains human-only.
+Remaining evidence gaps are explicit profile questions: LinkedIn export/text.
+LinkedIn and other public-source enrichment should use the local `cmux`
+browser/device workflow, with exact provenance persisted before any profile
+update. Automatic generated resume handoff into guarded autofill remains a
+separate future patch; final submission remains human-only.
 
 ## Hard boundary
 

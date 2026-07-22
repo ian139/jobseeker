@@ -399,7 +399,7 @@
         "location": "https://api.github.com/users/Ian139",
         "sha256": "d8412f45e9a8af2b17511ffa8b2c8294d62ff16cd6ef4eb2387e68a6cd551c18",
         "retrieved_at": "2026-07-22T00:17:40Z",
-        "notes": "Public profile metadata confirms Ian Rapko/Ian139, immemorized.com, and seven public repositories."
+        "notes": "Public profile metadata confirms Ian Rapko/Ian139, immemorized.com, and seven public repositories; only five are retained in this profile."
       },
       {
         "id": "src_github_repositories_api",
@@ -408,30 +408,6 @@
         "sha256": "e6ab0409db8cda9b87147bb5c56608a3e0c4694892a8f653c4c1dc3745f1e40d",
         "retrieved_at": "2026-07-22T00:17:40Z",
         "notes": "Public repository inventory; repository metadata is retained as evidence and is not automatically a resume claim."
-      },
-      {
-        "id": "src_github_boarded_readme",
-        "type": "github_readme",
-        "location": "https://api.github.com/repos/Ian139/Boarded/readme",
-        "sha256": "2e940d983eb747225b63a8a4acb4f2048bbdac398d1237d5e1f72a5abbaf0d75",
-        "retrieved_at": "2026-07-22T00:17:40Z",
-        "notes": "Public Boarded README; project and technology evidence only, pending impact and permission confirmation."
-      },
-      {
-        "id": "src_github_boarded_languages",
-        "type": "github_api_languages",
-        "location": "https://api.github.com/repos/Ian139/Boarded/languages",
-        "sha256": "bc14810eaa698679e7aadf493db569ac35bb1046fc5394a71c0a9e40a9a8ba36",
-        "retrieved_at": "2026-07-22T00:17:40Z",
-        "notes": "Public Boarded language metadata: Swift, TypeScript, Python, JavaScript, CSS, and PLpgSQL; evidence only."
-      },
-      {
-        "id": "src_github_avcpro_readme",
-        "type": "github_readme",
-        "location": "https://api.github.com/repos/Ian139/AVCPro/readme",
-        "sha256": "67c0d3e69ff120f687b52edc110e53b5d122d92469588182c49d1069fca67c93",
-        "retrieved_at": "2026-07-22T00:17:40Z",
-        "notes": "Public AVCPro README; project evidence only, pending impact and permission confirmation."
       },
       {
         "id": "user_workflow",
@@ -443,28 +419,6 @@
       }
     ],
     "public_repositories": [
-      {
-        "name": "AVCPro",
-        "url": "https://github.com/Ian139/AVCPro",
-        "description": "macOS app to browse and export AVCHD clips; exports original MTS or MP4 via ffmpeg.",
-        "primary_language": "Swift",
-        "fork": false,
-        "created_at": "2026-03-05T16:43:56Z",
-        "updated_at": "2026-03-05T17:25:09Z",
-        "sources": ["src_github_repositories_api", "src_github_avcpro_readme"],
-        "resume_eligible": false
-      },
-      {
-        "name": "Boarded",
-        "url": "https://github.com/Ian139/Boarded",
-        "description": "Climbing route-setting app for managing walls, routes, holds, and climbing activity; includes a Next.js web app and SwiftUI iOS app, with Supabase variables documented.",
-        "primary_language": "Swift",
-        "fork": false,
-        "created_at": "2025-12-27T20:10:15Z",
-        "updated_at": "2026-07-21T21:23:16Z",
-        "sources": ["src_github_repositories_api", "src_github_boarded_readme", "src_github_boarded_languages"],
-        "resume_eligible": false
-      },
       {
         "name": "olympus-contracts",
         "url": "https://github.com/Ian139/olympus-contracts",
@@ -526,12 +480,6 @@
         "id": "linkedin_export",
         "question": "Can you provide a LinkedIn export or plain text for any experience, skills, dates, or impact not present in the main resume?",
         "reason": "LinkedIn content could not be retrieved (HTTP 999 and browser-device failure), so missing facts must not be inferred.",
-        "status": "open"
-      },
-      {
-        "id": "github_impact_permission",
-        "question": "Can you confirm measurable impact and permission to promote Boarded and AVCPro into generated resumes?",
-        "reason": "GitHub READMEs and metadata establish public project evidence but do not establish resume-ready impact or permission for generated claims.",
         "status": "open"
       }
     ]

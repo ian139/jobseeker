@@ -45,11 +45,12 @@ the title is checked for field signals before the description, and explicit
 requirement terms score exact source-backed claims. Education and experience
 remain prioritized; leadership, projects, and skills are included only when
 their profile evidence matches the job.
-Public GitHub metadata, repository inventories, and READMEs establish project/technology evidence only, not resume-ready
-impact or permission. LinkedIn content remains unresolved because retrieval
-failed; an export or plain text is still needed for any missing experience,
-skills, dates, or impact. Measurable impact and permission to promote Boarded
-or AVCPro also remain open questions.
+Public GitHub metadata, repository inventories, and READMEs establish
+project/technology evidence only, not resume-ready impact or permission.
+LinkedIn content remains unresolved because retrieval failed; use the local
+`cmux` browser/device workflow for LinkedIn and other public-source enrichment.
+Persist exact source provenance before any profile update; blocked or ambiguous
+retrieval never licenses inference.
 
 Graduation defaults to December 2026. The sole exception is May 2027, and it
 applies only when the combined title and description contain both a spring

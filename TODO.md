@@ -52,6 +52,48 @@ autofill-review complete | retry
 - [x] Keep container execution headless, non-root, UID/GID mapped, and bound
       to existing `data` (read/write) and `resume` (read-only) directories.
 
+
+## Resume generation — complete
+
+- [x] Replace the flat resume summary with strict structured profile v1 data
+      for skills, experience, leadership, education, projects, provenance,
+      public repository evidence, and unresolved questions.
+- [x] Expose `resume-generate` as a separate read-only SQLite backlog command;
+      it never claims, changes, applies to, or submits a job.
+- [x] Select only source-backed claims with deterministic title-first field and
+      requirement matching; report unsupported terms instead of inventing
+      candidate facts.
+- [x] Prioritize experience over leadership, projects, and skills, trim the
+      globally lowest-scoring optional content in the fixed policy order, and
+      fail closed unless the compiled PDF is exactly one page with extractable
+      text.
+- [x] Keep December 2026 as the default graduation date and render May 2027
+      only for a combined spring plus co-op/coop/internship match.
+- [x] Persist exactly five private, hash-verified artifacts per job/fingerprint:
+      `resume.tex`, `resume.pdf`, `optimization.json`,
+      `job_description.txt`, and `manifest.json`.
+- [x] Preserve the generated PDF as an explicit future guarded-autofill input;
+      generation itself does not open an ATS or authorize submission.
+
+Integrated implementation checkpoint: `c00fe9a`.
+
+Verification at this checkpoint:
+
+- `uv lock --check`;
+- `uv run --frozen --extra dev python -m pytest` — 773 passed, 70 skipped;
+- `sh scripts/smoke.sh` — wheel entrypoint plus real Spring co-op generation;
+- `sh scripts/container-smoke.sh` — real `pdflatex`, one extracted-text page,
+  private artifacts, May 2027, selected Python evidence, and unchanged DB row;
+- `docker compose build`, `up -d`, `ps`, and `down`;
+- 14 queued jobs from the original local backlog generated as 14 unique
+  one-page artifacts; the exact SQLite SHA-256 remained
+  `1edaeac931e7dfaed6c58a85605e46594ffcbb520853d8967ec8c549bb4930dd`.
+
+Remaining evidence gaps are explicit profile questions: LinkedIn export/text
+and measurable-impact permission for Boarded and AVCPro. Automatic generated
+resume handoff into guarded autofill remains a separate future patch; final
+submission remains human-only.
+
 ## Hard boundary
 
 No submit policy is being added: final submission is human-only. The CLI never

@@ -26,8 +26,9 @@ resume-generate --db data/jobs.sqlite3 --limit 10
 ```
 
 The command defaults to `--db data/jobs.sqlite3` (or `DATABASE_URL`),
-`--profile resume/profile.json`, `--template resume/Resume.tex`,
-`--output-root data/generated-resumes`, and `--limit 10` (range `1-100`).
+`--profile resume/profile.json`, `--template resume/Resume.tex`, the
+authoritative `resume/SKILL.md` beside that template, `--output-root
+data/generated-resumes`, and `--limit 10` (range `1-100`).
 `--job-id ID` is repeatable; specifying one or more positive, unique IDs
 overrides default ordering and requires every requested job to be queued and
 described. `--compiler VALUE` optionally overrides compiler auto-detection,
@@ -45,6 +46,11 @@ the title is checked for field signals before the description, and explicit
 requirement terms score exact source-backed claims. Education and experience
 remain prioritized; leadership, projects, and skills are included only when
 their profile evidence matches the job.
+
+`resume/SKILL.md` is loaded and structurally validated for every generation.
+Its exact SHA-256 is included in the cache fingerprint, optimization report,
+and manifest; changing or removing it therefore cannot silently reuse or
+publish output under an old policy.
 Public GitHub metadata, repository inventories, and READMEs establish
 project/technology evidence only, not resume-ready impact or permission.
 LinkedIn content remains unresolved because retrieval failed; use the local

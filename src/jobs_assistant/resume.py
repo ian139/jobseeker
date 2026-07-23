@@ -37,10 +37,11 @@ __all__ = [
 
 # These limits apply before parsing and before subprocess invocation.  They are
 # intentionally conservative because profile and job data are user-controlled.
-_GENERATOR_SCHEMA_VERSION = "resume-generator-v3"
+_GENERATOR_SCHEMA_VERSION = "resume-generator-v4"
 _PROFILE_SCHEMA_VERSION = 1
 _MAX_PROFILE_BYTES = 256 * 1024
 _MAX_TEMPLATE_BYTES = 512 * 1024
+_MAX_SKILL_BYTES = 128 * 1024
 _MAX_DESCRIPTION_CHARS = 12_000
 _MAX_RESUME_TEX_BYTES = 512 * 1024
 _MAX_RESUME_PDF_BYTES = 8 * 1024 * 1024
@@ -66,7 +67,8 @@ _MAX_SKILLS = 20
 _ALGORITHM_DESCRIPTOR = (
     "title-first-requirements-field-selection-v3|source-backed-claims|graduation-render-v2|"
     "experience-first-trim-v4|tectonic-pdflatex-bounded-argv-v1|"
-    "private-five-artifact-cache-v3|strict-profile-v1-header-metadata-v4"
+    "private-five-artifact-cache-v3|strict-profile-v1-header-metadata-v4|"
+    "authoritative-resume-skill-v1"
 )
 _ALGORITHM_SHA256 = hashlib.sha256(_ALGORITHM_DESCRIPTOR.encode("ascii")).hexdigest()
 
@@ -459,6 +461,21 @@ def _snapshot_regular(path: Path, max_bytes: int, description: str) -> bytes:
         return _read_fd_snapshot(fd, initial, description)
     finally:
         os.close(fd)
+
+def _validate_skill_bytes(skill_bytes: bytes, skill_path: Path) -> str:
+    try:
+        text = skill_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"resume skill is not valid UTF-8: {exc}") from exc
+    required = (
+        "# Resume Generation Skill",
+        "Version: 1",
+        "## Source-of-truth policy",
+        "## Output invariants",
+    )
+    if any(marker not in text for marker in required):
+        raise ValueError(f"resume skill is malformed: {skill_path}")
+    return _sha256_hex(skill_bytes)
 
 
 def _check_no_duplicate_keys(raw: str) -> None:
@@ -1386,10 +1403,8 @@ def _render_resume(plan: ResumePlan, template_text: str) -> str:
 def _sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
-
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
 
 def _job_payload(job: ResumeJob) -> dict[str, Any]:
     return {
@@ -1400,12 +1415,11 @@ def _job_payload(job: ResumeJob) -> dict[str, Any]:
         "location": job.location,
         "posted_at": job.posted_at,
     }
-
-
 def _input_digests(
     job: ResumeJob,
     profile_bytes: bytes,
     template_bytes: bytes,
+    skill_bytes: bytes,
     compiler_identity: str = "auto",
 ) -> dict[str, str]:
     job_digest = _sha256_hex(_canonical_json(_job_payload(job)))
@@ -1413,6 +1427,7 @@ def _input_digests(
         "job_sha256": job_digest,
         "profile_sha256": _sha256_hex(profile_bytes),
         "template_sha256": _sha256_hex(template_bytes),
+        "skill_sha256": _sha256_hex(skill_bytes),
         "compiler_identity": compiler_identity,
     }
 
@@ -1421,15 +1436,17 @@ def _fingerprint_inputs(
     job: ResumeJob,
     profile_bytes: bytes,
     template_bytes: bytes,
+    skill_bytes: bytes,
     compiler_identity: str = "auto",
 ) -> str:
-    digests = _input_digests(job, profile_bytes, template_bytes, compiler_identity)
+    digests = _input_digests(job, profile_bytes, template_bytes, skill_bytes, compiler_identity)
     payload = {
         "algorithm_sha256": _ALGORITHM_SHA256,
         "generator_schema_version": _GENERATOR_SCHEMA_VERSION,
         "compiler_identity": compiler_identity,
         "profile_sha256": digests["profile_sha256"],
         "template_sha256": digests["template_sha256"],
+        "skill_sha256": digests["skill_sha256"],
         "job_sha256": digests["job_sha256"],
         "job": _job_payload(job),
     }
@@ -2106,17 +2123,19 @@ def _manifest_body(manifest: Mapping[str, Any]) -> dict[str, Any]:
     body.pop("manifest_sha256", None)
     return body
 
-
 def _manifest_digest(manifest: Mapping[str, Any]) -> str:
     return _sha256_hex(_canonical_json(_manifest_body(manifest)))
 
 
-def _build_report(plan: ResumePlan, job: ResumeJob, fingerprint: str) -> dict[str, Any]:
+def _build_report(
+    plan: ResumePlan, job: ResumeJob, fingerprint: str, skill_sha256: str
+) -> dict[str, Any]:
     return {
         "schema_version": _PROFILE_SCHEMA_VERSION,
         "generator_schema_version": _GENERATOR_SCHEMA_VERSION,
         "algorithm_sha256": _ALGORITHM_SHA256,
         "fingerprint": fingerprint,
+        "skill_sha256": skill_sha256,
         "job_id": job.id,
         "field": plan.field,
         "graduation_date": plan.graduation_date,
@@ -2248,6 +2267,7 @@ def _validate_manifest_and_cache(
             "generator_schema_version",
             "algorithm_sha256",
             "fingerprint",
+            "skill_sha256",
             "job_id",
             "field",
             "graduation_date",
@@ -2274,6 +2294,7 @@ def _validate_manifest_and_cache(
         or report["generator_schema_version"] != _GENERATOR_SCHEMA_VERSION
         or report["algorithm_sha256"] != _ALGORITHM_SHA256
         or report["fingerprint"] != fingerprint
+        or report["skill_sha256"] != digests["skill_sha256"]
         or report["job_id"] != job.id
     ):
         raise RuntimeError("cached report identity mismatch")
@@ -2369,15 +2390,19 @@ def generate_resume(
     template_path: str | Path,
     output_root: str | Path,
     compiler: str | None = None,
+    skill_path: str | Path | None = None,
 ) -> GeneratedResume:
     """Generate/reuse exactly five private, integrity-checked artifacts."""
     if not isinstance(job, ResumeJob):
         raise TypeError("job must be a ResumeJob")
     profile_path = Path(profile_path)
     template_path = Path(template_path)
+    skill_path = Path(skill_path) if skill_path is not None else template_path.with_name("SKILL.md")
     output_root = Path(os.path.abspath(os.fspath(output_root)))
     profile_bytes = _snapshot_regular(profile_path, _MAX_PROFILE_BYTES, "profile JSON")
     template_bytes = _snapshot_regular(template_path, _MAX_TEMPLATE_BYTES, "template")
+    skill_bytes = _snapshot_regular(skill_path, _MAX_SKILL_BYTES, "resume skill")
+    skill_sha256 = _validate_skill_bytes(skill_bytes, skill_path)
     try:
         template_text = template_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
@@ -2388,8 +2413,10 @@ def generate_resume(
     requested_compiler = compiler if compiler is not None else _find_compiler()
     resolved_compiler = _resolve_compiler_path(requested_compiler)
     compiler_identity = _compiler_identity(resolved_compiler)
-    fingerprint = _fingerprint_inputs(job, profile_bytes, template_bytes, compiler_identity)
-    digests = _input_digests(job, profile_bytes, template_bytes, compiler_identity)
+    fingerprint = _fingerprint_inputs(
+        job, profile_bytes, template_bytes, skill_bytes, compiler_identity
+    )
+    digests = _input_digests(job, profile_bytes, template_bytes, skill_bytes, compiler_identity)
 
     _ensure_private_dir(output_root)
     job_dir = output_root / f"job-{job.id}"
@@ -2488,7 +2515,7 @@ def generate_resume(
         pages = _validate_pdf_bytes(pdf_bytes)
 
         _prune_stage(stage)
-        report_bytes = _canonical_json(_build_report(plan, job, fingerprint))
+        report_bytes = _canonical_json(_build_report(plan, job, fingerprint, skill_sha256))
         _write_private(
             stage / "optimization.json",
             report_bytes,

@@ -84,6 +84,13 @@ Profile enrichment workflow:
 - Treat blocked, partial, or ambiguous pages as open questions; cmux access
   does not authorize inference or resume claims.
 
+Resume generation contract:
+
+- `resume/SKILL.md` is the authoritative instruction set for every generated
+  resume. The generator must load and validate it before compiling.
+- Its exact bytes are part of the cache identity and private manifest, so
+  policy changes invalidate prior generated output.
+
 
 ## Protected files and data
 

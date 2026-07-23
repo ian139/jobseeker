@@ -14,6 +14,7 @@ from .resume import GeneratedResume, ResumeJob, generate_resume
 DEFAULT_DB = Path(os.environ.get("DATABASE_URL", "data/jobs.sqlite3"))
 DEFAULT_PROFILE = Path("resume/profile.json")
 DEFAULT_TEMPLATE = Path("resume/Resume.tex")
+DEFAULT_SKILL = None
 DEFAULT_OUTPUT_ROOT = Path("data/generated-resumes")
 DEFAULT_LIMIT = 10
 MIN_LIMIT = 1
@@ -124,6 +125,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="LaTeX template path (default: resume/Resume.tex)",
     )
     parser.add_argument(
+        "--skill",
+        type=Path,
+        default=DEFAULT_SKILL,
+        help="resume generation skill path (default: sibling SKILL.md beside template)",
+    )
+    parser.add_argument(
         "--output-root",
         type=Path,
         default=DEFAULT_OUTPUT_ROOT,
@@ -168,7 +175,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             return "invalid_input"
         if len(set(args.job_ids)) != len(args.job_ids):
             return "invalid_input"
-    for path in (args.db, args.profile, args.template):
+    skill_path = args.skill if args.skill is not None else args.template.with_name("SKILL.md")
+    for path in (args.db, args.profile, args.template, skill_path):
         try:
             if not path.exists() or not path.is_file() or path.is_symlink():
                 return "invalid_input"
@@ -233,6 +241,7 @@ def main(argv: list[str] | None = None) -> int:
                 job,
                 profile_path=args.profile,
                 template_path=args.template,
+                skill_path=args.skill,
                 output_root=args.output_root,
                 compiler=args.compiler,
             )

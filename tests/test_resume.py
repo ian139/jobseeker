@@ -175,6 +175,15 @@ def _write_template(path: Path) -> Path:
         "\\end{document}\n",
         encoding="utf-8",
     )
+    path.with_name("SKILL.md").write_text(
+        "# Resume Generation Skill\n\n"
+        "Version: 1\n\n"
+        "## Source-of-truth policy\n\n"
+        "Use only source-backed claims.\n\n"
+        "## Output invariants\n\n"
+        "Generate exactly one page.\n",
+        encoding="utf-8",
+    )
     return path
 
 
@@ -453,6 +462,20 @@ def test_shipped_profile_and_template_generate_with_fixture_compiler(tmp_path: P
     assert claim_ids
     assert {"contact", "links"}.isdisjoint(claim_ids)
 
+def test_generation_requires_authoritative_skill_file(tmp_path: Path) -> None:
+    profile_path = _write_profile(tmp_path / "profile.json")
+    template_path = _write_template(tmp_path / "Resume.tex")
+    template_path.with_name("SKILL.md").unlink()
+    compiler = _write_fake_compiler(tmp_path / "pdflatex")
+    with pytest.raises(FileNotFoundError, match="resume skill not found"):
+        generate_resume(
+            _job(),
+            profile_path=profile_path,
+            template_path=template_path,
+            output_root=tmp_path / "output",
+            compiler=str(compiler),
+        )
+
 
 def test_profile_loader_rejects_duplicate_stable_ids_and_invalid_source_refs(tmp_path: Path) -> None:
     duplicate_payload = _base_profile()
@@ -675,6 +698,9 @@ def test_generation_accepts_relative_root_and_publishes_only_private_artifacts(
     job_dir = output_root / "job-7"
     assert {child.name for child in job_dir.iterdir()} == {result.pdf_path.parent.name}
     report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    manifest = json.loads((result.pdf_path.parent / "manifest.json").read_text(encoding="utf-8"))
+    assert "skill_sha256" in manifest["inputs"]
+    assert report["skill_sha256"] == manifest["inputs"]["skill_sha256"]
     assert report["graduation_date"] == "May 2027"
     claim_ids = {claim["id"] for claim in report["selected_claims"]}
     assert "spring_coop" in claim_ids

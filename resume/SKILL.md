@@ -10,7 +10,9 @@ invalidates generation or creates a new cache identity.
 
 ## Source-of-truth policy
 
-- Use only facts present in `resume/profile.json` and the queued job record.
+- Candidate facts and claims must come only from `resume/profile.json`.
+- The queued job record supplies target metadata and requirements for matching
+  only; it is never evidence that the applicant possesses a requirement.
 - Preserve each selected claim's source IDs and provenance.
 - Never invent employers, titles, dates, degrees, tools, metrics, impact,
   permissions, or responsibilities.

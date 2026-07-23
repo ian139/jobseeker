@@ -1,0 +1,487 @@
+{
+  "schema_version": 1,
+  "skills": {
+    "languages": [
+      {
+        "name": "Python",
+        "keywords": ["Python"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "JavaScript",
+        "keywords": ["JavaScript"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "Solidity",
+        "keywords": ["Solidity"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "Java",
+        "keywords": ["Java"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "C++",
+        "keywords": ["C++"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "SQL",
+        "keywords": ["SQL"],
+        "sources": ["src_main_resume_pdf"]
+      }
+    ],
+    "frameworks": [
+      {
+        "name": ".NET",
+        "keywords": [".NET", "dotnet"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "Razor",
+        "keywords": ["Razor"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "PyTorch",
+        "keywords": ["PyTorch"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "Hugging Face",
+        "keywords": ["Hugging Face"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "vLLM",
+        "keywords": ["vLLM"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "Qdrant",
+        "keywords": ["Qdrant"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "Firecrawl",
+        "keywords": ["Firecrawl"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "pandas",
+        "keywords": ["pandas"],
+        "sources": ["src_main_resume_pdf"]
+      }
+    ],
+    "infrastructure": [
+      {
+        "name": "Docker",
+        "keywords": ["Docker"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "Kubernetes",
+        "keywords": ["Kubernetes"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "Prometheus",
+        "keywords": ["Prometheus"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "Grafana",
+        "keywords": ["Grafana"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "AWS",
+        "keywords": ["AWS", "EC2", "S3", "API Gateway"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "Git",
+        "keywords": ["Git"],
+        "sources": ["src_main_resume_pdf"]
+      }
+    ],
+    "practices": [
+      {
+        "name": "CI/CD",
+        "keywords": ["CI/CD", "continuous integration", "continuous delivery"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "SOC2",
+        "keywords": ["SOC2", "SOC 2"],
+        "sources": ["src_main_resume_pdf"]
+      },
+      {
+        "name": "HIPAA",
+        "keywords": ["HIPAA"],
+        "sources": ["src_main_resume_pdf"]
+      }
+    ]
+  },
+  "experience": [
+    {
+      "id": "exp_wr_berkley",
+      "title": "Software Engineering Intern",
+      "organization": "W. R. Berkley",
+      "location": "Remote",
+      "dates": {
+        "start": "May 2026",
+        "end": "Present",
+        "display": "May 2026 – Present"
+      },
+      "bullets": [
+        {
+          "id": "exp_wr_berkley_b1",
+          "text": "Modernized Nautilus NEST and ONE insurance platforms by developing .NET/Razor APIs that unified policy and claims data access through a single internal platform",
+          "keywords": ["Nautilus NEST", "ONE", "insurance", ".NET", "Razor", "APIs", "policy", "claims"],
+          "sources": ["src_main_resume_pdf", "src_personal_work_page"]
+        },
+        {
+          "id": "exp_wr_berkley_b2",
+          "text": "Built CI/CD pipelines for .NET/Razor backend services, enabling automated deployment of record-retrieval and integration APIs",
+          "keywords": ["CI/CD", ".NET", "Razor", "backend", "automated deployment", "record retrieval", "integration APIs"],
+          "sources": ["src_main_resume_pdf"]
+        }
+      ],
+      "keywords": ["software engineering", "intern", "insurance", ".NET", "Razor", "APIs", "CI/CD", "backend"],
+      "sources": ["src_main_resume_pdf", "src_personal_work_page"]
+    },
+    {
+      "id": "exp_adam_oneill_lab",
+      "title": "Undergraduate Researcher",
+      "organization": "Adam O’Neill Research Lab, UMass Amherst",
+      "location": "Amherst, MA",
+      "dates": {
+        "start": "May 2026",
+        "end": "Present",
+        "display": "May 2026 – Present"
+      },
+      "bullets": [
+        {
+          "id": "exp_adam_oneill_lab_b1",
+          "text": "Investigating distance-comparison-preserving encryption schemes for privacy-preserving retrieval and RAG systems, including evaluating membership inference attacks against encrypted embedding databases",
+          "keywords": ["cryptography", "distance-comparison-preserving encryption", "privacy-preserving retrieval", "RAG", "membership inference", "encrypted embedding databases"],
+          "sources": ["src_main_resume_pdf", "src_personal_work_page"]
+        }
+      ],
+      "keywords": ["undergraduate researcher", "cryptography", "machine learning", "privacy-preserving RAG", "semantic search", "encryption"],
+      "sources": ["src_main_resume_pdf", "src_personal_work_page"]
+    },
+    {
+      "id": "exp_johnson_johnson",
+      "title": "Cloud Engineering Intern",
+      "organization": "Johnson & Johnson",
+      "location": "Raritan, NJ",
+      "dates": {
+        "start": "May 2025",
+        "end": "August 2025",
+        "display": "May 2025 – August 2025"
+      },
+      "bullets": [
+        {
+          "id": "exp_johnson_johnson_b1",
+          "text": "Built a Kubernetes monitoring dashboard for engineering teams using Prometheus and Grafana alerts on AWS EC2 to reduce manual cluster health checks",
+          "keywords": ["Kubernetes", "monitoring dashboard", "Prometheus", "Grafana", "AWS", "EC2", "cluster health checks"],
+          "sources": ["src_main_resume_pdf", "src_personal_work_page"]
+        },
+        {
+          "id": "exp_johnson_johnson_b2",
+          "text": "Built a retrieval-augmented documentation assistant used by the MARVEL engineering team, indexing roughly 5,000 pages across Confluence and Databricks, reducing documentation search time by over 50%",
+          "keywords": ["retrieval-augmented", "documentation assistant", "MARVEL", "5,000 pages", "Confluence", "Databricks", "documentation search", "50%"],
+          "sources": ["src_main_resume_pdf"]
+        }
+      ],
+      "keywords": ["cloud engineering", "intern", "Kubernetes", "Prometheus", "Grafana", "AWS", "retrieval-augmented", "documentation"],
+      "sources": ["src_main_resume_pdf", "src_personal_work_page"]
+    },
+    {
+      "id": "exp_securedao",
+      "title": "Technical Founder",
+      "organization": "SecureDAO",
+      "location": "Remote",
+      "dates": {
+        "start": "September 2021",
+        "end": "February 2023",
+        "display": "September 2021 – February 2023"
+      },
+      "bullets": [
+        {
+          "id": "exp_securedao_b1",
+          "text": "Founded and led a DeFi protocol on Fantom hosted on AWS infrastructure, peaking at 2,500+ users and $300K in assets under management",
+          "keywords": ["DeFi", "Fantom", "AWS", "protocol", "2,500+ users", "$300K", "assets under management"],
+          "sources": ["src_main_resume_pdf", "src_personal_work_page"]
+        },
+        {
+          "id": "exp_securedao_b2",
+          "text": "Scaled platform valuation to $3M through product growth, community operations, and social media distribution",
+          "keywords": ["platform valuation", "$3M", "product growth", "community operations", "social media distribution"],
+          "sources": ["src_main_resume_pdf"]
+        }
+      ],
+      "keywords": ["technical founder", "DeFi", "Fantom", "AWS", "product growth", "community operations"],
+      "sources": ["src_main_resume_pdf", "src_personal_work_page"]
+    }
+  ],
+  "leadership": [
+    {
+      "id": "lead_blockchain_club",
+      "title": "Blockchain Club President",
+      "organization": "University of Massachusetts Amherst",
+      "location": "Amherst, MA",
+      "dates": {
+        "start": "September 2024",
+        "end": "May 2026",
+        "display": "September 2024 – May 2026"
+      },
+      "bullets": [
+        {
+          "id": "lead_blockchain_club_b1",
+          "text": "Revived and restructured the Blockchain Club, leading workshops on Web3, DeFi, smart contracts, and EVM development",
+          "keywords": ["Blockchain Club", "Web3", "DeFi", "smart contracts", "EVM", "workshops"],
+          "sources": ["src_main_resume_pdf"]
+        }
+      ],
+      "keywords": ["blockchain", "president", "Web3", "DeFi", "smart contracts", "EVM", "workshops"],
+      "sources": ["src_main_resume_pdf"]
+    },
+    {
+      "id": "lead_silentbball",
+      "title": "Ecommerce Store Owner",
+      "organization": "SilentBball",
+      "location": "Remote",
+      "dates": {
+        "start": "July 2023",
+        "end": "February 2026",
+        "display": "July 2023 – February 2026"
+      },
+      "bullets": [
+        {
+          "id": "lead_silentbball_b1",
+          "text": "Operated a direct-to-consumer ecommerce brand that generated 4M+ impressions across Instagram and TikTok",
+          "keywords": ["direct-to-consumer", "ecommerce", "4M+ impressions", "Instagram", "TikTok"],
+          "sources": ["src_main_resume_pdf"]
+        }
+      ],
+      "keywords": ["ecommerce", "store owner", "direct-to-consumer", "Instagram", "TikTok", "marketing"],
+      "sources": ["src_main_resume_pdf"]
+    }
+  ],
+  "education": [
+    {
+      "id": "edu_umass_amherst",
+      "institution": "University of Massachusetts Amherst",
+      "location": "Amherst, MA",
+      "degree": "Bachelor of Science in Computer Science",
+      "dates": {
+        "start": "August 2023",
+        "end": "December 2026",
+        "display": "August 2023 – December 2026"
+      },
+      "graduation": {
+        "default": "December 2026",
+        "rules": [
+          {
+            "id": "spring_coop",
+            "value": "May 2027",
+            "all_keyword_groups": [["spring"], ["co-op", "coop", "internship"]],
+            "sources": ["user_workflow"]
+          }
+        ]
+      },
+      "keywords": ["University of Massachusetts Amherst", "UMass Amherst", "Bachelor of Science", "Computer Science"],
+      "sources": ["src_main_resume_pdf"]
+    }
+  ],
+  "projects": [
+    {
+      "id": "proj_medical_billing_agent",
+      "name": "Medical Billing Agent",
+      "link": "",
+      "dates": {
+        "start": "June 2025",
+        "end": "September 2025",
+        "display": "June 2025 – September 2025"
+      },
+      "technologies": ["Python", "Docker", "Qdrant", "Firecrawl", "vLLM"],
+      "bullets": [
+        {
+          "id": "proj_medical_billing_agent_b1",
+          "text": "Built an AI-powered medical billing workflow using MedGemma-27B with vLLM inference to automate claim analysis, denial review, and appeal generation – operated under SOC2 and HIPAA compliance requirements",
+          "keywords": ["AI", "medical billing", "MedGemma-27B", "vLLM", "claim analysis", "denial review", "appeal generation", "SOC2", "HIPAA"],
+          "sources": ["src_main_resume_pdf", "src_personal_work_page"]
+        },
+        {
+          "id": "proj_medical_billing_agent_b2",
+          "text": "Developed a retrieval pipeline over thousands of medical documents using Firecrawl and Qdrant vector search",
+          "keywords": ["retrieval pipeline", "medical documents", "Firecrawl", "Qdrant", "vector search"],
+          "sources": ["src_main_resume_pdf"]
+        },
+        {
+          "id": "proj_medical_billing_agent_b3",
+          "text": "Implemented tool-calling workflows with REST APIs for policy lookup, denial analysis, and appeal generation, adopted by 10+ medical practices after project handoff",
+          "keywords": ["tool-calling", "REST APIs", "policy lookup", "denial analysis", "appeal generation", "10+ medical practices"],
+          "sources": ["src_main_resume_pdf"]
+        }
+      ],
+      "keywords": ["medical billing", "AI", "MedGemma-27B", "Python", "Docker", "Qdrant", "Firecrawl", "vLLM", "REST APIs", "SOC2", "HIPAA"],
+      "sources": ["src_main_resume_pdf", "src_personal_work_page"],
+      "enabled": true
+    },
+    {
+      "id": "proj_scenic_route_optimizer",
+      "name": "Scenic Route Optimizer",
+      "link": "https://github.com/Ian139/scenicDriver",
+      "dates": {
+        "start": "May 2025",
+        "end": "Present",
+        "display": "May 2025 – Present"
+      },
+      "technologies": ["Python", "PyTorch", "Mapbox", "OSMnx", "Hugging Face", "AWS (S3)"],
+      "bullets": [
+        {
+          "id": "proj_scenic_route_optimizer_b1",
+          "text": "Built a scenic routing engine scoring road segments from satellite imagery and terrain elevation using PyTorch, Mapbox, and OSMnx, deployed on AWS EC2 with S3 for geospatial data – generated 5,000+ training examples and scenic heatmaps",
+          "keywords": ["scenic routing", "road segments", "satellite imagery", "terrain elevation", "PyTorch", "Mapbox", "OSMnx", "AWS EC2", "S3", "geospatial data", "5,000+ training examples", "scenic heatmaps"],
+          "sources": ["src_main_resume_pdf", "src_personal_work_page"]
+        }
+      ],
+      "keywords": ["scenic routing", "machine learning", "Python", "PyTorch", "Mapbox", "OSMnx", "Hugging Face", "AWS", "geospatial data"],
+      "sources": ["src_main_resume_pdf", "src_personal_work_page"],
+      "enabled": true
+    }
+  ],
+  "others": {
+    "contact": {
+      "full_name": "Ian Rapko",
+      "phone": "215-694-0434",
+      "email": "ianrapko@gmail.com"
+    },
+    "links": {
+      "linkedin": "https://www.linkedin.com/in/ianrapko",
+      "github": "https://github.com/Ian139",
+      "website": "https://www.immemorized.com"
+    },
+    "sources": [
+      {
+        "id": "src_main_resume_pdf",
+        "type": "resume_pdf",
+        "location": "resume/Main_Resume.pdf",
+        "sha256": "a9253fa040457e68600782552b57aae04e7cab7cfc8577ddc96462e7f8856528",
+        "retrieved_at": "2026-07-22T00:17:40Z",
+        "notes": "Primary candidate resume; resume facts and technical skills are transcribed from this one-page PDF."
+      },
+      {
+        "id": "src_resume_tex_base",
+        "type": "resume_tex",
+        "location": "resume/Resume.tex",
+        "sha256": "a1decd3b51f383757e2ba267bcc38873e8678a2e9be04b8b81dd37398802fc53",
+        "retrieved_at": "2026-07-22T00:17:40Z",
+        "notes": "Editable base hash supplied by the contract for the file before generation markers were added."
+      },
+      {
+        "id": "src_personal_work_page",
+        "type": "personal_site",
+        "location": "https://www.immemorized.com/work.html",
+        "sha256": "a0bb2a78b358cbbdd3a32c067c373d19035a5eee42fa60be44cc99c90895abe2",
+        "retrieved_at": "2026-07-22T00:17:40Z",
+        "notes": "Public work-page corroboration; where dates differ, the main resume PDF remains authoritative."
+      },
+      {
+        "id": "src_github_profile_api",
+        "type": "github_api",
+        "location": "https://api.github.com/users/Ian139",
+        "sha256": "d8412f45e9a8af2b17511ffa8b2c8294d62ff16cd6ef4eb2387e68a6cd551c18",
+        "retrieved_at": "2026-07-22T00:17:40Z",
+        "notes": "Public profile metadata confirms Ian Rapko/Ian139, immemorized.com, and seven public repositories; only five are retained in this profile."
+      },
+      {
+        "id": "src_github_repositories_api",
+        "type": "github_api",
+        "location": "https://api.github.com/users/Ian139/repos?per_page=100&sort=full_name",
+        "sha256": "e6ab0409db8cda9b87147bb5c56608a3e0c4694892a8f653c4c1dc3745f1e40d",
+        "retrieved_at": "2026-07-22T00:17:40Z",
+        "notes": "Public repository inventory; repository metadata is retained as evidence and is not automatically a resume claim."
+      },
+      {
+        "id": "user_workflow",
+        "type": "user_policy",
+        "location": "coordinator-approved resume workflow policy",
+        "sha256": "8324b164e65cd9de7ff6a9d4393864ca198e2c18a222b40377a9c13719dedfb7",
+        "retrieved_at": "2026-07-22T00:17:40Z",
+        "notes": "User workflow policy: default graduation December 2026; spring plus co-op/coop/internship roles use May 2027."
+      }
+    ],
+    "public_repositories": [
+      {
+        "name": "olympus-contracts",
+        "url": "https://github.com/Ian139/olympus-contracts",
+        "description": "",
+        "primary_language": "",
+        "fork": true,
+        "created_at": "2021-11-07T03:09:45Z",
+        "updated_at": "2025-12-15T18:31:12Z",
+        "sources": ["src_github_repositories_api"],
+        "resume_eligible": false
+      },
+      {
+        "name": "olympus-frontend",
+        "url": "https://github.com/Ian139/olympus-frontend",
+        "description": "",
+        "primary_language": "",
+        "fork": true,
+        "created_at": "2021-11-07T03:09:57Z",
+        "updated_at": "2025-12-15T18:31:03Z",
+        "sources": ["src_github_repositories_api"],
+        "resume_eligible": false
+      },
+      {
+        "name": "olympus-subgraph",
+        "url": "https://github.com/Ian139/olympus-subgraph",
+        "description": "",
+        "primary_language": "",
+        "fork": true,
+        "created_at": "2021-11-07T03:11:25Z",
+        "updated_at": "2025-12-15T18:30:53Z",
+        "sources": ["src_github_repositories_api"],
+        "resume_eligible": false
+      },
+      {
+        "name": "Site",
+        "url": "https://github.com/Ian139/Site",
+        "description": "",
+        "primary_language": "HTML",
+        "fork": false,
+        "created_at": "2025-03-27T18:24:19Z",
+        "updated_at": "2026-07-14T05:28:28Z",
+        "sources": ["src_github_repositories_api"],
+        "resume_eligible": false
+      },
+      {
+        "name": "WeaponBalls",
+        "url": "https://github.com/Ian139/WeaponBalls",
+        "description": "",
+        "primary_language": "GDScript",
+        "fork": false,
+        "created_at": "2026-02-24T22:07:36Z",
+        "updated_at": "2026-03-28T15:59:35Z",
+        "sources": ["src_github_repositories_api"],
+        "resume_eligible": false
+      }
+    ],
+    "open_questions": [
+      {
+        "id": "linkedin_export",
+        "question": "Can you provide a LinkedIn export or plain text for any experience, skills, dates, or impact not present in the main resume?",
+        "reason": "LinkedIn content could not be retrieved (HTTP 999 and browser-device failure), so missing facts must not be inferred.",
+        "status": "open"
+      }
+    ]
+  }
+}

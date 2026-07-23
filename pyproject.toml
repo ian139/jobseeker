@@ -21,6 +21,7 @@ live = []
 [project.scripts]
 jobs-assistant = "jobs_assistant.cli:main"
 job-scrape = "jobs_assistant.cli:job_scrape_main"
+resume-generate = "jobs_assistant.resume_generator_command:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

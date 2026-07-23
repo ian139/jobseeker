@@ -97,6 +97,20 @@ Active source:
 - `tests/`: focused scraper/ingestion/backlog/TheirStack/CLI/autofill tests.
 - `scripts/smoke.sh`: repository smoke check script.
 
+Resume command ownership:
+
+- Top-level `resume-generate` uses
+  `src/jobs_assistant/resume_generator.py` and
+  `resume/generator/{profile.json,Resume.tex,SKILL.md}`; this is the canonical
+  standalone resume generator.
+- `jobs-assistant resume-generate` remains the preserved main-application
+  service with an incompatible API and artifact contract. Do not overlay the
+  two `resume.py` implementations; integrate through a deliberate adapter
+  later.
+
+- Its default artifacts live under `data/generated-resumes-generator/`, kept
+  separate from the main application's `data/generated-resumes/` contract.
+
 Archived applier source:
 
 - `archive/minimized-20260706/applier/`: removed first-principles active applier implementation; reference only and not a runnable package snapshot.

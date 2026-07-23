@@ -1,6 +1,6 @@
 # Resume Generation Skill
 
-Version: 1
+Version: 2
 
 This file is the governing instruction set for every generated resume. The
 resume generator must load this file, validate it, and include its exact
@@ -30,6 +30,23 @@ invalidates generation or creates a new cache identity.
 - Prefer concrete, truthful accomplishments over keyword repetition.
 - Keep unsupported or ambiguous requirements out of the resume and report them
   as unsupported rather than guessing.
+
+## One-page density policy
+
+- Treat the one-page limit as a density target, not permission to publish a
+  sparse resume. Fill the available page as closely as possible while keeping
+  every claim truthful, source-backed, and readable.
+- After selecting the strongest job-matched content, add additional
+  source-backed skills and then additional truthful bullets from lower-priority
+  experience, leadership, or projects when they fit without causing a second
+  page.
+- Require a Technical Skills line whenever the profile has supported skills;
+  include enough additional supported skills to fill at least one rendered
+  line whenever the one-page budget permits. Never invent a skill or repeat a
+  keyword solely to occupy space.
+- Prefer the fullest one-page result produced by these rules. If the next
+  supported skill or bullet would overflow to a second page, omit it and keep
+  the preceding one-page result.
 
 ## Graduation policy
 

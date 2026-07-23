@@ -63,12 +63,14 @@ _MAX_PROJECTS = 3
 _MAX_PROJECT_BULLETS = 4
 _MAX_LEADERSHIP = 2
 _MAX_SKILLS = 20
+_MIN_SKILLS_LINE_CHARS = 60
+_MAX_EXPANSION_ATTEMPTS = 64
 
 _ALGORITHM_DESCRIPTOR = (
     "title-first-requirements-field-selection-v3|source-backed-claims|graduation-render-v2|"
-    "experience-first-trim-v4|tectonic-pdflatex-bounded-argv-v1|"
+    "experience-first-fill-v2|tectonic-pdflatex-bounded-argv-v1|"
     "private-five-artifact-cache-v3|strict-profile-v1-header-metadata-v4|"
-    "authoritative-resume-skill-v1"
+    "authoritative-resume-skill-v2"
 )
 _ALGORITHM_SHA256 = hashlib.sha256(_ALGORITHM_DESCRIPTOR.encode("ascii")).hexdigest()
 
@@ -469,11 +471,10 @@ def _validate_skill_bytes(skill_bytes: bytes, skill_path: Path) -> str:
         raise ValueError(f"resume skill is not valid UTF-8: {exc}") from exc
     required = (
         "# Resume Generation Skill",
-        "Version: 1",
         "## Source-of-truth policy",
         "## Output invariants",
     )
-    if any(marker not in text for marker in required):
+    if any(marker not in text for marker in required) or re.search(r"(?m)^Version: [12]$", text) is None:
         raise ValueError(f"resume skill is malformed: {skill_path}")
     return _sha256_hex(skill_bytes)
 
@@ -1778,6 +1779,37 @@ def _replace_plan_selection(plan: ResumePlan, profile: ResumeProfile, selection:
     )
 
 
+def _replace_plan_skills(
+    plan: ResumePlan,
+    profile: ResumeProfile,
+    compressed_skills: tuple[str, ...],
+) -> ResumePlan:
+    if plan.selection is None:
+        raise RuntimeError("cannot replace skills without selection metadata")
+    sections = _render_selection(profile, plan.selection, plan.graduation_date, compressed_skills)
+    return ResumePlan(
+        field=plan.field,
+        graduation_date=plan.graduation_date,
+        header_text=plan.header_text,
+        sections=sections,
+        matched_keywords=plan.matched_keywords,
+        unsupported_keywords=plan.unsupported_keywords,
+        compressed_skills=compressed_skills,
+        selection=plan.selection,
+        evidence_inventory=plan.evidence_inventory,
+        requirement_terms=plan.requirement_terms,
+        job_terms=plan.job_terms,
+        coverage_ratio=plan.coverage_ratio,
+        graduation_rule=plan.graduation_rule,
+        selected_claims=_selected_claims(
+            profile,
+            plan.selection,
+            compressed_skills,
+            plan.graduation_rule,
+        ),
+    )
+
+
 def _remove_lowest_project_content(
     selection: _Selection,
     profile: ResumeProfile,
@@ -2028,6 +2060,258 @@ def _read_regular_child(
     return _snapshot_regular(path, max_bytes, label)
 
 
+def _ordered_bullet_ids(entry: Any, terms: Mapping[str, float]) -> tuple[str, ...]:
+    return tuple(
+        bullet.id
+        for bullet in sorted(
+            entry.bullets,
+            key=lambda bullet: (
+                -_score_text_against_terms(_bullet_text(bullet), terms),
+                entry.bullets.index(bullet),
+            ),
+        )
+    )
+
+
+def _expansion_candidates(
+    plan: ResumePlan,
+    profile: ResumeProfile,
+    job: ResumeJob,
+) -> tuple[ResumePlan, ...]:
+    if plan.selection is None:
+        raise RuntimeError("cannot expand a plan without selection metadata")
+    selection = plan.selection
+    terms = _job_term_weights(job.title, job.description, _infer_field(job.title, job.description))
+    candidates: list[ResumePlan] = []
+
+    selected_skills = {name.casefold() for name in plan.compressed_skills}
+    skill_rows = [
+        (
+            _score_text_against_terms(" ".join((category, entry.name, *entry.keywords)), terms),
+            entry.name,
+            category,
+            index,
+        )
+        for category, entries in sorted(profile.skills.items(), key=lambda item: (item[0].casefold(), item[0]))
+        for index, entry in enumerate(entries)
+    ]
+    skill_rows.sort(key=lambda item: (-item[0], item[1].casefold(), item[2].casefold(), item[3]))
+    seen_skills = set(selected_skills)
+    for _score, name, _category, _index in skill_rows:
+        if name.casefold() in seen_skills or len(plan.compressed_skills) + len(candidates) >= _MAX_SKILLS:
+            continue
+        seen_skills.add(name.casefold())
+        candidates.append(_replace_plan_skills(plan, profile, (*plan.compressed_skills, name)))
+
+    selected_exp = {entry_id: bullet_ids for entry_id, bullet_ids in selection.experience}
+    for entry in sorted(
+        profile.experience,
+        key=lambda value: (-_score_text_against_terms(_entry_text(value), terms), value.id),
+    ):
+        ordered = _ordered_bullet_ids(entry, terms)
+        chosen = selected_exp.get(entry.id)
+        if chosen is None:
+            experience = (*selection.experience, (entry.id, ordered[:1]))
+            candidates.append(
+                _replace_plan_selection(
+                    plan,
+                    profile,
+                    _Selection(experience, selection.leadership, selection.projects, selection.primary_experience),
+                )
+            )
+            continue
+        for bullet_id in ordered:
+            if bullet_id in chosen:
+                continue
+            experience = list(selection.experience)
+            index = next(i for i, pair in enumerate(experience) if pair[0] == entry.id)
+            experience[index] = (entry.id, (*chosen, bullet_id))
+            candidates.append(
+                _replace_plan_selection(
+                    plan,
+                    profile,
+                    _Selection(tuple(experience), selection.leadership, selection.projects, selection.primary_experience),
+                )
+            )
+
+    selected_leadership = {entry_id for entry_id, _bullet_ids in selection.leadership}
+    for entry in sorted(
+        profile.leadership,
+        key=lambda value: (-_score_text_against_terms(_entry_text(value), terms), value.id),
+    ):
+        if entry.id in selected_leadership or len(selection.leadership) >= _MAX_LEADERSHIP:
+            continue
+        leadership = (*selection.leadership, (entry.id, _ordered_bullet_ids(entry, terms)[:1]))
+        candidates.append(
+            _replace_plan_selection(
+                plan,
+                profile,
+                _Selection(selection.experience, leadership, selection.projects, selection.primary_experience),
+            )
+        )
+
+    selected_projects = {entry_id: bullet_ids for entry_id, bullet_ids in selection.projects}
+    for entry in sorted(
+        (value for value in profile.projects if value.enabled),
+        key=lambda value: (-_score_text_against_terms(_entry_text(value), terms), value.id),
+    ):
+        ordered = _ordered_bullet_ids(entry, terms)
+        chosen = selected_projects.get(entry.id)
+        if chosen is None:
+            if len(selection.projects) >= _MAX_PROJECTS:
+                continue
+            projects = (*selection.projects, (entry.id, ordered[:1]))
+        else:
+            if len(chosen) >= _MAX_PROJECT_BULLETS:
+                continue
+            extra = next((bullet_id for bullet_id in ordered if bullet_id not in chosen), None)
+            if extra is None:
+                continue
+            projects_list = list(selection.projects)
+            index = next(i for i, pair in enumerate(projects_list) if pair[0] == entry.id)
+            projects_list[index] = (entry.id, (*chosen, extra))
+            projects = tuple(projects_list)
+        candidates.append(
+            _replace_plan_selection(
+                plan,
+                profile,
+                _Selection(selection.experience, selection.leadership, projects, selection.primary_experience),
+            )
+        )
+    return tuple(candidates)
+
+
+def _expand_plan(
+    plan: ResumePlan,
+    profile: ResumeProfile,
+    job: ResumeJob,
+    template_text: str,
+    output_dir: Path,
+    compiler: str | Sequence[str],
+    initial_measure: tuple[int, str] | None = None,
+) -> ResumePlan:
+    """Add supported content while retaining the fullest one-page candidate."""
+    current = plan
+    if initial_measure is None:
+        pages, _text = _compile_plan(current, job, template_text, output_dir, compiler)
+    else:
+        pages, _text = initial_measure
+    if pages != 1:
+        raise RuntimeError(f"cannot expand resume with {pages} page(s)")
+    attempted: set[tuple[str, tuple[str, ...]]] = set()
+    expansion_attempts = 0
+    stage_matches_current = True
+
+    def action_key(candidate: ResumePlan) -> tuple[str, tuple[str, ...]]:
+        if candidate.selection == current.selection:
+            added_skills = tuple(
+                name
+                for name in candidate.compressed_skills
+                if name.casefold() not in {value.casefold() for value in current.compressed_skills}
+            )
+            return ("skill", tuple(value.casefold() for value in added_skills))
+        current_claims = {identifier for identifier, _sources in current.selected_claims}
+        candidate_claims = {identifier for identifier, _sources in candidate.selected_claims}
+        return ("claim", tuple(sorted(candidate_claims - current_claims)))
+
+    def run_phase(skills_only: bool) -> bool:
+        nonlocal current, stage_matches_current, expansion_attempts
+        while True:
+            if skills_only and len(", ".join(current.compressed_skills)) >= _MIN_SKILLS_LINE_CHARS:
+                return True
+            found_candidate = False
+            for candidate in _expansion_candidates(current, profile, job):
+                if skills_only:
+                    eligible = (
+                        candidate.selection == current.selection
+                        and candidate.compressed_skills != current.compressed_skills
+                    )
+                else:
+                    eligible = candidate.compressed_skills == current.compressed_skills
+                if not eligible:
+                    continue
+                key = action_key(candidate)
+                if expansion_attempts >= _MAX_EXPANSION_ATTEMPTS:
+                    return False
+                if key in attempted:
+                    continue
+                expansion_attempts += 1
+                attempted.add(key)
+                found_candidate = True
+                pages, _text = _compile_plan(candidate, job, template_text, output_dir, compiler)
+                stage_matches_current = False
+                if pages < 1:
+                    raise RuntimeError(f"generated resume has {pages} page(s)")
+                if pages == 1:
+                    current = candidate
+                    stage_matches_current = True
+                break
+            if not found_candidate:
+                return False
+
+    run_phase(True)
+    run_phase(False)
+    if not stage_matches_current:
+        _compile_plan(current, job, template_text, output_dir, compiler)
+    return current
+
+
+def _compile_plan(
+    plan: ResumePlan,
+    job: ResumeJob,
+    template_text: str,
+    output_dir: Path,
+    compiler: str | Sequence[str],
+) -> tuple[int, str]:
+    """Render and compile one plan, returning page count and extracted text."""
+    tex_path = output_dir / "resume.tex"
+    pdf_path = output_dir / "resume.pdf"
+    expected_tex = _render_resume(plan, template_text).encode("utf-8")
+    _write_private(
+        tex_path,
+        expected_tex,
+        max_bytes=_MAX_RESUME_TEX_BYTES,
+        label="resume.tex",
+    )
+    _write_private(
+        output_dir / "job_description.txt",
+        job.description.encode("utf-8"),
+        max_bytes=_MAX_JOB_DESCRIPTION_BYTES,
+        label="job_description.txt",
+    )
+    try:
+        pdf_info = os.lstat(pdf_path)
+    except FileNotFoundError:
+        pass
+    else:
+        if stat.S_ISLNK(pdf_info.st_mode) or not stat.S_ISREG(pdf_info.st_mode):
+            raise RuntimeError("resume.pdf path is unsafe before compilation")
+        os.unlink(pdf_path)
+    _compile_latex(tex_path, output_dir, compiler, _TRIM_TIMEOUT_SECONDS)
+    actual_tex = _read_regular_child(
+        tex_path,
+        label="generated resume.tex",
+        max_bytes=_MAX_RESUME_TEX_BYTES,
+        private=False,
+    )
+    if actual_tex != expected_tex:
+        raise RuntimeError("compiler modified rendered resume.tex")
+    actual_job = _read_regular_child(
+        output_dir / "job_description.txt",
+        label="generated job description",
+        max_bytes=_MAX_JOB_DESCRIPTION_BYTES,
+        private=False,
+    )
+    if actual_job != job.description.encode("utf-8"):
+        raise RuntimeError("compiler modified job_description.txt")
+    pdf_bytes = _read_regular_child(
+        pdf_path,
+        label="generated PDF",
+        max_bytes=_MAX_RESUME_PDF_BYTES,
+        private=False,
+    )
+    return _inspect_pdf_bytes(pdf_bytes)
+
 def _trim_plan(
     plan: ResumePlan,
     profile: ResumeProfile,
@@ -2035,59 +2319,18 @@ def _trim_plan(
     template_text: str,
     output_dir: Path,
     compiler: str | Sequence[str],
-) -> ResumePlan:
+) -> tuple[ResumePlan, tuple[int, str]]:
     """Compile/measure and trim in the contract's strict priority order."""
     if plan.selection is None:
         raise RuntimeError("cannot trim a plan without selection metadata")
     current = plan
-    tex_path = output_dir / "resume.tex"
-    pdf_path = output_dir / "resume.pdf"
-    job_description = job.description.encode("utf-8")
     trim_terms = _job_term_weights(job.title, job.description, _infer_field(job.title, job.description))
     for _attempt in range(256):
-        expected_tex = _render_resume(current, template_text).encode("utf-8")
-        _write_private(
-            tex_path,
-            expected_tex,
-            max_bytes=_MAX_RESUME_TEX_BYTES,
-            label="resume.tex",
-        )
-        try:
-            pdf_info = os.lstat(pdf_path)
-        except FileNotFoundError:
-            pass
-        else:
-            if stat.S_ISLNK(pdf_info.st_mode) or not stat.S_ISREG(pdf_info.st_mode):
-                raise RuntimeError("resume.pdf path is unsafe before compilation")
-            os.unlink(pdf_path)
-        _compile_latex(tex_path, output_dir, compiler, _TRIM_TIMEOUT_SECONDS)
-        actual_tex = _read_regular_child(
-            tex_path,
-            label="generated resume.tex",
-            max_bytes=_MAX_RESUME_TEX_BYTES,
-            private=False,
-        )
-        if actual_tex != expected_tex:
-            raise RuntimeError("compiler modified rendered resume.tex")
-        actual_job = _read_regular_child(
-            output_dir / "job_description.txt",
-            label="generated job description",
-            max_bytes=_MAX_JOB_DESCRIPTION_BYTES,
-            private=False,
-        )
-        if actual_job != job_description:
-            raise RuntimeError("compiler modified job_description.txt")
-        pdf_bytes = _read_regular_child(
-            pdf_path,
-            label="generated PDF",
-            max_bytes=_MAX_RESUME_PDF_BYTES,
-            private=False,
-        )
-        pages, _text = _inspect_pdf_bytes(pdf_bytes)
+        pages, text = _compile_plan(current, job, template_text, output_dir, compiler)
         if pages == 1:
-            return current
+            return current, (pages, text)
         if pages < 1:
-            raise RuntimeError(f"generated PDF has {pages} page(s)")
+            raise RuntimeError(f"generated resume has {pages} page(s)")
         selection = current.selection
         if selection is None:
             raise RuntimeError("cannot trim a plan without selection metadata")
@@ -2446,49 +2689,22 @@ def generate_resume(
         tex_path = stage / "resume.tex"
         pdf_path = stage / "resume.pdf"
         expected_job = job.description.encode("utf-8")
-        expected_tex = _render_resume(plan, template_text).encode("utf-8")
-        _write_private(
-            tex_path,
-            expected_tex,
-            max_bytes=_MAX_RESUME_TEX_BYTES,
-            label="resume.tex",
-        )
-        _write_private(
-            stage / "job_description.txt",
-            expected_job,
-            max_bytes=_MAX_JOB_DESCRIPTION_BYTES,
-            label="job_description.txt",
-        )
-        _compile_latex(tex_path, stage, resolved_compiler, _COMPILE_TIMEOUT_SECONDS)
-
-        actual_tex = _read_regular_child(
-            tex_path,
-            label="generated resume.tex",
-            max_bytes=_MAX_RESUME_TEX_BYTES,
-            private=False,
-        )
-        if actual_tex != expected_tex:
-            raise RuntimeError("compiler modified rendered resume.tex")
-        actual_job = _read_regular_child(
-            stage / "job_description.txt",
-            label="generated job description",
-            max_bytes=_MAX_JOB_DESCRIPTION_BYTES,
-            private=False,
-        )
-        if actual_job != expected_job:
-            raise RuntimeError("compiler modified job_description.txt")
-        pdf_bytes = _read_regular_child(
-            pdf_path,
-            label="generated PDF",
-            max_bytes=_MAX_RESUME_PDF_BYTES,
-            private=False,
-        )
-        pages, _text = _inspect_pdf_bytes(pdf_bytes)
+        pages, text = _compile_plan(plan, job, template_text, stage, resolved_compiler)
         if pages < 1:
-            raise RuntimeError(f"generated PDF has {pages} page(s)")
+            raise RuntimeError(f"generated resume has {pages} page(s)")
         if pages != 1:
-            plan = _trim_plan(plan, profile, job, template_text, stage, resolved_compiler)
-
+            plan, measure = _trim_plan(plan, profile, job, template_text, stage, resolved_compiler)
+        else:
+            measure = (pages, text)
+        plan = _expand_plan(
+            plan,
+            profile,
+            job,
+            template_text,
+            stage,
+            resolved_compiler,
+            initial_measure=measure,
+        )
         expected_tex = _render_resume(plan, template_text).encode("utf-8")
         actual_tex = _read_regular_child(
             tex_path,

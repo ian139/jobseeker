@@ -134,7 +134,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-root",
         type=Path,
         default=DEFAULT_OUTPUT_ROOT,
-        help="output root directory (default: data/generated-resumes)",
+        help="output root directory (default: data/generated-resumes-generator)",
     )
     parser.add_argument(
         "--limit",

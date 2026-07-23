@@ -276,6 +276,8 @@ def main() -> int:
         raise SystemExit(23)
     if os.environ.get("FAKE_ALWAYS_TWO") == "1":
         page_count = 2
+    elif os.environ.get("FAKE_PAGE_LIMIT"):
+        page_count = int(len(source) > int(os.environ["FAKE_PAGE_LIMIT"])) + 1
     elif os.environ.get("FAKE_TRIM_MODE") == "1":
         page_count = int("Optional Experience" in source) + 1
     else:
@@ -449,12 +451,18 @@ def test_shipped_profile_and_template_generate_with_fixture_compiler(tmp_path: P
     assert template.count("%%RESUME_HEADER%%") == 1
     assert template.count("%%RESUME_SECTIONS%%") == 1
     assert "`resume/generator/profile.json`" in skill_path.read_text(encoding="utf-8")
+    assert "## One-page density policy" in skill_path.read_text(encoding="utf-8")
+    assert "at least one rendered\n  line" in skill_path.read_text(encoding="utf-8")
+
+    help_text = resume_command.build_parser().format_help()
+    assert "data/generated-resumes-generator" in "".join(help_text.split())
 
     result = generate_resume(
         _job(description="Requirements:\n- Python\n- AWS\n- Docker"),
         profile_path=profile_path,
         template_path=template_path,
         output_root=tmp_path / "output",
+
         compiler=str(_write_fake_compiler(tmp_path / "pdflatex")),
     )
 
@@ -463,6 +471,67 @@ def test_shipped_profile_and_template_generate_with_fixture_compiler(tmp_path: P
     claim_ids = {claim["id"] for claim in report["selected_claims"]}
     assert claim_ids
     assert {"contact", "links"}.isdisjoint(claim_ids)
+
+def test_generation_fills_skills_before_lower_priority_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = copy.deepcopy(_base_profile())
+    payload["skills"]["Platforms"] = [
+        {
+            "name": name,
+            "keywords": [name],
+            "sources": [SOURCE_ID],
+        }
+        for name in (
+            "Distributed Systems",
+            "Infrastructure Automation",
+            "Kubernetes Platform",
+            "Observability Engineering",
+        )
+    ]
+    leadership = _leadership("lead-filler")
+    leadership["keywords"] = ["Leadership"]
+    leadership["title"] = "Student Organizer"
+    leadership["bullets"][0]["text"] = "Coordinated student events"
+    leadership["bullets"][0]["keywords"] = ["Leadership"]
+    payload["leadership"] = [leadership]
+    profile_path = _write_profile(tmp_path / "profile.json", payload)
+    template_path = _write_template(tmp_path / "Resume.tex")
+    profile = load_resume_profile(profile_path)
+    template_text = template_path.read_text(encoding="utf-8")
+    job = _job(description="Requirements:\n- Python")
+    plan = optimize_resume(profile, job)
+    skill_plan = plan
+    for _attempt in range(resume_module._MAX_SKILLS):
+        candidates = tuple(
+            candidate
+            for candidate in resume_module._expansion_candidates(skill_plan, profile, job)
+            if candidate.selection == skill_plan.selection
+            and candidate.compressed_skills != skill_plan.compressed_skills
+        )
+        if len(", ".join(skill_plan.compressed_skills)) >= resume_module._MIN_SKILLS_LINE_CHARS:
+            break
+        assert candidates
+        skill_plan = candidates[0]
+    assert len(", ".join(skill_plan.compressed_skills)) >= resume_module._MIN_SKILLS_LINE_CHARS
+    monkeypatch.setenv(
+        "FAKE_PAGE_LIMIT",
+        str(len(resume_module._render_resume(skill_plan, template_text))),
+    )
+
+    result = generate_resume(
+        job,
+        profile_path=profile_path,
+        template_path=template_path,
+        output_root=tmp_path / "output",
+        compiler=str(_write_fake_compiler(tmp_path / "pdflatex")),
+    )
+
+    report = json.loads(result.report_path.read_text(encoding="utf-8"))
+    assert result.pages == 1
+    assert report["compressed_skills"] == list(skill_plan.compressed_skills)
+    assert len(", ".join(report["compressed_skills"])) >= resume_module._MIN_SKILLS_LINE_CHARS
+    assert "Leadership" not in report["sections"]
 
 def test_generation_requires_authoritative_skill_file(tmp_path: Path) -> None:
     profile_path = _write_profile(tmp_path / "profile.json")
@@ -1119,14 +1188,18 @@ def test_generation_trims_projects_leadership_then_optional_extra_bullets(
         {"projects": 0, "leadership": False, "primary3": True, "optional": True, "optional_bullets": 2},
         {"projects": 0, "leadership": False, "primary3": True, "optional": True, "optional_bullets": 1},
         {"projects": 0, "leadership": False, "primary3": True, "optional": False, "optional_bullets": 0},
+        {"projects": 0, "leadership": False, "primary3": True, "optional": True, "optional_bullets": 1},
+        {"projects": 0, "leadership": True, "primary3": True, "optional": False, "optional_bullets": 0},
+        {"projects": 1, "leadership": True, "primary3": True, "optional": False, "optional_bullets": 0},
+        {"projects": 1, "leadership": True, "primary3": True, "optional": False, "optional_bullets": 0},
     ]
     final_tex = result.tex_path.read_text(encoding="utf-8")
     assert "Primary bullet 1" in final_tex
     assert "Primary bullet 2" in final_tex
     assert "Primary bullet 3" in final_tex
     assert "Optional Experience" not in final_tex
-    assert "\\section{Leadership}" not in final_tex
-    assert "\\resumeProjectHeading" not in final_tex
+    assert "\\section{Leadership}" in final_tex
+    assert "\\resumeProjectHeading" in final_tex
 
 
 def test_generation_fails_closed_when_controlled_fixture_never_fits(

@@ -66,20 +66,8 @@ class StoredJobInfo:
     discovered_at: str | None
 
 
-@dataclass(frozen=True)
-class SyncRunInfo:
-    id: int | None = None
-    success: bool = False
-    jobs_returned: int = 0
-    jobs_inserted: int = 0
-    jobs_updated: int = 0
-    error: str | None = None
 
 
-@dataclass(frozen=True)
-class CreditEstimate:
-    dry_run_credits: int = 0
-    paid_mode_max_credits: int = 0
 
 
 @dataclass(frozen=True, init=False)

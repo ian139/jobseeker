@@ -52,6 +52,20 @@ def _date_posted_value(raw: dict[str, Any]) -> str | None:
             return value
     return None
 
+def normalize_job_metadata(
+    raw: Mapping[str, Any],
+) -> tuple[str | None, bool | None, str | None, str | None]:
+    """Normalize the metadata shared by source-specific job adapters."""
+    if not isinstance(raw, Mapping):
+        raise ValueError("job source record must be an object")
+    raw_record = raw if isinstance(raw, dict) else dict(raw)
+    return (
+        _location_value(raw_record),
+        _remote_value(raw_record),
+        _date_posted_value(raw_record),
+        _description_value(raw_record),
+    )
+
 
 def _validated_job_records(raw_jobs: Iterable[Any]) -> list[dict[str, Any]]:
     try:
@@ -96,17 +110,18 @@ def normalize_source_job(raw: Mapping[str, Any]) -> SourceJob:
     company = raw_record.get("company") or raw_record.get("company_name")
     if isinstance(company, dict):
         company = company.get("name")
+    location, remote, date_posted, description = normalize_job_metadata(raw_record)
     return SourceJob(
         external_id=None if external_id is None else str(external_id),
         title=str(title or "Untitled role"),
         company=None if company is None else str(company),
         listing_url=None if raw_record.get("listing_url") is None else str(raw_record.get("listing_url")),
         apply_url=None if (raw_record.get("apply_url") or raw_record.get("url")) is None else str(raw_record.get("apply_url") or raw_record.get("url")),
-        date_posted=_date_posted_value(raw_record),
+        date_posted=date_posted,
         raw=raw_record,
-        location=_location_value(raw_record),
-        remote=_remote_value(raw_record),
-        description=_description_value(raw_record),
+        location=location,
+        remote=remote,
+        description=description,
     )
 
 

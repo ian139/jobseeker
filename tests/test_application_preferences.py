@@ -379,7 +379,6 @@ def test_preference_descriptor_rejects_malformed_mode_and_option_metadata() -> N
         normalize_field_descriptor(
             {
                 "target_id": "skills",
-                "options": [("python", "Python", 1)],
                 "label": "Skills",
                 "kind": "select",
                 "options": [{"value": "python", "label": "Python", "enabled": True}],

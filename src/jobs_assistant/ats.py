@@ -32,6 +32,7 @@ from .safety import (
     DescriptorSafety,
     GreenhouseRouteDecision,
     SUPPORTED_ATS_POLICIES,
+    classify_ats_url,
     classify_descriptors,
     classify_greenhouse_form_action,
     classify_greenhouse_request,
@@ -40,13 +41,8 @@ from .safety import (
 )
 
 SUPPORTED_ATS = tuple(SUPPORTED_ATS_POLICIES)
-SUPPORTED_ATS_IDENTIFIERS = SUPPORTED_ATS
 SUPPORTED_FIELD_ANSWER_ATS = frozenset((*SUPPORTED_ATS, "*"))
 
-try:
-    from .browser_adapter import validate_lever_url
-except ImportError:  # pragma: no cover - only protects import-cycle tooling
-    validate_lever_url = None  # type: ignore[assignment]
 
 MAX_RESUME_BYTES = 10 * 1024 * 1024
 MAX_RESUME_TEXT_CHARS = 100_000
@@ -80,7 +76,6 @@ __all__ = (
     "ResumeContext",
     "ResumeFacts",
     "SUPPORTED_ATS",
-    "SUPPORTED_ATS_IDENTIFIERS",
     "SUPPORTED_FIELD_ANSWER_ATS",
     "classify_greenhouse_form_action",
     "classify_greenhouse_request",
@@ -726,15 +721,9 @@ class LeverAdapter(GreenhouseAdapter):
 
     def matches(self, url: str, html: str) -> bool:
         del html
-        return bool(validate_lever_url is not None and _lever_url_allowed(url))
+        return classify_ats_url(url, ats_policy="lever").allowed
 
 
-def _lever_url_allowed(url: str) -> bool:
-    try:
-        validate_lever_url(url)  # type: ignore[misc]
-    except Exception:
-        return False
-    return True
 
 
 def _fact_values(source: Mapping[str, Any], canonical: str) -> tuple[str, ...]:

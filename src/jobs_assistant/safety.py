@@ -465,8 +465,10 @@ def _public_url(url: str, policy: SafetyPolicy) -> tuple[Any, str]:
         raise _RouteReject("https_required")
     if parts.username is not None or parts.password is not None:
         raise _RouteReject("userinfo_rejected")
-    if parts.fragment:
+    if parts.fragment or "#" in url:
         raise _RouteReject("fragment_rejected")
+    if "?" in url and not parts.query:
+        raise _RouteReject("invalid_query")
     if not host:
         raise _RouteReject("host_required")
     host = host.lower().rstrip(".")
@@ -867,8 +869,6 @@ def classify_greenhouse_redirect(
     return classify_greenhouse_request(url, request_class="initial", redirect_count=redirect_count, policy=policy)
 
 
-classify_greenhouse_route = classify_greenhouse_url
-classify_greenhouse_form = classify_greenhouse_form_action
 
 
 def classify_greenhouse_route_vector(
@@ -953,12 +953,3 @@ def classify_greenhouse_static(
         policy=active_policy,
         redirect_count=redirect_count,
     )
-
-
-greenhouse_static_request = classify_greenhouse_static
-greenhouse_frame_origin_allowed = is_greenhouse_interactive_origin
-load_route_policy = load_ats_route_policy
-classify_route = classify_ats_url
-classify_form_action = classify_ats_form_action
-classify_request = classify_ats_request
-classify_frame_origin = classify_ats_frame_origin

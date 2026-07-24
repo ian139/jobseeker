@@ -6,6 +6,8 @@ import hashlib
 import json
 import httpx
 import os
+import signal
+import weakref
 import re
 import secrets
 import sqlite3
@@ -16,6 +18,24 @@ from collections.abc import Mapping
 
 from html.parser import HTMLParser
 
+from .application_rpc import (
+    ApplicationRpcCoordinator,
+    ApplicationRpcDurabilityError,
+    ApplicationRpcServiceConfig,
+    ApplicationRpcServiceError,
+    public_rpc_event,
+    resolve_application_rpc_identity,
+)
+from .application_rpc_contracts import (
+    MAX_APPLICATION_JSON_BYTES,
+    build_rejected_application_response,
+    parse_application_response,
+)
+from .omp_rpc import (
+    DEFAULT_PROFILE as DEFAULT_OMP_PROFILE,
+    OmpRpcError,
+    OmpRpcLaunchConfig,
+)
 from . import __version__
 from .application import (
     AnnotationError,
@@ -24,9 +44,16 @@ from .application import (
     run_application_workflow,
 )
 from .artifacts import ArtifactRoot, ArtifactSecurityError
+from .resume_artifacts import ResumeArtifactSecurityError
 from .browser_adapter import BrowserAdapterError, PuppeteerSession
-from .contracts import ATSFilter, PublicReasonCode
-from .ats import SUPPORTED_ATS, load_application_profile, load_applicant_description, load_resume_context
+from .contracts import ATSFilter, ApplicationClaim, PublicReasonCode, thaw_json
+from .ats import (
+    SUPPORTED_ATS,
+    load_applicant_description,
+    load_application_profile,
+    load_application_profile_snapshot,
+    load_resume_context,
+)
 from .application_preferences import (
     APPLICATION_PREFERENCES_SCHEMA_VERSION,
     ApplicationPreferences,
@@ -52,6 +79,7 @@ from .application_profiles import load_application_profile_preset
 from .db import (
     REASON_STATUS,
     canonicalize_url,
+    claim_application_job_with_generated_resume,
     complete_review,
     connect,
     connect_read_only,
@@ -85,10 +113,22 @@ from .theirstack import (
     sync_theirstack_response,
     validate_ats_filter_name,
 )
+from .resume_service import (
+    generate_resume,
+    list_public_generated_resumes,
+    resolve_generated_resume,
+    show_generated_resume,
+)
 
 DEFAULT_DB = Path(os.environ.get("DATABASE_URL", "data/jobs.sqlite3"))
 DEFAULT_RESUME_FILE = Path("resume/Main_Resume.pdf")
 DEFAULT_ARTIFACT_ROOT = Path("data/application-runs")
+DEFAULT_RESUME_ARTIFACT_ROOT = Path("data/generated-resumes")
+class _DefaultResumeFile(str):
+    """Sentinel type allowing equality with DEFAULT_RESUME_FILE while tracking default provenance."""
+    pass
+
+_DEFAULT_RESUME_FILE_STR = _DefaultResumeFile(DEFAULT_RESUME_FILE)
 _AUTOFILL_STATUSES = frozenset({"review_ready", "manual", "blocked", "failed"})
 _AUTOFILL_REASON_CODES = frozenset(code.value for code in PublicReasonCode if code.value != "legacy_run")
 _REVIEW_REASON_CODES = frozenset(code.value for code in PublicReasonCode)
@@ -114,6 +154,12 @@ _REVIEW_STATUSES = frozenset({"running", "review_ready", "manual", "blocked", "f
 _REVIEW_OUTCOMES = frozenset({"submitted", "skipped", "retry"})
 _REVIEW_WINDOW_STATES = frozenset({"open", "starting", "prepared", "closed", "stale", "failed", "none", "unknown"})
 MAX_BACKLOG_DESCRIPTION_CHARS = 12_000
+
+_APPLICATION_RPC_SIGNAL_NUMBERS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+_APPLICATION_RPC_READ_CHUNK_BYTES = 64 * 1024
+_APPLICATION_RPC_INPUT_BUFFERS: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[int, bytearray]
+] = weakref.WeakKeyDictionary()
 
 
 class _BacklogPlainTextParser(HTMLParser):
@@ -194,6 +240,167 @@ class _CliFailure(RuntimeError):
         super().__init__(code)
         self.code = code
 
+_APPLICATION_RPC_TRUSTED_STANDARD_DIRS = (
+    Path("/usr/local/bin"),
+    Path("/opt/homebrew/bin"),
+    Path("/usr/bin"),
+    Path("/bin"),
+)
+
+
+def _application_rpc_cwd() -> Path:
+    try:
+        return Path.cwd().resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise _CliFailure("invalid_input") from exc
+
+
+def _application_rpc_absolute_path(raw: object, *, cwd: Path) -> Path:
+    if not isinstance(raw, (str, os.PathLike)):
+        raise _CliFailure("invalid_input")
+    try:
+        value = os.fspath(raw)
+        if isinstance(value, bytes):
+            raise _CliFailure("invalid_input")
+        path = Path(value)
+    except (TypeError, ValueError, OSError) as exc:
+        raise _CliFailure("invalid_input") from exc
+    if not path.is_absolute():
+        path = cwd / path
+    if not path.is_absolute() or ".." in path.parts or "\x00" in str(path):
+        raise _CliFailure("invalid_input")
+    return path
+
+
+def _application_rpc_safe_directory(path: Path) -> bool:
+    try:
+        info = path.lstat()
+        return (
+            stat.S_ISDIR(info.st_mode)
+            and not stat.S_ISLNK(info.st_mode)
+            and info.st_uid in {0, os.getuid()}
+            and not bool(stat.S_IMODE(info.st_mode) & 0o022)
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def _application_rpc_safe_real_executable(path: Path) -> bool:
+    try:
+        info = path.lstat()
+        return (
+            stat.S_ISREG(info.st_mode)
+            and not stat.S_ISLNK(info.st_mode)
+            and info.st_uid in {0, os.getuid()}
+            and not bool(stat.S_IMODE(info.st_mode) & 0o022)
+            and bool(info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+            and path.resolve(strict=True) == path
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _application_rpc_safe_bun(path: Path) -> bool:
+    """Check a ``bun`` command without resolving through ambient ``PATH``."""
+    try:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            path = path.resolve(strict=True)
+            info = path.lstat()
+        return (
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid in {0, os.getuid()}
+            and not bool(stat.S_IMODE(info.st_mode) & 0o022)
+            and bool(info.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH))
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _application_rpc_project_root() -> Path:
+    try:
+        return Path(__file__).resolve(strict=True).parents[2]
+    except (OSError, RuntimeError, IndexError) as exc:
+        raise _CliFailure("invalid_input") from exc
+
+
+def _application_rpc_trusted_path(project_root: Path, *, require_bun: bool = True) -> tuple[str, ...]:
+    """Build the only PATH allowed in a native OMP child."""
+    pinned_bin = project_root / "node_modules" / ".bin"
+    candidates: list[Path] = []
+    if _application_rpc_safe_directory(pinned_bin):
+        candidates.append(pinned_bin)
+    candidates.extend(path for path in _APPLICATION_RPC_TRUSTED_STANDARD_DIRS if _application_rpc_safe_directory(path))
+    if not candidates or (require_bun and not any(_application_rpc_safe_bun(path / "bun") for path in candidates)):
+        raise _CliFailure("invalid_input")
+    return tuple(str(path) for path in candidates)
+
+
+def _application_rpc_omp_launch_config(args: argparse.Namespace) -> OmpRpcLaunchConfig:
+    cwd = _application_rpc_cwd()
+    project_root = _application_rpc_project_root()
+    explicit_executable = getattr(args, "omp_executable", None)
+    environment_executable = os.environ.get("JOBS_ASSISTANT_OMP_EXECUTABLE")
+    if explicit_executable is not None:
+        executable_raw = explicit_executable
+    else:
+        executable_raw = environment_executable or (
+            project_root / "node_modules" / "@oh-my-pi" / "pi-coding-agent" / "dist" / "cli.js"
+        )
+    executable = _application_rpc_absolute_path(executable_raw, cwd=cwd)
+    if not _application_rpc_safe_real_executable(executable):
+        raise _CliFailure("invalid_input")
+    runtime_root_raw = getattr(args, "omp_runtime_root", None)
+    if runtime_root_raw is None:
+        runtime_root_raw = Path("data/omp-rpc")
+    runtime_root = _application_rpc_absolute_path(runtime_root_raw, cwd=cwd)
+    trusted_path = _application_rpc_trusted_path(
+        project_root,
+        require_bun=explicit_executable is None and environment_executable is None,
+    )
+    auth_env = {
+        name: value
+        for name in ("OMP_AUTH_BROKER_URL", "OMP_AUTH_BROKER_TOKEN", "OPENAI_API_KEY")
+        if (value := os.environ.get(name))
+    }
+    try:
+        config = OmpRpcLaunchConfig(
+            executable=executable,
+            runtime_root=runtime_root,
+            profile=getattr(args, "omp_profile", DEFAULT_OMP_PROFILE),
+            trusted_path=trusted_path,
+            proxy_env={},
+            auth_env=auth_env,
+        )
+        config.validate_static()
+    except (OmpRpcError, OSError, TypeError, ValueError) as exc:
+        raise _CliFailure("invalid_input") from exc
+    return config
+
+
+def _application_rpc_service_config(
+    args: argparse.Namespace,
+    *,
+    event_callback: object | None,
+) -> ApplicationRpcServiceConfig:
+    try:
+        return ApplicationRpcServiceConfig(
+            db_path=args.db,
+            artifact_root=args.artifact_root,
+            resume_file=args.resume_file,
+            application_profile_json=args.application_profile_json,
+            application_profile_preset=args.application_profile_preset,
+            application_profile_dir=args.application_profile_dir,
+            application_preferences=args.application_preferences,
+            applicant_description_file=args.applicant_description_file,
+            ats=args.ats,
+            headed=True,
+            omp_launch_config=_application_rpc_omp_launch_config(args),
+            event_callback=event_callback,
+        )
+    except (ApplicationRpcServiceError, OmpRpcError, OSError, TypeError, ValueError) as exc:
+        raise _CliFailure("invalid_input") from exc
+
 
 def _emit_failure(code: str) -> int:
     """Write the one permitted redacted runtime error and return failure status."""
@@ -206,6 +413,299 @@ def _emit_failure(code: str) -> int:
         file=sys.stderr,
     )
     return 1
+
+
+def _application_rpc_trim_line(raw: object) -> tuple[str | None, bool]:
+    """Decode one bounded JSONL record and flag an oversized payload."""
+    if raw in ("", b""):
+        return None, False
+    if isinstance(raw, bytes):
+        payload = raw
+        if payload.endswith(b"\n"):
+            payload = payload[:-1]
+            if payload.endswith(b"\r"):
+                payload = payload[:-1]
+        if len(payload) > MAX_APPLICATION_JSON_BYTES:
+            return None, True
+        try:
+            return payload.decode("utf-8"), False
+        except UnicodeDecodeError:
+            return None, False
+    if not isinstance(raw, str):
+        return None, False
+    payload = raw[:-1] if raw.endswith("\n") else raw
+    if payload.endswith("\r"):
+        payload = payload[:-1]
+    try:
+        if len(payload.encode("utf-8")) > MAX_APPLICATION_JSON_BYTES:
+            return None, True
+    except UnicodeEncodeError:
+        return None, False
+    return payload, False
+
+
+def _application_rpc_fileno(source: object) -> int | None:
+    fileno = getattr(source, "fileno", None)
+    if not callable(fileno):
+        return None
+    try:
+        value = fileno()
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    return value if type(value) is int and value >= 0 else None
+
+
+async def _application_rpc_read_fallback(source: object) -> object:
+    readline = getattr(source, "readline", None)
+    if not callable(readline):
+        return ""
+    return await asyncio.to_thread(readline, MAX_APPLICATION_JSON_BYTES + 2)
+
+
+async def _application_rpc_read_fd_line(
+    loop: asyncio.AbstractEventLoop, fd: int, source: object
+) -> bytes:
+    buffers = _APPLICATION_RPC_INPUT_BUFFERS.get(loop)
+    if buffers is None:
+        buffers = {}
+        _APPLICATION_RPC_INPUT_BUFFERS[loop] = buffers
+    buffer = buffers.setdefault(fd, bytearray())
+
+    while True:
+        newline = buffer.find(b"\n")
+        if newline >= 0:
+            end = newline + 1
+            raw = bytes(buffer[:end])
+            del buffer[:end]
+            return raw
+        if len(buffer) >= MAX_APPLICATION_JSON_BYTES + 2:
+            raw = bytes(buffer)
+            buffer.clear()
+            return raw
+
+        future = loop.create_future()
+
+        def on_readable() -> None:
+            if future.done():
+                return
+            try:
+                size = min(
+                    _APPLICATION_RPC_READ_CHUNK_BYTES,
+                    MAX_APPLICATION_JSON_BYTES + 2 - len(buffer),
+                )
+                chunk = os.read(fd, size)
+            except BlockingIOError:
+                return
+            except Exception as exc:
+                if not future.done():
+                    future.set_exception(exc)
+                return
+            if not future.done():
+                future.set_result(chunk)
+
+        try:
+            loop.add_reader(fd, on_readable)
+        except (AttributeError, NotImplementedError, OSError, RuntimeError, ValueError):
+            buffers.pop(fd, None)
+            return await _application_rpc_read_fallback(source)
+        try:
+            chunk = await future
+        finally:
+            try:
+                loop.remove_reader(fd)
+            except (AttributeError, OSError, RuntimeError, ValueError):
+                pass
+
+        if not chunk:
+            if buffer:
+                raw = bytes(buffer)
+                buffer.clear()
+                return raw
+            buffers.pop(fd, None)
+            return b""
+        buffer.extend(chunk)
+
+
+async def _application_rpc_read_line(stream: object) -> object:
+    source = getattr(stream, "buffer", stream)
+    fd = _application_rpc_fileno(source)
+    if fd is None:
+        return await _application_rpc_read_fallback(source)
+    return await _application_rpc_read_fd_line(asyncio.get_running_loop(), fd, source)
+
+
+async def _application_rpc_discard_fallback(source: object) -> None:
+    readline = getattr(source, "readline", None)
+    if not callable(readline):
+        return
+    while True:
+        raw = await asyncio.to_thread(readline, _APPLICATION_RPC_READ_CHUNK_BYTES)
+        if raw in ("", b""):
+            return
+        if isinstance(raw, bytes):
+            if b"\n" in raw:
+                return
+        elif isinstance(raw, str):
+            if "\n" in raw:
+                return
+        else:
+            return
+
+
+async def _application_rpc_discard_fd_line(
+    loop: asyncio.AbstractEventLoop, fd: int, source: object
+) -> None:
+    buffers = _APPLICATION_RPC_INPUT_BUFFERS.get(loop)
+    if buffers is None:
+        buffers = {}
+        _APPLICATION_RPC_INPUT_BUFFERS[loop] = buffers
+    buffer = buffers.setdefault(fd, bytearray())
+    newline = buffer.find(b"\n")
+    if newline >= 0:
+        del buffer[: newline + 1]
+        return
+    buffer.clear()
+
+    while True:
+        future = loop.create_future()
+
+        def on_readable() -> None:
+            if future.done():
+                return
+            try:
+                chunk = os.read(fd, _APPLICATION_RPC_READ_CHUNK_BYTES)
+            except BlockingIOError:
+                return
+            except Exception as exc:
+                if not future.done():
+                    future.set_exception(exc)
+                return
+            if not future.done():
+                future.set_result(chunk)
+
+        try:
+            loop.add_reader(fd, on_readable)
+        except (AttributeError, NotImplementedError, OSError, RuntimeError, ValueError):
+            buffers.pop(fd, None)
+            await _application_rpc_discard_fallback(source)
+            return
+        try:
+            chunk = await future
+        finally:
+            try:
+                loop.remove_reader(fd)
+            except (AttributeError, OSError, RuntimeError, ValueError):
+                pass
+        if not chunk:
+            buffers.pop(fd, None)
+            return
+        newline = chunk.find(b"\n")
+        if newline < 0:
+            continue
+        buffer.clear()
+        buffer.extend(chunk[newline + 1 :])
+        return
+
+
+async def _application_rpc_discard_line(stream: object) -> None:
+    source = getattr(stream, "buffer", stream)
+    fd = _application_rpc_fileno(source)
+    if fd is None:
+        await _application_rpc_discard_fallback(source)
+        return
+    await _application_rpc_discard_fd_line(asyncio.get_running_loop(), fd, source)
+
+
+def _application_rpc_raw_has_newline(raw: object) -> bool:
+    if isinstance(raw, bytes):
+        return b"\n" in raw
+    return isinstance(raw, str) and "\n" in raw
+
+
+def _application_rpc_rejection(raw: object, code: str = "invalid_request") -> Mapping[str, object]:
+    try:
+        return build_rejected_application_response(raw, error=code)
+    except Exception:
+        return build_rejected_application_response({}, error="internal_error")
+
+
+def _application_rpc_canonical_line(value: Mapping[str, object]) -> str:
+    return (
+        json.dumps(
+            thaw_json(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        + "\n"
+    )
+
+
+async def _application_rpc_write(
+    stream: object,
+    lock: asyncio.Lock,
+    value: Mapping[str, object],
+) -> None:
+    line = _application_rpc_canonical_line(value)
+
+    def write_line() -> None:
+        write = getattr(stream, "write", None)
+        flush = getattr(stream, "flush", None)
+        if not callable(write) or not callable(flush):
+            raise OSError("application RPC output is unavailable")
+        write(line)
+        flush()
+
+    async with lock:
+        await asyncio.to_thread(write_line)
+
+
+async def _application_rpc_loop(
+    coordinator: object,
+    *,
+    input_stream: object | None = None,
+    output_stream: object | None = None,
+    write_lock: asyncio.Lock | None = None,
+) -> None:
+    """Serve bounded requests until EOF, keeping one coordinator alive."""
+    input_stream = sys.stdin if input_stream is None else input_stream
+    output_stream = sys.stdout if output_stream is None else output_stream
+    write_lock = asyncio.Lock() if write_lock is None else write_lock
+    while True:
+        raw = await _application_rpc_read_line(input_stream)
+        line, oversized = _application_rpc_trim_line(raw)
+        if line is None and not oversized:
+            if raw in ("", b""):
+                break
+            response = _application_rpc_rejection({}, "invalid_request")
+            await _application_rpc_write(output_stream, write_lock, response)
+            continue
+        if oversized:
+            await _application_rpc_write(
+                output_stream,
+                write_lock,
+                _application_rpc_rejection({}, "invalid_request"),
+            )
+            if not _application_rpc_raw_has_newline(raw):
+                await _application_rpc_discard_line(input_stream)
+            continue
+        assert line is not None
+        try:
+            response = await coordinator.handle(line)
+        except ApplicationRpcDurabilityError:
+            raise
+        except Exception as exc:
+            code = getattr(exc, "code", None)
+            response = _application_rpc_rejection(
+                line,
+                code if isinstance(code, str) else "internal_error",
+            )
+        try:
+            safe_response = parse_application_response(response)
+        except Exception:
+            safe_response = _application_rpc_rejection(line, "internal_error")
+        await _application_rpc_write(output_stream, write_lock, safe_response)
 
 def _close_database(connection: object | None) -> None:
     if connection is None:
@@ -364,7 +864,7 @@ def _runtime_failure_code(exc: BaseException) -> str:
     """Map implementation failures to a fixed public code without inspecting text."""
     if isinstance(exc, _CliFailure):
         return exc.code
-    if isinstance(exc, ArtifactSecurityError):
+    if isinstance(exc, (ArtifactSecurityError, ResumeArtifactSecurityError)):
         return "artifact_root_error"
     if isinstance(exc, BrowserAdapterError):
         return "browser_preflight_error"
@@ -670,7 +1170,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Guarded application draft workflow: fill safe fields only and enforce no-final-submit.",
     )
     autofill.add_argument("--limit", type=int, default=1, help="maximum queued jobs to process, 1-10")
-    autofill.add_argument("--resume-file", default=str(DEFAULT_RESUME_FILE), help="one explicit resume file staged for safe uploads")
+    autofill.add_argument("--resume-file", default=_DEFAULT_RESUME_FILE_STR, help="one explicit resume file staged for safe uploads")
+    autofill.add_argument("--generated-resume-id", help="pin one existing ready generated resume ID")
+    autofill.add_argument("--generated-resume-artifact-root", default=str(DEFAULT_RESUME_ARTIFACT_ROOT), help="private root for generated resume artifacts")
     autofill.add_argument(
         "--application-profile-json",
         "--profile-json",
@@ -688,6 +1190,45 @@ def build_parser() -> argparse.ArgumentParser:
     autofill.add_argument("--application-profile-preset", help="named profile preset")
     autofill.add_argument("--application-profile-dir", help="directory containing named profile presets")
     autofill.add_argument("--application-preferences", help="validated safe application preferences JSON")
+    application_rpc = sub.add_parser(
+        "application-rpc",
+        help="serve the guarded application coordinator over local JSONL",
+        description="Persistent guarded application coordinator; browser operations and final submission are never exposed.",
+    )
+    application_rpc.add_argument(
+        "--db",
+        default=argparse.SUPPRESS,
+        help="SQLite database path (also accepted as the global option before the command)",
+    )
+    application_rpc.add_argument(
+        "--artifact-root",
+        default=str(DEFAULT_ARTIFACT_ROOT),
+        help="private root for per-run evidence and review manifests",
+    )
+    application_rpc.add_argument(
+        "--resume-file",
+        default=str(DEFAULT_RESUME_FILE),
+        help="one explicit configured resume file staged for safe uploads",
+    )
+    application_rpc.add_argument(
+        "--application-profile-json",
+        "--profile-json",
+        dest="application_profile_json",
+        help="explicit application/profile facts JSON; values are never inferred from resume text",
+    )
+    application_rpc.add_argument("--application-profile-preset", help="named profile preset")
+    application_rpc.add_argument("--application-profile-dir", help="directory containing named profile presets")
+    application_rpc.add_argument("--application-preferences", help="validated safe application preferences JSON")
+    application_rpc.add_argument("--applicant-description-file", help="optional applicant description for the guarded resolver")
+    application_rpc.add_argument(
+        "--ats",
+        choices=("auto", *SUPPORTED_ATS),
+        default="auto",
+        help="ATS route policy (auto selects a validated supported adapter)",
+    )
+    application_rpc.add_argument("--omp-executable", help="trusted native OMP executable; defaults to the pinned project CLI")
+    application_rpc.add_argument("--omp-runtime-root", help="private native OMP runtime root")
+    application_rpc.add_argument("--omp-profile", default=DEFAULT_OMP_PROFILE, help="native OMP profile name")
     pref = sub.add_parser("application-preferences", help="atomically edit safe application preferences")
     pref_sub = pref.add_subparsers(dest="preferences_command", required=True)
     pref_init = pref_sub.add_parser("init")
@@ -722,8 +1263,115 @@ def build_parser() -> argparse.ArgumentParser:
     review_retry.add_argument("--annotation-file", required=False)
     review_show = review_sub.add_parser("show", help="show one guarded autofill run summary")
     review_show.add_argument("run_id", type=int, metavar="RUN_ID", help="positive application run ID to show")
-    return parser
 
+
+    resume_gen = sub.add_parser(
+        "resume-generate",
+        help="generate a grounded tailored resume artifact",
+        description="Generate a grounded tailored resume artifact without claiming the job or mutating backlog state.",
+    )
+    resume_gen.add_argument(
+        "--db",
+        default=argparse.SUPPRESS,
+        help="SQLite database path (also accepted as the global option before the command)",
+    )
+    gen_group = resume_gen.add_mutually_exclusive_group(required=True)
+    gen_group.add_argument("--job-id", type=int, help="positive backlog job ID to generate resume for")
+    gen_group.add_argument("--next", action="store_true", help="generate resume for next queued job")
+    resume_gen.add_argument(
+        "--profile-json",
+        "--application-profile-json",
+        dest="profile_json",
+        required=True,
+        help="path to explicit application profile JSON",
+    )
+    resume_gen.add_argument(
+        "--source-resume",
+        required=True,
+        help="path to source resume file",
+    )
+    resume_gen.add_argument(
+        "--artifact-root",
+        default=str(DEFAULT_RESUME_ARTIFACT_ROOT),
+        help="private root for generated resume artifacts",
+    )
+    resume_gen.add_argument(
+        "--application-artifact-root",
+        default=str(DEFAULT_ARTIFACT_ROOT),
+        help="private root for per-run evidence and review manifests",
+    )
+    resume_gen.add_argument(
+        "--description-file",
+        help="optional job description file",
+    )
+    resume_gen.add_argument(
+        "--force",
+        action="store_true",
+        help="force re-generation even if a matching ready artifact exists",
+    )
+
+    resume_show = sub.add_parser(
+        "resume-show",
+        help="show one generated resume artifact public details",
+    )
+    resume_show.add_argument(
+        "--db",
+        default=argparse.SUPPRESS,
+        help="SQLite database path (also accepted as the global option before the command)",
+    )
+    resume_show.add_argument(
+        "--resume-id",
+        required=True,
+        help="generated resume ID to show",
+    )
+    resume_show.add_argument(
+        "--artifact-root",
+        default=str(DEFAULT_RESUME_ARTIFACT_ROOT),
+        help="private root for generated resume artifacts",
+    )
+    resume_show.add_argument(
+        "--application-artifact-root",
+        default=str(DEFAULT_ARTIFACT_ROOT),
+        help="private root for per-run evidence and review manifests",
+    )
+
+    resume_list = sub.add_parser(
+        "resume-list",
+        help="list generated resume artifacts with safe public output",
+    )
+    resume_list.add_argument(
+        "--db",
+        default=argparse.SUPPRESS,
+        help="SQLite database path (also accepted as the global option before the command)",
+    )
+    resume_list.add_argument(
+        "--job-id",
+        type=int,
+        help="filter generated resumes by positive backlog job ID",
+    )
+    resume_list.add_argument(
+        "--limit",
+        type=int,
+        default=25,
+        help="maximum resumes to list, 1-100",
+    )
+    resume_list.add_argument(
+        "--offset",
+        type=int,
+        default=0,
+        help="number of matching resumes to skip",
+    )
+    resume_list.add_argument(
+        "--artifact-root",
+        default=str(DEFAULT_RESUME_ARTIFACT_ROOT),
+        help="private root for generated resume artifacts",
+    )
+    resume_list.add_argument(
+        "--application-artifact-root",
+        default=str(DEFAULT_ARTIFACT_ROOT),
+        help="private root for per-run evidence and review manifests",
+    )
+    return parser
 
 
 def _theirstack_client(*, paid_fetch: bool) -> TheirStackClient:
@@ -869,6 +1517,10 @@ def _validate_autofill_args(parser: argparse.ArgumentParser, args: argparse.Name
         parser.error("autofill --limit must be between 1 and 10")
     if args.ats not in {"auto", *SUPPORTED_ATS}:
         parser.error("autofill --ats is unsupported")
+    if getattr(args, "generated_resume_id", None) is not None and not isinstance(args.resume_file, _DefaultResumeFile):
+        parser.error("--resume-file and --generated-resume-id are mutually exclusive")
+    if getattr(args, "generated_resume_id", None) is not None and args.limit != 1:
+        parser.error("--generated-resume-id requires limit=1")
     if args.application_profile_json is not None and args.application_profile_preset is not None:
         parser.error("--application-profile-json conflicts with --application-profile-preset")
     if args.application_profile_dir is not None and args.application_profile_preset is None:
@@ -877,11 +1529,15 @@ def _validate_autofill_args(parser: argparse.ArgumentParser, args: argparse.Name
         parser.error("--application-profile-preset requires --application-profile-dir")
 
 
-def _validate_autofill_preclaim_inputs(args: argparse.Namespace) -> None:
-    """Validate every user-controlled autofill input before opening SQLite."""
+def _validate_autofill_preclaim_inputs(
+    args: argparse.Namespace, *, validate_artifact_root: bool = True
+) -> None:
+    """Validate user-controlled workflow inputs before opening SQLite."""
     try:
-        with load_resume_context(args.resume_file):
-            pass
+        if getattr(args, "generated_resume_id", None) is None:
+            resume_file = args.resume_file or str(DEFAULT_RESUME_FILE)
+            with load_resume_context(resume_file):
+                pass
         if args.application_profile_preset:
             preset = load_application_profile_preset(args.application_profile_dir, args.application_profile_preset, cwd=Path.cwd())
             profile = preset.profile
@@ -891,9 +1547,15 @@ def _validate_autofill_preclaim_inputs(args: argparse.Namespace) -> None:
         load_applicant_description(args.applicant_description_file, profile)
     except Exception as exc:
         raise _CliFailure("invalid_input") from exc
+    if not validate_artifact_root:
+        return
     try:
         with ArtifactRoot.open(args.artifact_root, cwd=Path.cwd()):
             pass
+        if getattr(args, "generated_resume_id", None) is not None:
+            gen_root_path = getattr(args, "generated_resume_artifact_root", DEFAULT_RESUME_ARTIFACT_ROOT)
+            with ArtifactRoot.open(gen_root_path, cwd=Path.cwd()):
+                pass
     except Exception as exc:
         raise _CliFailure("artifact_root_error") from exc
 
@@ -1130,6 +1792,151 @@ def _run_application_preferences(args: argparse.Namespace) -> int:
     print(json.dumps({"path": str(path), "sha256": digest}, sort_keys=True))
     return 0
 
+def _run_resume_generate(args: argparse.Namespace) -> int:
+    if getattr(args, "job_id", None) is not None and getattr(args, "job_id") <= 0:
+        raise _CliFailure("invalid_input")
+    app_root = None
+    resume_root = None
+    connection = None
+    try:
+        try:
+            app_root = ArtifactRoot.open(args.application_artifact_root, cwd=Path.cwd())
+            resume_root = ArtifactRoot.open(args.artifact_root, cwd=Path.cwd())
+        except Exception as exc:
+            raise _CliFailure("artifact_root_error") from exc
+        with app_root, resume_root:
+            try:
+                connection = connect(args.db)
+                initialize_database(connection, migration_artifact_root=app_root)
+            except (PermissionError, OSError) as exc:
+                raise _CliFailure("database_privacy_error") from exc
+            except Exception as exc:
+                raise _CliFailure("database_error") from exc
+            try:
+                res = generate_resume(
+                    connection,
+                    job_id=args.job_id,
+                    next_queued=args.next,
+                    profile_json=args.profile_json,
+                    source_resume=args.source_resume,
+                    artifact_root=resume_root,
+                    description_file=args.description_file,
+                    force=args.force,
+                    public_shaping=True,
+                )
+            except sqlite3.Error as exc:
+                raise _CliFailure("database_error") from exc
+            except Exception as exc:
+                if isinstance(exc, _CliFailure):
+                    raise
+                if isinstance(exc, (ArtifactSecurityError, ResumeArtifactSecurityError)):
+                    raise _CliFailure("artifact_root_error") from exc
+                if isinstance(exc, (TypeError, ValueError, KeyError)):
+                    raise _CliFailure("invalid_input") from exc
+                raise _CliFailure("workflow_error") from exc
+            print(json.dumps(res, sort_keys=True))
+            return 0
+    finally:
+        if connection is not None:
+            _close_database(connection)
+        if resume_root is not None:
+            resume_root.close()
+        if app_root is not None:
+            app_root.close()
+
+
+def _run_resume_show(args: argparse.Namespace) -> int:
+    if not args.resume_id or not args.resume_id.strip():
+        raise _CliFailure("invalid_input")
+    app_root = None
+    resume_root = None
+    connection = None
+    try:
+        try:
+            app_root = ArtifactRoot.open(args.application_artifact_root, cwd=Path.cwd())
+            resume_root = _open_existing_review_root(args.artifact_root)
+        except _CliFailure:
+            raise
+        except Exception as exc:
+            raise _CliFailure("artifact_root_error") from exc
+        with app_root, resume_root:
+            try:
+                connection = connect(args.db)
+                initialize_database(connection, migration_artifact_root=app_root)
+            except (PermissionError, OSError) as exc:
+                raise _CliFailure("database_privacy_error") from exc
+            except Exception as exc:
+                raise _CliFailure("database_error") from exc
+            try:
+                res = show_generated_resume(connection, args.resume_id)
+            except Exception as exc:
+                if isinstance(exc, _CliFailure):
+                    raise
+                if isinstance(exc, sqlite3.Error):
+                    raise _CliFailure("database_error") from exc
+                raise _CliFailure("invalid_input") from exc
+            if res is None:
+                raise _CliFailure("invalid_input")
+            print(json.dumps(res, sort_keys=True))
+            return 0
+    finally:
+        if connection is not None:
+            _close_database(connection)
+        if resume_root is not None:
+            resume_root.close()
+        if app_root is not None:
+            app_root.close()
+
+
+def _run_resume_list(args: argparse.Namespace) -> int:
+    if type(args.limit) is not int or not 1 <= args.limit <= 100:
+        raise _CliFailure("invalid_input")
+    if type(args.offset) is not int or args.offset < 0:
+        raise _CliFailure("invalid_input")
+    if getattr(args, "job_id", None) is not None and (type(args.job_id) is not int or args.job_id <= 0):
+        raise _CliFailure("invalid_input")
+    app_root = None
+    resume_root = None
+    connection = None
+    try:
+        try:
+            app_root = ArtifactRoot.open(args.application_artifact_root, cwd=Path.cwd())
+            resume_root = _open_existing_review_root(args.artifact_root)
+        except _CliFailure:
+            raise
+        except Exception as exc:
+            raise _CliFailure("artifact_root_error") from exc
+        with app_root, resume_root:
+            try:
+                connection = connect(args.db)
+                initialize_database(connection, migration_artifact_root=app_root)
+            except (PermissionError, OSError) as exc:
+                raise _CliFailure("database_privacy_error") from exc
+            except Exception as exc:
+                raise _CliFailure("database_error") from exc
+            try:
+                res = list_public_generated_resumes(
+                    connection,
+                    job_id=args.job_id,
+                    limit=args.limit,
+                    offset=args.offset,
+                )
+            except Exception as exc:
+                if isinstance(exc, _CliFailure):
+                    raise
+                if isinstance(exc, sqlite3.Error):
+                    raise _CliFailure("database_error") from exc
+                raise _CliFailure("invalid_input") from exc
+            print(json.dumps({"resumes": list(res)}, sort_keys=True))
+            return 0
+    finally:
+        if connection is not None:
+            _close_database(connection)
+        if resume_root is not None:
+            resume_root.close()
+        if app_root is not None:
+            app_root.close()
+
 def _run_autofill(args: argparse.Namespace) -> list[dict[str, object]]:
     try:
         artifacts = ArtifactRoot.open(args.artifact_root, cwd=Path.cwd())
@@ -1150,27 +1957,99 @@ def _run_autofill(args: argparse.Namespace) -> list[dict[str, object]]:
                     raise _CliFailure("database_privacy_error") from exc
                 except Exception as exc:
                     raise _CliFailure("database_error") from exc
+
+                claim_provider = None
+                expected_resume_sha256 = None
+                expected_profile_sha256 = None
+                resume_file = args.resume_file or str(DEFAULT_RESUME_FILE)
+
+                gen_root = None
                 try:
-                    results = asyncio.run(
-                        run_application_workflow(
-                            connection,
-                            limit=args.limit,
-                            resume_file=args.resume_file,
-                            application_profile_json=args.application_profile_json,
-                            application_profile_preset=args.application_profile_preset,
-                            application_profile_dir=args.application_profile_dir,
-                            application_preferences=args.application_preferences,
-                            ats=args.ats,
-                            applicant_description_file=args.applicant_description_file,
-                            artifact_root=args.artifact_root,
-                            headed=args.headed,
-                        )
-                    )
-                except sqlite3.DatabaseError as exc:
-                    raise _CliFailure("database_error") from exc
-                except Exception as exc:
-                    raise _CliFailure("workflow_error") from exc
-                return _sanitize_autofill_results(results)
+                    if getattr(args, "generated_resume_id", None) is not None:
+                        try:
+                            gen_root_path = getattr(args, "generated_resume_artifact_root", DEFAULT_RESUME_ARTIFACT_ROOT)
+                            gen_root = ArtifactRoot.open(gen_root_path, cwd=Path.cwd())
+                        except Exception as exc:
+                            raise _CliFailure("artifact_root_error") from exc
+
+                        try:
+                            if getattr(args, "application_profile_preset", None):
+                                preset = load_application_profile_preset(
+                                    args.application_profile_dir,
+                                    args.application_profile_preset,
+                                    cwd=Path.cwd(),
+                                )
+                                current_profile_sha256 = preset.source_sha256
+                            else:
+                                loaded_profile = load_application_profile_snapshot(args.application_profile_json)
+                                current_profile_sha256 = loaded_profile.source_sha256
+                        except Exception as exc:
+                            raise _CliFailure("invalid_input") from exc
+
+                        try:
+                            record = resolve_generated_resume(
+                                connection,
+                                args.generated_resume_id,
+                                gen_root,
+                                expected_profile_sha256=current_profile_sha256,
+                            )
+                        except Exception as exc:
+                            if isinstance(exc, _CliFailure):
+                                raise
+                            if isinstance(exc, (ArtifactSecurityError, ResumeArtifactSecurityError)):
+                                raise _CliFailure("artifact_root_error") from exc
+                            raise _CliFailure("invalid_input") from exc
+
+                        gen_resume_id = str(record["resume_id"])
+                        gen_job_id = int(record["job_id"])
+                        expected_snapshot_sha256 = str(record["job_snapshot_sha256"])
+                        resume_file = str(record["private_pdf_path"])
+                        expected_resume_sha256 = str(record["pdf_sha256"])
+                        expected_profile_sha256 = str(record["profile_sha256"])
+                        gen_description_override = record.get("_description_override")
+
+                        def _gen_claim_provider(conn: sqlite3.Connection, *, owner: str) -> ApplicationClaim | None:
+                            return claim_application_job_with_generated_resume(
+                                conn,
+                                owner=owner,
+                                job_id=gen_job_id,
+                                resume_id=gen_resume_id,
+                                expected_job_snapshot_sha256=expected_snapshot_sha256,
+                                description_override=gen_description_override,
+                            )
+
+                        claim_provider = _gen_claim_provider
+
+                    try:
+                        workflow_kwargs: dict[str, object] = {
+                            "limit": args.limit,
+                            "resume_file": resume_file,
+                            "application_profile_json": args.application_profile_json,
+                            "application_profile_preset": args.application_profile_preset,
+                            "application_profile_dir": args.application_profile_dir,
+                            "application_preferences": args.application_preferences,
+                            "ats": args.ats,
+                            "applicant_description_file": args.applicant_description_file,
+                            "artifact_root": args.artifact_root,
+                            "headed": args.headed,
+                        }
+                        if claim_provider is not None:
+                            workflow_kwargs["claim_provider"] = claim_provider
+                        if expected_resume_sha256 is not None:
+                            workflow_kwargs["expected_resume_sha256"] = expected_resume_sha256
+                        if expected_profile_sha256 is not None:
+                            workflow_kwargs["expected_profile_sha256"] = expected_profile_sha256
+                        results = asyncio.run(run_application_workflow(connection, **workflow_kwargs))
+                    except sqlite3.DatabaseError as exc:
+                        raise _CliFailure("database_error") from exc
+                    except Exception as exc:
+                        if isinstance(exc, _CliFailure):
+                            raise
+                        raise _CliFailure("workflow_error") from exc
+                    return _sanitize_autofill_results(results)
+                finally:
+                    if gen_root is not None:
+                        gen_root.close()
             finally:
                 if connection is not None:
                     _close_database(connection)
@@ -1178,7 +2057,6 @@ def _run_autofill(args: argparse.Namespace) -> list[dict[str, object]]:
         raise
     except Exception as exc:
         raise _CliFailure("artifact_root_error") from exc
-
 
 def _validate_backlog_archive_args(args: argparse.Namespace) -> None:
     """Reject archive controls before opening SQLite."""
@@ -1564,6 +2442,123 @@ def _run_database_command(args: argparse.Namespace, parser: argparse.ArgumentPar
             _close_database(connection)
 
 
+def _application_rpc_install_signal_handlers(
+    loop: asyncio.AbstractEventLoop, shutdown_event: asyncio.Event
+) -> tuple[signal.Signals, ...]:
+    installed: list[signal.Signals] = []
+    for signum in _APPLICATION_RPC_SIGNAL_NUMBERS:
+        try:
+            loop.add_signal_handler(signum, shutdown_event.set)
+        except (AttributeError, NotImplementedError, OSError, RuntimeError, ValueError):
+            continue
+        installed.append(signum)
+    return tuple(installed)
+
+
+def _application_rpc_remove_signal_handlers(
+    loop: asyncio.AbstractEventLoop, installed: tuple[signal.Signals, ...]
+) -> None:
+    for signum in installed:
+        try:
+            loop.remove_signal_handler(signum)
+        except (AttributeError, NotImplementedError, OSError, RuntimeError, ValueError):
+            pass
+
+
+async def _application_rpc_drain_task(task: asyncio.Task[object] | None) -> None:
+    if task is None:
+        return
+    if not task.done():
+        task.cancel()
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+    try:
+        task.result()
+    except BaseException:
+        pass
+
+
+async def _application_rpc_close_coordinator(coordinator: object) -> None:
+    close_task = asyncio.create_task(coordinator.close())
+    while not close_task.done():
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            continue
+    if close_task.cancelled():
+        raise asyncio.CancelledError
+    close_task.result()
+
+
+async def _application_rpc_async(args: argparse.Namespace) -> None:
+    input_stream = sys.stdin
+    output_stream = sys.stdout
+    write_lock = asyncio.Lock()
+
+    async def event_callback(event: Mapping[str, object]) -> None:
+        try:
+            public = public_rpc_event(event)
+        except Exception:
+            return
+        await _application_rpc_write(output_stream, write_lock, public)
+
+    config = _application_rpc_service_config(args, event_callback=event_callback)
+    try:
+        resolve_application_rpc_identity(config)
+    except Exception as exc:
+        raise _CliFailure("invalid_input") from exc
+    try:
+        root = ArtifactRoot.open(args.artifact_root, cwd=_application_rpc_cwd())
+        root.close()
+    except Exception as exc:
+        raise _CliFailure("artifact_root_error") from exc
+
+    coordinator: ApplicationRpcCoordinator | None = None
+    loop = asyncio.get_running_loop()
+    shutdown_event = asyncio.Event()
+    installed_signals: tuple[signal.Signals, ...] = ()
+    service_task: asyncio.Task[object] | None = None
+    shutdown_task: asyncio.Task[object] | None = None
+    try:
+        coordinator = ApplicationRpcCoordinator(config)
+        installed_signals = _application_rpc_install_signal_handlers(loop, shutdown_event)
+        service_task = asyncio.create_task(
+            _application_rpc_loop(
+                coordinator,
+                input_stream=input_stream,
+                output_stream=output_stream,
+                write_lock=write_lock,
+            )
+        )
+        shutdown_task = asyncio.create_task(shutdown_event.wait())
+        done, _ = await asyncio.wait(
+            (service_task, shutdown_task),
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if shutdown_task in done:
+            await _application_rpc_drain_task(service_task)
+        else:
+            await _application_rpc_drain_task(shutdown_task)
+            await service_task
+    finally:
+        await _application_rpc_drain_task(service_task)
+        await _application_rpc_drain_task(shutdown_task)
+        _application_rpc_remove_signal_handlers(loop, installed_signals)
+        if coordinator is not None:
+            await _application_rpc_close_coordinator(coordinator)
+
+
+def _run_application_rpc(args: argparse.Namespace) -> int:
+    try:
+        asyncio.run(_application_rpc_async(args))
+    except KeyboardInterrupt:
+        return 0
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -1573,6 +2568,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
+    if args.command == "application-rpc":
+        try:
+            # Reuse the workflow's bounded preclaim path for the long-lived
+            # RPC service so invalid preferences/descriptions cannot reach a
+            # durable run.start claim.
+            _validate_autofill_preclaim_inputs(args, validate_artifact_root=False)
+            return _run_application_rpc(args)
+        except _CliFailure as exc:
+            return _emit_failure(exc.code)
+        except Exception:
+            return _emit_failure("workflow_error")
     if args.command == "autofill-review":
         if args.review_command == "list" and (type(args.limit) is not int or not 1 <= args.limit <= 100):
             parser.error("autofill-review list --limit must be between 1 and 100")
@@ -1591,6 +2597,37 @@ def main(argv: list[str] | None = None) -> int:
             return _run_application_preferences(args)
         except Exception as exc:
             return _emit_failure("invalid_input" if isinstance(exc, (ValueError, TypeError, OSError)) else "workflow_error")
+    if args.command == "resume-generate":
+        if getattr(args, "job_id", None) is not None and (type(args.job_id) is not int or args.job_id <= 0):
+            parser.error("resume-generate --job-id must be positive")
+        try:
+            return _run_resume_generate(args)
+        except _CliFailure as exc:
+            return _emit_failure(exc.code)
+        except Exception:
+            return _emit_failure("workflow_error")
+    if args.command == "resume-show":
+        if not args.resume_id or not args.resume_id.strip():
+            parser.error("resume-show --resume-id must be non-empty")
+        try:
+            return _run_resume_show(args)
+        except _CliFailure as exc:
+            return _emit_failure(exc.code)
+        except Exception:
+            return _emit_failure("workflow_error")
+    if args.command == "resume-list":
+        if type(args.limit) is not int or not 1 <= args.limit <= 100:
+            parser.error("resume-list --limit must be between 1 and 100")
+        if type(args.offset) is not int or args.offset < 0:
+            parser.error("resume-list --offset must be non-negative")
+        if getattr(args, "job_id", None) is not None and (type(args.job_id) is not int or args.job_id <= 0):
+            parser.error("resume-list --job-id must be positive")
+        try:
+            return _run_resume_list(args)
+        except _CliFailure as exc:
+            return _emit_failure(exc.code)
+        except Exception:
+            return _emit_failure("workflow_error")
     if args.command == "autofill":
         # Validate all preclaim inputs before ArtifactRoot, browser, and DB work.
         _validate_autofill_args(parser, args)

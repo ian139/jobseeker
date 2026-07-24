@@ -10,10 +10,11 @@ dist
 /data
 /resume
 /scraper
+/rpc
+/.cli-focused
 *.sqlite*
 *.db*
 .env*
 !.env.example
 .DS_Store
 omp-session-*.html
-archive

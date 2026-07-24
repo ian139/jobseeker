@@ -1,3 +1,8 @@
+import asyncio
+import io
+import os
+import signal
+import time
 import httpx
 import secrets
 import shutil
@@ -2569,3 +2574,311 @@ def test_cli_review_show_uses_read_only_db_and_no_migration_browser_or_claim(
     )
     assert main(["--db", str(db), "autofill-review", "--artifact-root", str(root), "show", str(run_id)]) == 0
     assert json.loads(capsys.readouterr().out)["run_id"] == run_id
+
+
+def test_application_rpc_parser_and_help_do_not_start_runtime(capsys, monkeypatch) -> None:
+    monkeypatch.setattr(cli_mod.ArtifactRoot, "open", lambda *args, **kwargs: pytest.fail("artifact opened"))
+    monkeypatch.setattr(cli_mod, "ApplicationRpcCoordinator", lambda *args, **kwargs: pytest.fail("coordinator started"))
+    with pytest.raises(SystemExit) as exc:
+        main(["application-rpc", "--help"])
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    assert "--resume-file" in output
+    assert "--application-profile-preset" in output
+    assert "--application-preferences" in output
+    assert "--headed" not in output
+    args = cli_mod.build_parser().parse_args(["application-rpc"])
+    assert args.db == str(cli_mod.DEFAULT_DB)
+    assert args.artifact_root == str(cli_mod.DEFAULT_ARTIFACT_ROOT)
+    assert args.resume_file == str(cli_mod.DEFAULT_RESUME_FILE)
+    assert args.ats == "auto"
+
+
+def test_application_rpc_runtime_config_uses_pinned_path_and_auth_allowlist(tmp_path: Path, monkeypatch) -> None:
+    executable = tmp_path / "omp"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    monkeypatch.setenv("JOBS_ASSISTANT_OMP_EXECUTABLE", str(executable))
+    monkeypatch.setenv("OMP_AUTH_BROKER_URL", "https://auth.example.test")
+    monkeypatch.setenv("OMP_AUTH_BROKER_TOKEN", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "api-key-sentinel")
+    monkeypatch.setenv("HTTP_PROXY", "ambient-proxy-sentinel")
+    monkeypatch.setenv("PATH", "ambient-path-sentinel")
+    args = cli_mod.build_parser().parse_args(
+        ["application-rpc", "--omp-runtime-root", str(tmp_path / "omp-root")]
+    )
+    config = cli_mod._application_rpc_omp_launch_config(args)
+    pinned_bin = Path(cli_mod.__file__).resolve().parents[2] / "node_modules" / ".bin"
+    assert config.executable == executable
+    assert str(pinned_bin) in config.trusted_path
+    assert "/opt/homebrew/bin" not in config.trusted_path
+    assert dict(config.auth_env) == {
+        "OMP_AUTH_BROKER_URL": "https://auth.example.test",
+        "OPENAI_API_KEY": "api-key-sentinel",
+    }
+    assert dict(config.proxy_env) == {}
+    assert "ambient-" not in repr(config)
+    assert all("ambient-" not in path for path in config.trusted_path)
+
+
+def test_application_rpc_persists_coordinator_and_closes_on_eof(monkeypatch, capsys) -> None:
+    class FakeConfig:
+        def __init__(self, callback):
+            self.event_callback = callback
+
+    class FakeCoordinator:
+        instances: list["FakeCoordinator"] = []
+
+        def __init__(self, config):
+            self.config = config
+            self.lines: list[str] = []
+            self.closed = False
+            self.__class__.instances.append(self)
+
+        async def handle(self, line: str):
+            self.lines.append(line)
+            if len(self.lines) == 1:
+                await self.config.event_callback(
+                    {
+                        "run_id": 1,
+                        "sequence": 1,
+                        "request_id": "00000000-0000-0000-0000-000000000001",
+                        "action_sequence": 0,
+                        "timestamp": "2024-01-01T00:00:00Z",
+                        "event_type": "started",
+                        "summary_code": "ok",
+                        "observation_sha256": None,
+                    }
+                )
+            return cli_mod.build_rejected_application_response({}, error="invalid_request")
+
+        async def close(self):
+            self.closed = True
+
+    class FakeRoot:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        cli_mod,
+        "_application_rpc_service_config",
+        lambda args, *, event_callback: FakeConfig(event_callback),
+    )
+    monkeypatch.setattr(cli_mod, "resolve_application_rpc_identity", lambda config: {})
+    monkeypatch.setattr(cli_mod.ArtifactRoot, "open", lambda *args, **kwargs: FakeRoot())
+    monkeypatch.setattr(cli_mod, "ApplicationRpcCoordinator", FakeCoordinator)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO('{"secret":"stdout-sentinel"}\n{"request":"second"}\n'),
+    )
+    monkeypatch.setattr(sys, "stdout", io.StringIO())
+    assert main(["application-rpc"]) == 0
+    output = sys.stdout.getvalue()
+    lines = [json.loads(line) for line in output.splitlines()]
+    assert len(FakeCoordinator.instances) == 1
+    assert FakeCoordinator.instances[0].lines == ['{"secret":"stdout-sentinel"}', '{"request":"second"}']
+    assert FakeCoordinator.instances[0].closed is True
+    assert lines[0]["event_type"] == "started"
+    assert all(item["error"]["code"] == "invalid_request" for item in lines[1:])
+    assert "stdout-sentinel" not in output
+    assert "second" not in output
+    assert capsys.readouterr().out == ""
+
+
+def test_application_rpc_malformed_and_oversized_requests_are_public_safe() -> None:
+    class FakeCoordinator:
+        def __init__(self):
+            self.calls = 0
+
+        async def handle(self, line: str):
+            self.calls += 1
+            return cli_mod.build_rejected_application_response(line, error="invalid_request")
+
+    async def run(value: str) -> tuple[FakeCoordinator, str]:
+        coordinator = FakeCoordinator()
+        output = io.StringIO()
+        await cli_mod._application_rpc_loop(
+            coordinator,
+            input_stream=io.StringIO(value),
+            output_stream=output,
+        )
+        return coordinator, output.getvalue()
+
+    malformed, malformed_output = asyncio.run(run('{"secret":"malformed-sentinel"\n'))
+    oversized, oversized_output = asyncio.run(
+        run("x" * (cli_mod.MAX_APPLICATION_JSON_BYTES + 1) + "\n")
+    )
+    malformed_response = json.loads(malformed_output)
+    oversized_response = json.loads(oversized_output)
+    assert malformed.calls == 1
+    assert malformed_response["error"]["code"] == "invalid_request"
+    assert oversized.calls == 0
+    assert oversized_response["error"]["code"] == "invalid_request"
+    assert "sentinel" not in malformed_output
+    assert "sentinel" not in oversized_output
+
+
+def test_application_rpc_durability_failure_closes_transport_without_response() -> None:
+    class FakeCoordinator:
+        async def handle(self, _line: str):
+            raise cli_mod.ApplicationRpcDurabilityError("not persisted")
+
+    output = io.StringIO()
+    with pytest.raises(cli_mod.ApplicationRpcDurabilityError):
+        asyncio.run(
+            cli_mod._application_rpc_loop(
+                FakeCoordinator(),
+                input_stream=io.StringIO('{"request":"reserved"}\n'),
+                output_stream=output,
+            )
+        )
+    assert output.getvalue() == ""
+
+
+def test_application_rpc_oversized_line_discards_tail_before_next_request() -> None:
+    class FakeCoordinator:
+        def __init__(self):
+            self.calls: list[str] = []
+
+        async def handle(self, line: str):
+            self.calls.append(line)
+            return cli_mod.build_rejected_application_response(line, error="invalid_request")
+
+    async def run() -> tuple[FakeCoordinator, str]:
+        coordinator = FakeCoordinator()
+        output = io.StringIO()
+        value = (
+            b"x" * (cli_mod.MAX_APPLICATION_JSON_BYTES + 2)
+            + b'{"request":"tail"}\n'
+            + b'{"request":"real"}\n'
+        )
+        await cli_mod._application_rpc_loop(
+            coordinator,
+            input_stream=io.BytesIO(value),
+            output_stream=output,
+        )
+        return coordinator, output.getvalue()
+
+    coordinator, output = asyncio.run(run())
+    assert coordinator.calls == ['{"request":"real"}']
+    assert len(output.splitlines()) == 2
+
+
+def test_application_rpc_sigterm_cancels_blocked_fd_and_closes_once(monkeypatch) -> None:
+    read_fd, write_fd = os.pipe()
+    input_stream = io.TextIOWrapper(os.fdopen(read_fd, "rb"))
+    output_stream = io.StringIO()
+
+    class FakeRoot:
+        def close(self) -> None:
+            return None
+
+    monkeypatch.setattr(sys, "stdin", input_stream)
+    monkeypatch.setattr(sys, "stdout", output_stream)
+    monkeypatch.setattr(
+        cli_mod,
+        "_application_rpc_service_config",
+        lambda args, *, event_callback: object(),
+    )
+    monkeypatch.setattr(cli_mod, "resolve_application_rpc_identity", lambda config: {})
+    monkeypatch.setattr(cli_mod.ArtifactRoot, "open", lambda *args, **kwargs: FakeRoot())
+    close_calls: list[int] = []
+
+    class FakeCoordinator:
+        def __init__(self, config):
+            self.config = config
+
+        async def close(self) -> None:
+            close_calls.append(1)
+
+    removed_signals: list[signal.Signals] = []
+
+    monkeypatch.setattr(cli_mod, "ApplicationRpcCoordinator", FakeCoordinator)
+    args = cli_mod.build_parser().parse_args(["application-rpc"])
+
+    async def run() -> None:
+        ready = asyncio.Event()
+        real_install = cli_mod._application_rpc_install_signal_handlers
+        real_remove = cli_mod._application_rpc_remove_signal_handlers
+
+        def remove(loop, installed):
+            removed_signals.extend(installed)
+            return real_remove(loop, installed)
+
+        monkeypatch.setattr(cli_mod, "_application_rpc_remove_signal_handlers", remove)
+
+        def install(loop, shutdown_event):
+            installed = real_install(loop, shutdown_event)
+            ready.set()
+            return installed
+
+        monkeypatch.setattr(cli_mod, "_application_rpc_install_signal_handlers", install)
+        task = asyncio.create_task(cli_mod._application_rpc_async(args))
+        await asyncio.wait_for(ready.wait(), timeout=1)
+        os.kill(os.getpid(), signal.SIGTERM)
+        await asyncio.wait_for(task, timeout=1)
+
+    started = time.monotonic()
+    try:
+        asyncio.run(run())
+    finally:
+        input_stream.close()
+        os.close(write_fd)
+    assert time.monotonic() - started < 1
+    assert close_calls == [1]
+    assert tuple(removed_signals) == (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+
+
+def test_application_rpc_fd_reader_preserves_lines_and_eof() -> None:
+    read_fd, write_fd = os.pipe()
+    source = os.fdopen(read_fd, "rb")
+    os.write(write_fd, b'{"one":1}\n{"two":2}\n')
+    os.close(write_fd)
+
+    async def run() -> tuple[object, object, object]:
+        return (
+            await cli_mod._application_rpc_read_line(source),
+            await cli_mod._application_rpc_read_line(source),
+            await cli_mod._application_rpc_read_line(source),
+        )
+
+    try:
+        first, second, eof = asyncio.run(run())
+    finally:
+        source.close()
+    assert first == b'{"one":1}\n'
+    assert second == b'{"two":2}\n'
+    assert eof == b""
+
+@pytest.mark.parametrize("option", ["--application-preferences", "--applicant-description-file"])
+def test_application_rpc_rejects_invalid_preclaim_inputs_before_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, option: str
+) -> None:
+    resume_file = Path(cli_mod.__file__).resolve().parents[2] / "resume" / "Main_Resume.pdf"
+    invalid = tmp_path / ("preferences.json" if option == "--application-preferences" else "description.txt")
+    if option == "--application-preferences":
+        invalid.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        cli_mod,
+        "ApplicationRpcCoordinator",
+        lambda *_args, **_kwargs: pytest.fail("RPC coordinator started before preclaim validation"),
+    )
+    monkeypatch.setattr(
+        cli_mod,
+        "connect",
+        lambda *_args, **_kwargs: pytest.fail("database opened before preclaim validation"),
+    )
+    assert main(
+        [
+            "--db",
+            str(tmp_path / "jobs.sqlite3"),
+            "application-rpc",
+            "--resume-file",
+            str(resume_file),
+            option,
+            str(invalid),
+        ]
+    ) == 1
+    assert json.loads(capsys.readouterr().err)["error"]["code"] == "invalid_input"
+    assert not (tmp_path / "jobs.sqlite3").exists()

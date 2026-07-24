@@ -162,6 +162,8 @@ def test_lever_adapter_is_registered_and_explicit_route_is_fail_closed() -> None
     assert any(isinstance(item, LeverAdapter) for item in ats.ADAPTERS)
     assert adapter.matches(valid, "")
     assert not adapter.matches("https://boards.greenhouse.io/acme/jobs/123", "")
+    for suffix in ("?", "#"):
+        assert not adapter.matches(valid + suffix, "")
     assert ats.select_adapter("auto", url=valid).name == "lever"  # type: ignore[union-attr]
     with pytest.raises(ValueError):
         ats.select_adapter("unknown")

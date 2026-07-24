@@ -228,7 +228,11 @@ def _valid_response_data(action: object, data: dict[str, Any]) -> bool:
     if action == "prepare_handoff":
         return data.get("state") == "prepared" and _protocol_startup_identity(data.get("identity"))
     if action == "commit_handoff":
-        return data.get("state") == "open_guarded" and _protocol_startup_identity(data.get("identity"))
+        return (
+            data.get("state") == "open_guarded"
+            and data.get("detached") is True
+            and _protocol_startup_identity(data.get("identity"))
+        )
     if action == "release_handoff":
         return data.get("state") == "open_guarded" and data.get("released") is True
     if action == "networkCounters":
@@ -449,6 +453,7 @@ def validate_ats_url(url: str, ats_policy: str = "greenhouse") -> GreenhouseRout
         or parsed.fragment
         or parsed.query
         or "?" in url
+        or "#" in url
         or "%" in parsed.path
         or "\\" in parsed.path
     ):
@@ -619,6 +624,7 @@ class PuppeteerSession:
         self._closed = False
         self._detached = False
         self._committed_token: str | None = None
+        self._committed_response: dict[str, Any] | None = None
         self._write_lock = threading.Lock()
         self._stderr_bytes = 0
         self._stderr_cap = 2 * 1024 * 1024
@@ -964,35 +970,75 @@ class PuppeteerSession:
     def screenshot(self, slot: str = "final", *, full_page: bool = False) -> dict[str, Any]:
         return self.request({"action": "screenshot", "slot": slot, "fullPage": bool(full_page)})
 
+    def _validate_handoff_identity(self, response: dict[str, Any]) -> None:
+        identity = response.get("identity")
+        expected = {
+            "version": MANIFEST_VERSION,
+            "ats_policy": self.ats_policy,
+            "run_id": self.run_id,
+            "job_id": self.job_id,
+            "session_id": self.session_id,
+            "owner_identity": self.owner_identity,
+            "browser_identity": self.browser_identity,
+        }
+        if identity != expected:
+            self._poisoned = True
+            raise BrowserAdapterError("browser_identity_mismatch")
+
     def prepare_handoff(self, *, run_id: int | None = None, job_id: int | None = None) -> dict[str, Any]:
         if run_id is not None and run_id != self.run_id or job_id is not None and job_id != self.job_id:
             raise BrowserAdapterError("startup_identity_mismatch")
-        return self.request({
+        response = self.request({
             "action": "prepare_handoff",
             "run_id": self.run_id,
             "job_id": self.job_id,
             "session_id": self.session_id,
         })
-
-    def commit_handoff(self, commit_token: str) -> dict[str, Any]:
-        token = str(commit_token)
-        response = self.request({"action": "commit_handoff", "commit_token": token})
-        if response.get("state") != "open_guarded":
-            raise BrowserAdapterError("handoff_commit_failed")
-        self._committed_token = token
+        self._validate_handoff_identity(response)
         return response
 
-    def release_handoff(self) -> dict[str, Any]:
-        if self._detached:
-            return {"state": "open_guarded", "released": True}
-        if not self._committed_token or self._closed or self.process.poll() is not None:
+    def commit_handoff(self, commit_token: str) -> dict[str, Any]:
+        if (
+            type(commit_token) is not str
+            or not 16 <= len(commit_token) <= 256
+            or not commit_token.isascii()
+        ):
             raise BrowserAdapterError("handoff_state_conflict")
-        released = self.request({"action": "release_handoff"})
-        if released.get("state") != "open_guarded" or released.get("released") is not True:
-            raise BrowserAdapterError("handoff_release_failed")
-        # Node's release ACK is the descriptor-ownership linearization point.
-        # Only after it has detached from command transport may Python close
-        # its pipe ends and return an independently owned review window.
+        token = commit_token
+        if self._detached:
+            if self._committed_token != token:
+                raise BrowserAdapterError("handoff_state_conflict")
+            if self._committed_response is not None:
+                return dict(self._committed_response)
+            return {
+                "state": "open_guarded",
+                "idempotent": True,
+                "detached": True,
+                "identity": {
+                    "version": MANIFEST_VERSION,
+                    "ats_policy": self.ats_policy,
+                    "run_id": self.run_id,
+                    "job_id": self.job_id,
+                    "session_id": self.session_id,
+                    "owner_identity": self.owner_identity,
+                    "browser_identity": self.browser_identity,
+                },
+            }
+        response = self.request({"action": "commit_handoff", "commit_token": token})
+        if response.get("state") != "open_guarded" or response.get("detached") is not True:
+            raise BrowserAdapterError("handoff_commit_failed")
+        self._validate_handoff_identity(response)
+        self._committed_token = token
+        self._committed_response = dict(response)
+        # Node has durably detached before sending this ACK. Close only this
+        # adapter's descriptors; the owner and browser groups remain owned by
+        # the detached review session.
+        self._detach_transport()
+        return response
+
+    def _detach_transport(self) -> None:
+        if self._detached:
+            return
         self._detached = True
         self._closed = True
         try:
@@ -1015,6 +1061,12 @@ class PuppeteerSession:
             self._stderr_thread.join(timeout=0.1)
         process = self.process
         threading.Thread(target=process.wait, name="jobs-assistant-browser-reaper", daemon=True).start()
+    def release_handoff(self) -> dict[str, Any]:
+        if not self._detached or self.process.poll() is not None:
+            raise BrowserAdapterError("handoff_state_conflict")
+        # Commit is the ownership linearization point. Release is retained as
+        # an idempotent local acknowledgement for callers that finalize DB
+        # state after the browser commit.
         return {"state": "open_guarded", "released": True}
     def network_counters(self) -> dict[str, Any]:
         return self.request({"action": "networkCounters"})

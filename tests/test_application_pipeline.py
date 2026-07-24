@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from dataclasses import replace
 import pytest
 
@@ -664,10 +663,11 @@ def test_resolve_privacy_flattens_configured_multi_values(monkeypatch) -> None:
 
 
 def test_llm_parser_rejects_non_current_or_sensitive_fields():
-    payload_for = lambda item: {
-        "answers": [{"target_id": item.target_id, "value": "Ada", "confidence": 0.9, "reason": "x"}],
-        "safe_click_target_id": None,
-    }
+    def payload_for(item):
+        return {
+            "answers": [{"target_id": item.target_id, "value": "Ada", "confidence": 0.9, "reason": "x"}],
+            "safe_click_target_id": None,
+        }
     for kwargs in (
         {"visible": False},
         {"enabled": False},

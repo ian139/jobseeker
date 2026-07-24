@@ -1,9 +1,0 @@
-sequence:
-  - kind: connect
-    delay_days: 0
-    message: "Hi {first_name} — saw {company} is hiring for {job_title}. I’m interested and would value connecting."
-  - kind: message
-    delay_days: 0
-    message: "Thanks for connecting, {first_name}. If {company} is still considering candidates for {job_title}, I’d be glad to share a concise background note."
-limits:
-  next_limit: 10

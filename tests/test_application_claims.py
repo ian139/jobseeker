@@ -2,38 +2,70 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import hashlib
 import json
 import os
+import signal
 import sqlite3
 import stat
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-
+from uuid import UUID, uuid5
 import pytest
 
 import jobs_assistant.application as application_module
 import jobs_assistant.db as db_module
+from jobs_assistant.application_rpc_contracts import (
+    APPLICATION_RPC_PROTOCOL_VERSION,
+    ApplicationRpcRequest,
+    build_application_response,
+    parse_application_request,
+)
 
 from jobs_assistant.artifacts import ArtifactRoot
 from jobs_assistant.db import (
     PUBLIC_REASON_CODES,
+    RpcClaimOutcome,
+    RpcRequestInfo,
+    RpcRunTransition,
+    append_rpc_event,
     application_schema_fingerprint,
+    claim_application_job_for_rpc,
     claim_next_application_job,
+    bind_rpc_handoff_intent,
+    commit_rpc_proposal_failure,
+    commit_rpc_proposal_result,
+    commit_rpc_failure,
+    commit_rpc_run_transition,
     complete_review,
+    complete_rpc_request,
     connect,
     finish_application_run,
     get_application_review_details,
+    get_rpc_request,
+    get_rpc_run_status,
     initialize_database,
+    latest_rpc_event,
     list_application_reviews,
     mark_application_spawn_attempted,
+    recover_rpc_handoffs,
+    reconcile_abandoned_rpc_runs,
     reconcile_open_session_failure,
     register_application_artifact,
     register_application_browser_process,
     register_application_owner_process,
     register_application_session,
+    replay_rpc_events,
+    request_rpc_cancellation,
+    reserve_rpc_request,
     retry_review,
     review_window_state,
+    rpc_schema_fingerprint,
+    update_rpc_run_artifact_manifest,
+    update_rpc_run_observation,
+    update_rpc_run_process,
+    update_rpc_run_state,
 )
 
 
@@ -163,10 +195,11 @@ def test_failed_durable_finalization_is_not_reported_terminal(
     assert (tmp_path / "artifacts" / "run-1").is_dir()
 
 
-def _write_review_manifest(run: object, payload: dict[str, object]) -> None:
+def _write_review_manifest(
+    run: object, payload: dict[str, object], *, token: str | None = "a" * 64
+) -> None:
     """Write the current versioned review manifest and its run-token binding."""
     manifest = dict(payload)
-    token = "a" * 64
     manifest.setdefault("version", 1)
     manifest["commit_token_sha256"] = token
     owner_pid = manifest.get("owner_pid")
@@ -2452,7 +2485,7 @@ def test_review_details_missing_latest_rejected(tmp_path: Path) -> None:
     ],
 )
 def test_review_details_malformed_latest_rejected(
-    tmp_path: Path, latest: Any
+    tmp_path: Path, latest: object
 ) -> None:
     """latest must be a dict with bounded iteration and a known review stage."""
     conn = connect(tmp_path / "jobs.sqlite3")
@@ -2545,3 +2578,3716 @@ def test_review_details_observation_blocker_codes_allowlisted(tmp_path: Path) ->
     result = get_application_review_details(conn, run_id=run_id, artifact_root=root)
     assert result["observation"]["blocker_codes"] == codes
     root.close()
+# ── RPC contract/ledger tests ─────────────────────────────────────
+
+_RPC_NOW = 4_000_000_000_000
+_RPC_URL = "https://boards.greenhouse.io/acme/jobs/456"
+
+
+def _uuid(number: int) -> str:
+    return f"00000000-0000-4000-8000-{number:012d}"
+
+
+def _rpc_request(
+    *,
+    request_id: str,
+    operation: str = "run.start",
+    run_id: int | None = None,
+    url: str = _RPC_URL,
+    payload: dict[str, object] | None = None,
+) -> ApplicationRpcRequest:
+    if operation == "run.start":
+        body: dict[str, object] = {
+            "goal": "prepare_application_draft",
+            "job_url": url,
+            "candidate_profile_id": "candidate-main",
+            "configured_resume_id": "resume-main",
+            "headed": True,
+        }
+    elif operation == "browser.fill_field":
+        body = {
+            "observation_sha256": "a" * 64,
+            "element_id": "field-1",
+            "value": "safe-value",
+            "confidence": 0.9,
+            "reason": "configured answer",
+        }
+    else:
+        body = {}
+    if payload:
+        body.update(payload)
+    return parse_application_request(
+        {
+            "protocol_version": APPLICATION_RPC_PROTOCOL_VERSION,
+            "request_id": request_id,
+            "operation": operation,
+            "deadline_unix_ms": _RPC_NOW + 30_000,
+            "run_id": run_id,
+            "payload": body,
+        },
+        now_unix_ms=_RPC_NOW,
+    )
+
+
+def _rpc_job(conn: sqlite3.Connection, *, url: str = _RPC_URL) -> int:
+    conn.execute(
+        """
+        INSERT INTO jobs (
+            source, source_job_id, canonical_url, title, company, discovered_at,
+            raw_json, first_seen_at, last_seen_at
+        ) VALUES ('fixture', ?, ?, 'Engineer', 'Acme', '2026-07-10T00:00:00+00:00', '{}',
+                  '2026-07-10T00:00:00+00:00', '2026-07-10T00:00:00+00:00')
+        """,
+        (f"rpc-job-{url}", url),
+    )
+    conn.commit()
+    return int(conn.execute("SELECT last_insert_rowid()").fetchone()[0])
+
+
+def _new_rpc_claim(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+    *,
+    request_id: str = _uuid(1),
+    url: str = _RPC_URL,
+    initialize: bool = True,
+) -> tuple[ApplicationRpcRequest, RpcClaimOutcome]:
+    if initialize:
+        _initialize(conn, tmp_path)
+    _rpc_job(conn, url=url)
+    request = _rpc_request(request_id=request_id, url=url)
+    claim = claim_application_job_for_rpc(
+        conn, owner="rpc-owner", request=request, coordinator_id="coord-1"
+    )
+    assert claim.outcome == "new" and claim.claim is not None
+    return request, claim
+
+
+def _failure_response(
+    request: ApplicationRpcRequest,
+    *,
+    state: str = "failed",
+    action_sequence: int = 0,
+    event_sequence: int = 0,
+    error: str = "internal_error",
+) -> dict[str, object]:
+    return build_application_response(
+        request,
+        ok=False,
+        state=state,
+        action_sequence=action_sequence,
+        event_sequence=event_sequence,
+        error=error,
+    )
+
+
+def _child_request(parent: ApplicationRpcRequest, run_id: int) -> ApplicationRpcRequest:
+    host_id = "host-1"
+    tool_id = "tool-1"
+    operation = "browser.fill_field"
+    child_id = str(uuid5(UUID(parent.request_id), f"{host_id}\0{tool_id}\0{operation}"))
+    return _rpc_request(
+        request_id=child_id,
+        operation=operation,
+        run_id=run_id,
+    )
+
+
+def test_rpc_schema_is_exact_and_rejects_invalid_domains(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    assert rpc_schema_fingerprint(conn)["tables"]["application_rpc_requests"]["xinfo"]
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            """
+            INSERT INTO application_rpc_requests
+                (request_id, protocol_version, operation, semantic_sha256, request_json, state, created_at)
+            VALUES ('REQ', 1, 'run.start', ?, '{}', 'pending', 'now')
+            """,
+            ("a" * 64,),
+        )
+
+
+def test_rpc_claim_returns_atomic_frozen_claim_and_exact_snapshot(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    request, result = _new_rpc_claim(conn, tmp_path)
+    assert result.claim is not None
+    assert result.claim.run_id == result.run_id
+    with pytest.raises(TypeError):
+        result.claim.job["title"] = "mutated"  # type: ignore[index]
+    conn.execute("UPDATE jobs SET title='changed' WHERE id=?", (result.claim.job["id"],))
+    conn.commit()
+    assert result.claim.job["title"] == "Engineer"
+    row = conn.execute(
+        "SELECT request_json, run_id, state FROM application_rpc_requests WHERE request_id=?",
+        (request.request_id,),
+    ).fetchone()
+    assert row["run_id"] == result.run_id and row["state"] == "pending"
+    assert json.loads(row["request_json"])["operation"] == "run.start"
+    owner = conn.execute(
+        """
+        SELECT coordinator_pid, coordinator_pgid, coordinator_birth
+        FROM application_rpc_runs WHERE run_id=?
+        """,
+        (result.run_id,),
+    ).fetchone()
+    assert owner is not None
+    assert owner["coordinator_pid"] == os.getpid()
+    assert owner["coordinator_pgid"] > 0
+    assert isinstance(owner["coordinator_birth"], str) and owner["coordinator_birth"]
+
+
+def test_rpc_claim_identity_unavailable_fails_closed_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    _rpc_job(conn)
+    request = _rpc_request(request_id=_uuid(30))
+    monkeypatch.setattr(db_module, "_identity_payload", lambda *args, **kwargs: None)
+    result = claim_application_job_for_rpc(
+        conn, owner="rpc-owner", request=request, coordinator_id="coord-1"
+    )
+    assert result.outcome == "unavailable"
+    assert conn.execute("SELECT status FROM jobs").fetchone()["status"] == "queued"
+    assert conn.execute("SELECT COUNT(*) FROM application_runs").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM application_rpc_runs").fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM application_rpc_requests WHERE request_id=?",
+        (request.request_id,),
+    ).fetchone()[0] == 0
+
+
+def test_ordinary_claim_waits_for_prior_process_absence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    job_id = _job(conn, url="https://boards.greenhouse.io/acme/jobs/claim-gate")
+    first = claim_next_application_job(conn, owner="first-owner")
+    assert first is not None
+    process = {
+        "owner": {"pid": 101, "pgid": 101, "birth": "owner-birth"},
+        "browser": {"pid": 202, "pgid": 202, "birth": "browser-birth"},
+    }
+    conn.execute(
+        """
+        UPDATE application_runs
+        SET status='failed', reason_code='browser_error', outcome='retry',
+            reviewed_at=?, finished_at=?, owner_pid=?, browser_pid=?,
+            observation_json=?
+        WHERE id=?
+        """,
+        (
+            db_module.utc_now(),
+            db_module.utc_now(),
+            101,
+            202,
+            json.dumps({"_process": process}),
+            first.run_id,
+        ),
+    )
+    conn.execute("UPDATE jobs SET status='queued' WHERE id=?", (job_id,))
+    conn.commit()
+    states = {101: "live", 202: "live"}
+    monkeypatch.setattr(
+        db_module,
+        "_process_group_state",
+        lambda pid, *, expected=None: states[pid],
+    )
+    assert claim_next_application_job(conn, owner="blocked") is None
+    assert conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()[0] == "queued"
+    states[202] = "unknown"
+    assert claim_next_application_job(conn, owner="still-blocked") is None
+    states[101] = "absent"
+    states[202] = "absent"
+    second = claim_next_application_job(conn, owner="after-close")
+    assert second is not None
+    assert second.run_id != first.run_id
+
+
+def test_rpc_claim_waits_for_prior_omp_absence_not_coordinator_pid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    request, first = _new_rpc_claim(conn, tmp_path, request_id=_uuid(61))
+    assert first.run_id is not None
+    now = db_module.utc_now()
+    conn.execute(
+        """
+        UPDATE application_runs
+        SET status='failed', reason_code='browser_error', outcome='retry',
+            reviewed_at=?, finished_at=?
+        WHERE id=?
+        """,
+        (now, now, first.run_id),
+    )
+    conn.execute(
+        """
+        UPDATE application_rpc_runs
+        SET state='failed', omp_process_pid=301, omp_process_pgid=301,
+            omp_process_birth='omp-birth', omp_session_sha256=?
+        WHERE run_id=?
+        """,
+        ("a" * 64, first.run_id),
+    )
+    job_id = int(
+        conn.execute("SELECT job_id FROM application_runs WHERE id=?", (first.run_id,)).fetchone()[0]
+    )
+    conn.execute("UPDATE jobs SET status='queued' WHERE id=?", (job_id,))
+    conn.commit()
+    states = {301: "live"}
+    monkeypatch.setattr(
+        db_module,
+        "_process_group_state",
+        lambda pid, *, expected=None: states[pid],
+    )
+    blocked_request = _rpc_request(request_id=_uuid(62), url=_RPC_URL)
+    blocked = claim_application_job_for_rpc(
+        conn,
+        owner="rpc-owner-2",
+        request=blocked_request,
+        coordinator_id="coord-2",
+    )
+    assert blocked.outcome == "unavailable"
+    assert conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()[0] == "queued"
+    states[301] = "absent"
+    reopened = claim_application_job_for_rpc(
+        conn,
+        owner="rpc-owner-2",
+        request=blocked_request,
+        coordinator_id="coord-2",
+    )
+    assert reopened.outcome == "new"
+
+
+def test_rpc_bound_start_request_completes_with_assigned_run_id(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    request, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(21))
+    response = build_application_response(
+        request,
+        ok=True,
+        state="starting",
+        action_sequence=0,
+        event_sequence=0,
+        run_id=claim.run_id,
+        result={
+            "ats": "greenhouse",
+            "job_url": _RPC_URL,
+            "reason_code": None,
+            "current_step": None,
+            "coordinator_state": "starting",
+            "browser_state": "starting",
+            "last_observation_sha256": None,
+            "artifact_manifest_sha256": None,
+            "human_review_ready": False,
+            "handoff_committed": False,
+            "automated_submission": False,
+        },
+    )
+    completed = complete_rpc_request(conn, request=request, response=response)
+    assert completed.state == "completed" and completed.run_id == claim.run_id
+    assert complete_rpc_request(conn, request=request, response=response).response_json == completed.response_json
+
+
+def test_rpc_unavailable_start_is_pending_then_idempotent_failure(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    request = _rpc_request(request_id=_uuid(2))
+    first = claim_application_job_for_rpc(
+        conn, owner="rpc-owner", request=request, coordinator_id="coord-1"
+    )
+    assert first.outcome == "unavailable" and first.claim is None and first.run_id is None
+    replay = claim_application_job_for_rpc(
+        conn, owner="rpc-owner", request=request, coordinator_id="coord-1"
+    )
+    assert replay.outcome == "pending" and replay.claim is None
+    response = _failure_response(request, error="run_not_found")
+    info = complete_rpc_request(conn, request=request, response=response)
+    assert info.state == "completed"
+    assert complete_rpc_request(conn, request=request, response=response).response_json == info.response_json
+    assert claim_application_job_for_rpc(
+        conn, owner="rpc-owner", request=request, coordinator_id="coord-1"
+    ).outcome == "completed"
+    assert info.state == "completed" and info.run_id is None
+    assert get_rpc_request(conn, request.request_id).response_json == info.response_json  # type: ignore[union-attr]
+    assert claim_application_job_for_rpc(
+        conn, owner="rpc-owner", request=request, coordinator_id="coord-1"
+    ).outcome == "completed"
+
+    changed = _rpc_request(request_id=request.request_id, payload={"candidate_profile_id": "other-candidate"})
+    assert claim_application_job_for_rpc(
+        conn, owner="rpc-owner", request=changed, coordinator_id="coord-1"
+    ).outcome == "conflict"
+
+
+def test_rpc_unknown_status_is_unbound_failure_and_replays(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    request = _rpc_request(request_id=_uuid(14), operation="run.status", run_id=99999)
+    info = reserve_rpc_request(conn, request=request)
+    assert info.run_id is None
+    completed = complete_rpc_request(
+        conn, request=request, response=_failure_response(request, error="run_not_found")
+    )
+    assert completed.run_id is None
+    replay = reserve_rpc_request(conn, request=request)
+    assert replay.state == "completed" and replay.response_json == completed.response_json
+    changed = _rpc_request(request_id=request.request_id, operation="run.cancel", run_id=99999)
+    with pytest.raises(RuntimeError, match="conflicting request"):
+        reserve_rpc_request(conn, request=changed)
+
+
+def test_rpc_conflicting_same_id_does_not_mutate(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    request, first = _new_rpc_claim(conn, tmp_path, request_id=_uuid(3))
+    different = _rpc_request(
+        request_id=request.request_id,
+        payload={"candidate_profile_id": "other-candidate"},
+    )
+    before = tuple(conn.execute("SELECT status FROM jobs").fetchone())
+    result = claim_application_job_for_rpc(
+        conn, owner="rpc-owner", request=different, coordinator_id="coord-1"
+    )
+    assert result.outcome == "conflict" and result.claim is None
+    assert tuple(conn.execute("SELECT status FROM jobs").fetchone()) == before
+    assert first.run_id == result.run_id or result.run_id is None
+
+
+def test_rpc_child_parent_reservation_and_deterministic_uuid(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    parent, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(4))
+    child = _child_request(parent, claim.run_id)
+    info = reserve_rpc_request(
+        conn, request=child, parent_request_id=parent.request_id
+    )
+    assert info.parent_request_id == parent.request_id
+    assert info.run_id == claim.run_id
+    assert info.request_json == json.dumps(child.to_mapping(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    assert reserve_rpc_request(
+        conn, request=child, parent_request_id=parent.request_id
+    ).request_id == child.request_id
+    with pytest.raises(RuntimeError):
+        reserve_rpc_request(conn, request=child, parent_request_id=_uuid(404))
+
+
+def test_rpc_reservation_created_marker_has_one_cross_connection_winner(tmp_path: Path) -> None:
+    db_path = tmp_path / "jobs.sqlite3"
+    initializer = connect(db_path)
+    _initialize(initializer, tmp_path)
+    initializer.close()
+    request = _rpc_request(request_id=_uuid(21))
+    barrier = threading.Barrier(2)
+    outcomes: list[RpcRequestInfo] = []
+    errors: list[BaseException] = []
+
+    def attempt() -> None:
+        conn = connect(db_path)
+        try:
+            barrier.wait()
+            outcomes.append(reserve_rpc_request(conn, request=request))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            conn.close()
+
+    threads = [threading.Thread(target=attempt) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert sorted(info.created for info in outcomes) == [False, True]
+    assert len({info.request_id for info in outcomes}) == 1
+    check = sqlite3.connect(db_path)
+    try:
+        assert len(
+            check.execute(
+                "SELECT request_id FROM application_rpc_requests WHERE request_id=?", (request.request_id,)
+            ).fetchall()
+        ) == 1
+    finally:
+        check.close()
+
+
+def test_rpc_completion_round_trips_and_rejects_mismatch_noncanonical_and_malformed(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    parent, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(5))
+    child = _child_request(parent, claim.run_id)
+    reserve_rpc_request(conn, request=child, parent_request_id=parent.request_id)
+    response = _failure_response(child)
+    completed = complete_rpc_request(
+        conn, request=child, response=response, parent_request_id=parent.request_id
+    )
+    assert json.loads(completed.response_json or "{}")["request_id"] == child.request_id
+    assert complete_rpc_request(
+        conn, request=child, response=response, parent_request_id=parent.request_id
+    ).response_json == completed.response_json
+    with pytest.raises(RuntimeError, match="conflicting response"):
+        complete_rpc_request(
+            conn, request=child, response=_failure_response(child, error="action_rejected"), parent_request_id=parent.request_id
+        )
+    with pytest.raises(ValueError, match="canonical"):
+        complete_rpc_request(
+            conn,
+            request=child,
+            response=json.dumps(response, indent=2),
+            parent_request_id=parent.request_id,
+        )
+    with pytest.raises(Exception):
+        complete_rpc_request(
+            conn, request=child, response="{malformed", parent_request_id=parent.request_id
+        )
+
+
+def test_rpc_utf8_response_byte_cap_is_enforced(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    parent, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(6))
+    child = _child_request(parent, claim.run_id)
+    reserve_rpc_request(conn, request=child, parent_request_id=parent.request_id)
+    oversized = dict(_failure_response(child))
+    oversized["error"] = {"code": "internal_error", "message": "é" * 300_000}
+    with pytest.raises(Exception):
+        complete_rpc_request(
+            conn, request=child, response=oversized, parent_request_id=parent.request_id
+        )
+    assert get_rpc_request(conn, child.request_id).state == "pending"  # type: ignore[union-attr]
+
+
+def test_rpc_state_handoff_and_terminal_mutation_gates(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    request, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(7))
+    assert update_rpc_run_state(
+        conn, run_id=claim.run_id, coordinator_id="coord-1", state="running", action_sequence=1
+    )
+    assert not update_rpc_run_state(
+        conn, run_id=claim.run_id, coordinator_id="coord-1", state="starting", action_sequence=2
+    )
+    assert update_rpc_run_state(
+        conn,
+        run_id=claim.run_id,
+        coordinator_id="coord-1",
+        state="review_ready",
+        action_sequence=2,
+        human_review_ready=True,
+        handoff_committed=True,
+    )
+    assert not update_rpc_run_observation(
+        conn,
+        run_id=claim.run_id,
+        coordinator_id="coord-1",
+        observation_sha256="a" * 64,
+        action_sequence=3,
+    )
+    assert not request_rpc_cancellation(conn, run_id=claim.run_id, coordinator_id="coord-1")
+    assert not update_rpc_run_artifact_manifest(
+        conn, run_id=claim.run_id, coordinator_id="coord-1", manifest_sha256="b" * 64, action_sequence=3
+    )
+    assert request.request_id == get_rpc_request(conn, request.request_id).request_id  # type: ignore[union-attr]
+
+
+def test_rpc_manual_blocked_handoff_and_resume_matrix(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _, manual_claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(15))
+    assert update_rpc_run_state(
+        conn, run_id=manual_claim.run_id, coordinator_id="coord-1", state="running", action_sequence=1
+    )
+    assert update_rpc_run_state(
+        conn,
+        run_id=manual_claim.run_id,
+        coordinator_id="coord-1",
+        state="manual",
+        action_sequence=2,
+        handoff_committed=False,
+    )
+    assert update_rpc_run_state(
+        conn, run_id=manual_claim.run_id, coordinator_id="coord-1", state="running", action_sequence=3
+    )
+    assert update_rpc_run_state(
+        conn,
+        run_id=manual_claim.run_id,
+        coordinator_id="coord-1",
+        state="manual",
+        action_sequence=4,
+        handoff_committed=True,
+    )
+    assert not update_rpc_run_state(
+        conn, run_id=manual_claim.run_id, coordinator_id="coord-1", state="running", action_sequence=5
+    )
+    _, blocked_claim = _new_rpc_claim(
+        conn,
+        tmp_path,
+        request_id=_uuid(16),
+        url="https://boards.greenhouse.io/acme/jobs/457",
+        initialize=False,
+    )
+    assert update_rpc_run_state(
+        conn, run_id=blocked_claim.run_id, coordinator_id="coord-1", state="running", action_sequence=1
+    )
+    assert update_rpc_run_state(
+        conn, run_id=blocked_claim.run_id, coordinator_id="coord-1", state="blocked", action_sequence=2
+    )
+    assert update_rpc_run_state(
+        conn, run_id=blocked_claim.run_id, coordinator_id="coord-1", state="running", action_sequence=3
+    )
+    assert update_rpc_run_state(
+        conn,
+        run_id=blocked_claim.run_id,
+        coordinator_id="coord-1",
+        state="blocked",
+        action_sequence=4,
+        handoff_committed=True,
+    )
+    assert not update_rpc_run_state(
+        conn, run_id=blocked_claim.run_id, coordinator_id="coord-1", state="running", action_sequence=5
+    )
+    _, invalid_claim = _new_rpc_claim(
+        conn,
+        tmp_path,
+        request_id=_uuid(17),
+        url="https://boards.greenhouse.io/acme/jobs/458",
+        initialize=False,
+    )
+    assert update_rpc_run_state(
+        conn, run_id=invalid_claim.run_id, coordinator_id="coord-1", state="running", action_sequence=1
+    )
+    assert not update_rpc_run_state(
+        conn,
+        run_id=invalid_claim.run_id,
+        coordinator_id="coord-1",
+        state="running",
+        action_sequence=2,
+        human_review_ready=True,
+    )
+    assert not update_rpc_run_state(
+        conn,
+        run_id=invalid_claim.run_id,
+        coordinator_id="coord-1",
+        state="manual",
+        action_sequence=2,
+        human_review_ready=True,
+    )
+
+
+def test_rpc_process_identity_requires_live_exact_immutable_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(8))
+    monkeypatch.setattr(
+        db_module,
+        "_capture_process_identity",
+        lambda pid: {"pid": pid, "pgid": pid, "birth": "birth-a"},
+    )
+    assert update_rpc_run_process(
+        conn,
+        run_id=claim.run_id,
+        coordinator_id="coord-1",
+        pid=12345,
+        session_sha256="a" * 64,
+    )
+    assert update_rpc_run_process(
+        conn,
+        run_id=claim.run_id,
+        coordinator_id="coord-1",
+        pid=12345,
+        session_sha256="a" * 64,
+    )
+    assert not update_rpc_run_process(
+        conn,
+        run_id=claim.run_id,
+        coordinator_id="coord-1",
+        pid=12346,
+        session_sha256="a" * 64,
+    )
+
+
+def test_rpc_process_identity_provisional_session_upgrades_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(801))
+    monkeypatch.setattr(
+        db_module,
+        "_capture_process_identity",
+        lambda pid: {"pid": pid, "pgid": pid, "birth": "birth-provisional"},
+    )
+    provisional = db_module.rpc_provisional_session_sha256(
+        12345, 12345, "birth-provisional"
+    )
+    assert db_module.mark_rpc_omp_spawn_attempted(
+        conn, run_id=claim.run_id, coordinator_id="coord-1"
+    )
+    assert not update_rpc_run_process(
+        conn,
+        run_id=claim.run_id,
+        coordinator_id="coord-1",
+        pid=12345,
+        session_sha256=provisional,
+        process_identity={"pid": 12345, "pgid": 12345, "birth": "stale-birth"},
+    )
+    assert update_rpc_run_process(
+        conn,
+        run_id=claim.run_id,
+        coordinator_id="coord-1",
+        pid=12345,
+        session_sha256=provisional,
+        process_identity={"pid": 12345, "pgid": 12345, "birth": "birth-provisional"},
+    )
+    assert update_rpc_run_process(
+        conn,
+        run_id=claim.run_id,
+        coordinator_id="coord-1",
+        pid=12345,
+        session_sha256="a" * 64,
+        process_identity={"pid": 12345, "pgid": 12345, "birth": "birth-provisional"},
+    )
+    observation = json.loads(
+        conn.execute(
+            "SELECT observation_json FROM application_runs WHERE id=?",
+            (claim.run_id,),
+        ).fetchone()[0]
+    )
+    assert "_omp_spawn_attempted" not in observation
+    assert not update_rpc_run_process(
+        conn,
+        run_id=claim.run_id,
+        coordinator_id="coord-1",
+        pid=12345,
+        session_sha256="b" * 64,
+    )
+    assert not update_rpc_run_process(
+        conn,
+        run_id=claim.run_id,
+        coordinator_id="coord-1",
+        pid=12345,
+        session_sha256=provisional,
+    )
+
+
+def test_rpc_omp_spawn_marker_blocks_startup_without_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(802))
+    root = ArtifactRoot.open(tmp_path / "artifacts", cwd=tmp_path)
+    assert db_module.mark_rpc_omp_spawn_attempted(
+        conn, run_id=claim.run_id, coordinator_id="coord-1"
+    )
+    monkeypatch.setattr(db_module, "_coordinator_identity_state", lambda row: "absent")
+    with pytest.raises(RuntimeError, match="reconciliation conflict"):
+        initialize_database(conn, migration_artifact_root=root)
+    observation = json.loads(
+        conn.execute(
+            "SELECT observation_json FROM application_runs WHERE id=?",
+            (claim.run_id,),
+        ).fetchone()[0]
+    )
+    assert observation["_omp_spawn_attempted"] is True
+    root.close()
+
+
+
+
+def test_abort_rpc_run_for_shutdown_cleans_exact_groups_before_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, child, identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=False,
+        review_state="prepared",
+        omp_live=False,
+    )
+    current = db_module._capture_rpc_coordinator_identity()
+    assert current is not None
+    conn.execute(
+        """
+        UPDATE application_rpc_runs
+        SET coordinator_pid=?, coordinator_pgid=?, coordinator_birth=?
+        WHERE run_id=?
+        """,
+        (current["pid"], current["pgid"], current["birth"], run_id),
+    )
+    conn.commit()
+    assert db_module.abort_rpc_run_for_shutdown(
+        conn, run_id=run_id, coordinator_id="coord-1"
+    )
+    assert signals == [
+        (identities["owner"]["pgid"], signal.SIGTERM),
+        (identities["owner"]["pgid"], signal.SIGKILL),
+        (identities["browser"]["pgid"], signal.SIGTERM),
+        (identities["browser"]["pgid"], signal.SIGKILL),
+    ]
+    assert tuple(
+        conn.execute(
+            "SELECT state, handoff_committed FROM application_rpc_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+    ) == ("failed", 0)
+    assert tuple(
+        conn.execute(
+            "SELECT status, reason_code, outcome FROM application_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+    ) == ("failed", "abandoned_running_attempt", "retry")
+    assert conn.execute(
+        "SELECT status FROM jobs WHERE id=(SELECT job_id FROM application_runs WHERE id=?)",
+        (run_id,),
+    ).fetchone()["status"] == "queued"
+    assert get_rpc_request(conn, child.request_id).state == "completed"  # type: ignore[union-attr]
+    root.close()
+    conn.close()
+
+
+def test_abort_rpc_run_for_shutdown_unknown_identity_keeps_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, _child, _identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=False,
+        review_state="prepared",
+        omp_live=False,
+    )
+    current = db_module._capture_rpc_coordinator_identity()
+    assert current is not None
+    conn.execute(
+        """
+        UPDATE application_rpc_runs
+        SET coordinator_pid=?, coordinator_pgid=?, coordinator_birth=?
+        WHERE run_id=?
+        """,
+        (current["pid"], current["pgid"], current["birth"], run_id),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        db_module,
+        "_process_group_state",
+        lambda pid, expected=None: "unknown"
+        if expected is not None and expected.get("pid") == 61202
+        else ("live" if expected is not None else "absent"),
+    )
+    assert not db_module.abort_rpc_run_for_shutdown(
+        conn, run_id=run_id, coordinator_id="coord-1"
+    )
+    assert signals == []
+    assert conn.execute(
+        "SELECT state FROM application_rpc_runs WHERE run_id=?", (run_id,)
+    ).fetchone()["state"] == "running"
+    root.close()
+    conn.close()
+
+
+def test_rpc_events_require_run_provenance_and_ordered_low_entropy_codes(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    parent, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(9))
+    child = _child_request(parent, claim.run_id)
+    reserve_rpc_request(conn, request=child, parent_request_id=parent.request_id)
+    assert append_rpc_event(
+        conn,
+        run_id=claim.run_id,
+        request_id=parent.request_id,
+        event_type="run_started",
+        summary_code="started",
+    ) == 1
+    assert append_rpc_event(
+        conn,
+        run_id=claim.run_id,
+        request_id=child.request_id,
+        event_type="action_allowed",
+        summary_code="allowed",
+    ) == 2
+    with pytest.raises(ValueError):
+        append_rpc_event(
+            conn, run_id=claim.run_id, request_id=child.request_id,
+            event_type="action_allowed", summary_code="model text",
+        )
+    with pytest.raises(RuntimeError, match="provenance mismatch"):
+        append_rpc_event(
+            conn, run_id=claim.run_id + 1, request_id=child.request_id,
+            event_type="action_allowed", summary_code="allowed",
+        )
+    events = replay_rpc_events(conn, claim.run_id)
+    assert [event.sequence for event in events] == [1, 2]
+    assert latest_rpc_event(conn, claim.run_id).summary_code == "allowed"  # type: ignore[union-attr]
+
+
+def test_rpc_run_transition_rolls_back_when_event_append_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    parent, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(31))
+    before = tuple(
+        conn.execute(
+            """
+            SELECT state, action_sequence, last_observation_sha256,
+                   artifact_manifest_sha256, version
+            FROM application_rpc_runs WHERE run_id=?
+            """,
+            (claim.run_id,),
+        ).fetchone()
+    )
+    monkeypatch.setattr(
+        db_module,
+        "_append_rpc_event_locked",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("event append failed")),
+    )
+    with pytest.raises(RuntimeError, match="event append failed"):
+        commit_rpc_run_transition(
+            conn,
+            RpcRunTransition(
+                run_id=claim.run_id,
+                coordinator_id="coord-1",
+                request_id=parent.request_id,
+                action_sequence=1,
+                event_type="run_started",
+                summary_code="started",
+                state="running",
+                observation_sha256="a" * 64,
+                manifest_sha256="b" * 64,
+            ),
+        )
+    after = tuple(
+        conn.execute(
+            """
+            SELECT state, action_sequence, last_observation_sha256,
+                   artifact_manifest_sha256, version
+            FROM application_rpc_runs WHERE run_id=?
+            """,
+            (claim.run_id,),
+        ).fetchone()
+    )
+    assert after == before
+    assert replay_rpc_events(conn, claim.run_id) == []
+
+
+def test_rpc_run_status_exposes_reason_and_terminal_hashes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(18))
+    initial = get_rpc_run_status(conn, claim.run_id)
+    assert initial is not None
+    assert initial.reason_code is None
+    assert initial.job_url == _RPC_URL
+    assert initial.apply_url.startswith("gh_hash:") and initial.apply_url != initial.job_url
+    assert initial.last_observation_sha256 is None
+    assert initial.artifact_manifest_sha256 is None
+    assert update_rpc_run_observation(
+        conn,
+        run_id=claim.run_id,
+        coordinator_id="coord-1",
+        observation_sha256="e" * 64,
+        action_sequence=1,
+    )
+    assert update_rpc_run_artifact_manifest(
+        conn,
+        run_id=claim.run_id,
+        coordinator_id="coord-1",
+        manifest_sha256="f" * 64,
+        action_sequence=2,
+    )
+    monkeypatch.setattr(db_module, "_process_group_state", lambda pid, expected=None: "absent")
+    monkeypatch.setattr(db_module, "_capture_process_identity", lambda pid: None)
+    assert reconcile_abandoned_rpc_runs(conn).status == "reconciled"
+    terminal = get_rpc_run_status(conn, claim.run_id)
+    assert terminal is not None
+    assert terminal.state == "failed"
+    assert terminal.reason_code == "abandoned_running_attempt"
+    assert terminal.last_observation_sha256 == "e" * 64
+    assert terminal.artifact_manifest_sha256 == "f" * 64
+
+
+def test_rpc_reconciliation_status_job_url_uses_bound_start_request(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(21))
+    job_id = int(conn.execute("SELECT job_id FROM application_runs WHERE id=?", (claim.run_id,)).fetchone()[0])
+    conn.execute(
+        "UPDATE jobs SET canonical_url=? WHERE id=?",
+        ("https://boards.greenhouse.io/acme/jobs/999", job_id),
+    )
+    conn.commit()
+    status = get_rpc_run_status(conn, claim.run_id)
+    assert status is not None
+    assert status.job_url == _RPC_URL
+
+
+
+
+def test_rpc_reconciliation_partitions_live_conflict_and_absent_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    absent_request, absent_claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(19))
+    _, live_claim = _new_rpc_claim(
+        conn,
+        tmp_path,
+        request_id=_uuid(20),
+        url="https://boards.greenhouse.io/acme/jobs/457",
+        initialize=False,
+    )
+    monkeypatch.setattr(
+        db_module,
+        "_capture_process_identity",
+        lambda pid: None if pid == 424241 else {"pid": pid, "pgid": pid, "birth": "live-birth"},
+    )
+    assert update_rpc_run_process(
+        conn,
+        run_id=live_claim.run_id,
+        coordinator_id="coord-1",
+        pid=424242,
+        session_sha256="1" * 64,
+    )
+    conn.execute(
+        """
+        UPDATE application_rpc_runs
+        SET coordinator_pid=424241, coordinator_pgid=424241, coordinator_birth='absent-owner'
+        WHERE run_id=?
+        """,
+        (absent_claim.run_id,),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        db_module,
+        "_process_group_state",
+        lambda pid, expected=None: "live" if pid in {424242, os.getpid()} else "absent",
+    )
+    result = reconcile_abandoned_rpc_runs(conn)
+    assert result.status == "partial"
+    assert result.run_ids == (absent_claim.run_id,)
+    assert result.conflict_run_ids == (live_claim.run_id,)
+    assert get_rpc_run_status(conn, absent_claim.run_id).state == "failed"  # type: ignore[union-attr]
+    assert get_rpc_run_status(conn, live_claim.run_id).state == "starting"  # type: ignore[union-attr]
+    assert get_rpc_request(conn, absent_request.request_id).state == "completed"  # type: ignore[union-attr]
+    assert get_rpc_request(conn, _uuid(20)).state == "pending"  # type: ignore[union-attr]
+
+
+def test_rpc_claim_then_reconcile_second_connection_preserves_live_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "jobs.sqlite3"
+    first = connect(db_path)
+    request, claim = _new_rpc_claim(first, tmp_path, request_id=_uuid(32))
+    before_rpc = tuple(
+        first.execute(
+            "SELECT state, action_sequence, version FROM application_rpc_runs WHERE run_id=?",
+            (claim.run_id,),
+        ).fetchone()
+    )
+    second = connect(db_path)
+    monkeypatch.setattr(
+        db_module,
+        "_process_group_state",
+        lambda pid, expected=None: "live" if pid == os.getpid() else "absent",
+    )
+    result = reconcile_abandoned_rpc_runs(second)
+    assert result.status == "conflict"
+    assert result.conflict_run_ids == (claim.run_id,)
+    assert tuple(
+        first.execute(
+            "SELECT state, action_sequence, version FROM application_rpc_runs WHERE run_id=?",
+            (claim.run_id,),
+        ).fetchone()
+    ) == before_rpc
+    assert first.execute("SELECT status FROM jobs").fetchone()["status"] == "in_progress"
+    assert get_rpc_request(first, request.request_id).state == "pending"  # type: ignore[union-attr]
+    assert replay_rpc_events(first, claim.run_id) == []
+    second.close()
+    first.close()
+
+
+def test_rpc_reconcile_proceeds_only_after_coordinator_owner_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(33))
+    conn.execute(
+        """
+        UPDATE application_rpc_runs
+        SET coordinator_pid=424240, coordinator_pgid=424240, coordinator_birth='gone-owner'
+        WHERE run_id=?
+        """,
+        (claim.run_id,),
+    )
+    conn.commit()
+    monkeypatch.setattr(db_module, "_process_group_state", lambda pid, expected=None: "absent")
+    result = reconcile_abandoned_rpc_runs(conn)
+    assert result.status == "reconciled"
+    assert result.run_ids == (claim.run_id,)
+    assert get_rpc_run_status(conn, claim.run_id).state == "failed"  # type: ignore[union-attr]
+
+
+def test_rpc_composite_proposal_commit_is_atomic_and_replay_safe(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    parent, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(10))
+    child = _child_request(parent, claim.run_id)
+    reserve_rpc_request(conn, request=child, parent_request_id=parent.request_id)
+    bad = _failure_response(child, state="running", action_sequence=1, event_sequence=2)
+    with pytest.raises(RuntimeError, match="event_sequence"):
+        commit_rpc_proposal_result(
+            conn,
+            request=child,
+            response=bad,
+            coordinator_id="coord-1",
+            action_sequence=1,
+            event_type="action_rejected",
+            summary_code="rejected",
+            run_state="running",
+            parent_request_id=parent.request_id,
+        )
+    assert get_rpc_run_status(conn, claim.run_id).action_sequence == 0  # type: ignore[union-attr]
+    assert replay_rpc_events(conn, claim.run_id) == []
+    good = _failure_response(child, state="running", action_sequence=1, event_sequence=1)
+    info = commit_rpc_proposal_result(
+        conn,
+        request=child,
+        response=good,
+        coordinator_id="coord-1",
+        action_sequence=1,
+        event_type="action_rejected",
+        summary_code="rejected",
+        observation_sha256="c" * 64,
+        run_state="running",
+        parent_request_id=parent.request_id,
+    )
+    assert info.state == "completed"
+    assert get_rpc_run_status(conn, claim.run_id).action_sequence == 1  # type: ignore[union-attr]
+
+
+def test_rpc_pending_failure_rolls_back_application_rpc_event_and_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    try:
+        parent, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(90))
+        child = _child_request(parent, claim.run_id)
+        reserve_rpc_request(conn, request=child, parent_request_id=parent.request_id)
+        finalization = {
+            "status": "failed",
+            "reason_code": "browser_error",
+            "observation_summary": {"evidence": "preserved"},
+            "plan_summary": {},
+            "artifact_dir": None,
+        }
+        monkeypatch.setattr(
+            db_module,
+            "_append_rpc_event_locked",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("injected event failure")),
+        )
+        with pytest.raises(RuntimeError, match="injected event failure"):
+            commit_rpc_proposal_failure(
+                conn,
+                request=child,
+                response=_failure_response(
+                    child,
+                    action_sequence=1,
+                    event_sequence=1,
+                    error="workflow_failed",
+                ),
+                coordinator_id="coord-1",
+                action_sequence=1,
+                application_finalization=finalization,
+                parent_request_id=parent.request_id,
+            )
+        app = conn.execute(
+            "SELECT status, outcome FROM application_runs WHERE id=?",
+            (claim.run_id,),
+        ).fetchone()
+        assert tuple(app) == ("running", None)
+        assert get_rpc_run_status(conn, claim.run_id).state == "starting"  # type: ignore[union-attr]
+        assert get_rpc_request(conn, child.request_id).state == "pending"  # type: ignore[union-attr]
+        assert replay_rpc_events(conn, claim.run_id) == []
+    finally:
+        conn.close()
+
+
+def test_rpc_no_pending_failure_rolls_back_application_rpc_and_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    try:
+        parent, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(91))
+        finalization = {
+            "status": "failed",
+            "reason_code": "browser_error",
+            "observation_summary": {"evidence": "preserved"},
+            "plan_summary": {},
+            "artifact_dir": None,
+        }
+        monkeypatch.setattr(
+            db_module,
+            "_append_rpc_event_locked",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("injected event failure")),
+        )
+        with pytest.raises(RuntimeError, match="injected event failure"):
+            commit_rpc_failure(
+                conn,
+                run_id=claim.run_id,
+                coordinator_id="coord-1",
+                request_id=parent.request_id,
+                action_sequence=1,
+                application_finalization=finalization,
+            )
+        app = conn.execute(
+            """
+            SELECT a.status, a.outcome, j.status AS job_status
+            FROM application_runs AS a JOIN jobs AS j ON j.id=a.job_id
+            WHERE a.id=?
+            """,
+            (claim.run_id,),
+        ).fetchone()
+        assert tuple(app) == ("running", None, "in_progress")
+        assert get_rpc_run_status(conn, claim.run_id).state == "starting"  # type: ignore[union-attr]
+        assert replay_rpc_events(conn, claim.run_id) == []
+    finally:
+        conn.close()
+
+
+def test_rpc_pending_failure_ack_loss_recovers_existing_child_commit(
+    tmp_path: Path,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    try:
+        parent, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(93))
+        child = _child_request(parent, claim.run_id)
+        reserve_rpc_request(conn, request=child, parent_request_id=parent.request_id)
+        finalization = {
+            "status": "failed",
+            "reason_code": "browser_error",
+            "observation_summary": {"evidence": "preserved"},
+            "plan_summary": {},
+            "artifact_dir": None,
+        }
+        first = commit_rpc_proposal_failure(
+            conn,
+            request=child,
+            response=_failure_response(
+                child,
+                action_sequence=1,
+                event_sequence=1,
+                error="workflow_failed",
+            ),
+            coordinator_id="coord-1",
+            action_sequence=1,
+            application_finalization=finalization,
+            parent_request_id=parent.request_id,
+        )
+        second = commit_rpc_proposal_failure(
+            conn,
+            request=child,
+            response=_failure_response(
+                child,
+                action_sequence=2,
+                event_sequence=2,
+                error="workflow_failed",
+            ),
+            coordinator_id="coord-1",
+            action_sequence=2,
+            application_finalization=finalization,
+            parent_request_id=parent.request_id,
+        )
+        assert first.state == second.state == "completed"
+        events = replay_rpc_events(conn, claim.run_id)
+        assert len(events) == 1 and events[0].event_type == "run_failed"
+        assert get_rpc_request(conn, child.request_id).response_json == second.response_json  # type: ignore[union-attr]
+    finally:
+        conn.close()
+
+
+def test_rpc_no_pending_failure_ack_loss_recovers_existing_event(
+    tmp_path: Path,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    try:
+        parent, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(94))
+        finalization = {
+            "status": "failed",
+            "reason_code": "browser_error",
+            "observation_summary": {"evidence": "preserved"},
+            "plan_summary": {},
+            "artifact_dir": None,
+        }
+        first = commit_rpc_failure(
+            conn,
+            run_id=claim.run_id,
+            coordinator_id="coord-1",
+            request_id=parent.request_id,
+            action_sequence=1,
+            application_finalization=finalization,
+        )
+        second = commit_rpc_failure(
+            conn,
+            run_id=claim.run_id,
+            coordinator_id="coord-1",
+            request_id=parent.request_id,
+            action_sequence=2,
+            application_finalization=finalization,
+        )
+        assert first.sequence == second.sequence == 1
+        events = replay_rpc_events(conn, claim.run_id)
+        assert len(events) == 1 and events[0].event_type == "run_failed"
+    finally:
+        conn.close()
+
+
+def test_rpc_unsafe_blocked_failure_is_rejected_without_split(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    try:
+        parent, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(92))
+        with pytest.raises(ValueError):
+            commit_rpc_failure(
+                conn,
+                run_id=claim.run_id,
+                coordinator_id="coord-1",
+                request_id=parent.request_id,
+                action_sequence=1,
+                application_finalization={
+                    "status": "blocked",
+                    "reason_code": "unsafe_navigation_target",
+                    "observation_summary": {},
+                    "plan_summary": {},
+                    "artifact_dir": None,
+                },
+            )
+        assert get_rpc_run_status(conn, claim.run_id).state == "starting"  # type: ignore[union-attr]
+        assert replay_rpc_events(conn, claim.run_id) == []
+        app = conn.execute(
+            "SELECT status, outcome FROM application_runs WHERE id=?",
+            (claim.run_id,),
+        ).fetchone()
+        assert tuple(app) == ("running", None)
+    finally:
+        conn.close()
+
+
+def test_rpc_reconciliation_absent_is_idempotent_and_finalizes_application(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    request, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(11))
+    monkeypatch.setattr(db_module, "_process_group_state", lambda pid, expected=None: "absent")
+    monkeypatch.setattr(db_module, "_capture_process_identity", lambda pid: None)
+    result = reconcile_abandoned_rpc_runs(conn)
+    assert result.status == "reconciled" and result.run_ids == (claim.run_id,)
+    rpc = get_rpc_run_status(conn, claim.run_id)
+    app = conn.execute(
+        "SELECT status, reason_code, outcome, reviewed_at FROM application_runs WHERE id=?",
+        (claim.run_id,),
+    ).fetchone()
+    assert rpc.state == "failed"  # type: ignore[union-attr]
+    assert tuple(app) == ("failed", "abandoned_running_attempt", "retry", app["reviewed_at"])
+    stored = get_rpc_request(conn, request.request_id)
+    assert stored.state == "completed"  # type: ignore[union-attr]
+    assert replay_rpc_events(conn, claim.run_id)[0].event_type == "run_failed"
+    assert reconcile_abandoned_rpc_runs(conn).status == "noop"
+
+
+def test_rpc_reconciliation_absent_manual_and_blocked_closes_review_and_requeues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    manual_request, manual_claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(22))
+    assert update_rpc_run_state(
+        conn,
+        run_id=manual_claim.run_id,
+        coordinator_id="coord-1",
+        state="running",
+        action_sequence=1,
+    )
+    finish_application_run(
+        conn,
+        run_id=manual_claim.run_id,
+        status="manual",
+        reason_code="page_validation_error",
+        observation_summary={"manual_evidence": "preserved"},
+        plan_summary={"manual_step": "review"},
+    )
+    assert update_rpc_run_state(
+        conn,
+        run_id=manual_claim.run_id,
+        coordinator_id="coord-1",
+        state="manual",
+        action_sequence=2,
+    )
+    manual_child = _child_request(manual_request, manual_claim.run_id)
+    reserve_rpc_request(conn, request=manual_child, parent_request_id=manual_request.request_id)
+
+    blocked_request, blocked_claim = _new_rpc_claim(
+        conn,
+        tmp_path,
+        request_id=_uuid(23),
+        url="https://boards.greenhouse.io/acme/jobs/457",
+        initialize=False,
+    )
+    assert update_rpc_run_state(
+        conn,
+        run_id=blocked_claim.run_id,
+        coordinator_id="coord-1",
+        state="running",
+        action_sequence=1,
+    )
+    finish_application_run(
+        conn,
+        run_id=blocked_claim.run_id,
+        status="blocked",
+        reason_code="ats_mismatch",
+        observation_summary={"blocked_evidence": "preserved"},
+        plan_summary={"blocked_step": "review"},
+    )
+    assert update_rpc_run_state(
+        conn,
+        run_id=blocked_claim.run_id,
+        coordinator_id="coord-1",
+        state="blocked",
+        action_sequence=2,
+    )
+    blocked_child = _child_request(blocked_request, blocked_claim.run_id)
+    reserve_rpc_request(conn, request=blocked_child, parent_request_id=blocked_request.request_id)
+
+    before: dict[int, dict[str, object]] = {}
+    for run_id in (manual_claim.run_id, blocked_claim.run_id):
+        row = conn.execute(
+            """
+            SELECT status, reason_code, finished_at, observation_json, plan_json, artifact_dir
+            FROM application_runs WHERE id=?
+            """,
+            (run_id,),
+        ).fetchone()
+        assert row is not None
+        before[run_id] = dict(row)
+    monkeypatch.setattr(db_module, "_process_group_state", lambda pid, expected=None: "absent")
+    monkeypatch.setattr(db_module, "_capture_process_identity", lambda pid: None)
+    result = reconcile_abandoned_rpc_runs(conn)
+    assert result.status == "reconciled"
+    assert result.run_ids == (manual_claim.run_id, blocked_claim.run_id)
+    assert result.event_sequences == ((manual_claim.run_id, 1), (blocked_claim.run_id, 1))
+
+    for run_id, request, child, expected_status, expected_reason in (
+        (manual_claim.run_id, manual_request, manual_child, "manual", "page_validation_error"),
+        (blocked_claim.run_id, blocked_request, blocked_child, "blocked", "ats_mismatch"),
+    ):
+        rpc = get_rpc_run_status(conn, run_id)
+        assert rpc is not None and rpc.state == "failed"
+        app = conn.execute(
+            "SELECT * FROM application_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+        assert app is not None
+        assert app["status"] == expected_status
+        assert app["reason_code"] == expected_reason
+        assert app["outcome"] == "retry" and app["reviewed_at"] is not None
+        for field, value in before[run_id].items():
+            assert app[field] == value
+        job_status = conn.execute(
+            "SELECT j.status FROM jobs j JOIN application_runs a ON a.job_id=j.id WHERE a.id=?",
+            (run_id,),
+        ).fetchone()
+        assert job_status["status"] == "queued"  # type: ignore[index]
+        for stored in (get_rpc_request(conn, request.request_id), get_rpc_request(conn, child.request_id)):
+            assert stored is not None and stored.state == "completed"
+            assert json.loads(stored.response_json or "{}")["state"] == "failed"
+        events = replay_rpc_events(conn, run_id)
+        assert len(events) == 1
+        assert events[0].event_type == "run_failed"
+        assert events[0].summary_code == "failed"
+    assert reconcile_abandoned_rpc_runs(conn).status == "noop"
+
+
+@pytest.mark.parametrize(
+    ("terminal_status", "reason_code"),
+    (
+        ("manual", "page_validation_error"),
+        ("blocked", "ats_mismatch"),
+    ),
+)
+def test_rpc_cancellation_terminalizes_processless_review_state(
+    tmp_path: Path,
+    terminal_status: str,
+    reason_code: str,
+) -> None:
+    conn = connect(tmp_path / f"{terminal_status}.sqlite3")
+    try:
+        request, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(80 + len(terminal_status)))
+        assert update_rpc_run_state(
+            conn,
+            run_id=claim.run_id,
+            coordinator_id="coord-1",
+            state="running",
+            action_sequence=1,
+        )
+        finish_application_run(
+            conn,
+            run_id=claim.run_id,
+            status=terminal_status,  # type: ignore[arg-type]
+            reason_code=reason_code,
+        )
+        assert update_rpc_run_state(
+            conn,
+            run_id=claim.run_id,
+            coordinator_id="coord-1",
+            state=terminal_status,
+            action_sequence=2,
+        )
+        assert request_rpc_cancellation(
+            conn,
+            run_id=claim.run_id,
+            coordinator_id="coord-1",
+        )
+        app = conn.execute(
+            """
+            SELECT a.status, a.reason_code, a.outcome, j.status AS job_status
+            FROM application_runs AS a
+            JOIN jobs AS j ON j.id=a.job_id
+            WHERE a.id=?
+            """,
+            (claim.run_id,),
+        ).fetchone()
+        assert tuple(app) == (
+            "failed",
+            "abandoned_running_attempt",
+            "retry",
+            "queued",
+        )
+        status = get_rpc_run_status(conn, claim.run_id)
+        assert status is not None
+        assert status.state == "failed" and status.cancellation_requested
+        events = replay_rpc_events(conn, claim.run_id)
+        assert events[-1].event_type == "run_failed"
+        assert sum(event.event_type == "run_failed" for event in events) == 1
+        assert not request_rpc_cancellation(
+            conn,
+            run_id=claim.run_id,
+            coordinator_id="coord-1",
+        )
+    finally:
+        conn.close()
+
+
+def test_cancel_first_atomically_blocks_handoff_intent_binding(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    try:
+        parent, claim = _new_rpc_claim(
+            conn,
+            tmp_path,
+            request_id=_uuid(86),
+        )
+        child = _rpc_request(
+            request_id=_uuid(87),
+            operation="browser.prepare_human_handoff",
+            run_id=claim.run_id,
+            payload={"observation_sha256": "a" * 64},
+        )
+        reserve_rpc_request(
+            conn,
+            request=child,
+            parent_request_id=parent.request_id,
+        )
+        assert request_rpc_cancellation(
+            conn,
+            run_id=claim.run_id,
+            coordinator_id="coord-1",
+        )
+        before = conn.execute(
+            "SELECT observation_json FROM application_runs WHERE id=?",
+            (claim.run_id,),
+        ).fetchone()["observation_json"]
+        intent = {
+            "application_finalization": {},
+            "artifact_manifest_sha256": "b" * 64,
+            "artifact_sha256": "c" * 64,
+            "child_request_id": child.request_id,
+            "commit_token_sha256": "d" * 64,
+            "job_id": int(claim.claim.job["id"]),
+            "observation_sha256": "a" * 64,
+            "parent_request_id": parent.request_id,
+            "session_id": "cancelled-session",
+            "proposal_result": {},
+        }
+
+        with pytest.raises(RuntimeError, match="handoff intent provenance mismatch"):
+            bind_rpc_handoff_intent(
+                conn,
+                request=child,
+                coordinator_id="coord-1",
+                intent=intent,
+            )
+
+        after = conn.execute(
+            "SELECT observation_json FROM application_runs WHERE id=?",
+            (claim.run_id,),
+        ).fetchone()["observation_json"]
+        assert after == before
+        assert "_handoff_intent" not in json.loads(after)
+        status = get_rpc_run_status(conn, claim.run_id)
+        assert status is not None and status.cancellation_requested
+        assert status.handoff_committed is False
+    finally:
+        conn.close()
+
+
+def test_rpc_reconciliation_manual_blocked_handoff_live_unknown_stay_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+
+    live_request, live_claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(24))
+    assert update_rpc_run_state(
+        conn,
+        run_id=live_claim.run_id,
+        coordinator_id="coord-1",
+        state="running",
+        action_sequence=1,
+    )
+    finish_application_run(conn, run_id=live_claim.run_id, status="manual", reason_code="page_validation_error")
+    conn.execute(
+        """
+        UPDATE application_rpc_runs
+        SET omp_process_pid=91001, omp_process_pgid=91001,
+            omp_process_birth='live-birth', omp_session_sha256=?
+        WHERE run_id=?
+        """,
+        ("a" * 64, live_claim.run_id),
+    )
+    conn.commit()
+    assert update_rpc_run_state(
+        conn,
+        run_id=live_claim.run_id,
+        coordinator_id="coord-1",
+        state="manual",
+        action_sequence=2,
+    )
+
+    unknown_request, unknown_claim = _new_rpc_claim(
+        conn,
+        tmp_path,
+        request_id=_uuid(25),
+        url="https://boards.greenhouse.io/acme/jobs/457",
+        initialize=False,
+    )
+    assert update_rpc_run_state(
+        conn,
+        run_id=unknown_claim.run_id,
+        coordinator_id="coord-1",
+        state="running",
+        action_sequence=1,
+    )
+    finish_application_run(conn, run_id=unknown_claim.run_id, status="blocked", reason_code="ats_mismatch")
+    conn.execute(
+        """
+        UPDATE application_rpc_runs
+        SET omp_process_pid=91002, omp_process_pgid=91002,
+            omp_process_birth='unknown-birth', omp_session_sha256=?
+        WHERE run_id=?
+        """,
+        ("b" * 64, unknown_claim.run_id),
+    )
+    conn.commit()
+    assert update_rpc_run_state(
+        conn,
+        run_id=unknown_claim.run_id,
+        coordinator_id="coord-1",
+        state="blocked",
+        action_sequence=2,
+    )
+
+    handed_manual_request, handed_manual_claim = _new_rpc_claim(
+        conn,
+        tmp_path,
+        request_id=_uuid(26),
+        url="https://boards.greenhouse.io/acme/jobs/458",
+        initialize=False,
+    )
+    assert update_rpc_run_state(
+        conn,
+        run_id=handed_manual_claim.run_id,
+        coordinator_id="coord-1",
+        state="running",
+        action_sequence=1,
+    )
+    finish_application_run(conn, run_id=handed_manual_claim.run_id, status="manual", reason_code="page_validation_error")
+    assert update_rpc_run_state(
+        conn,
+        run_id=handed_manual_claim.run_id,
+        coordinator_id="coord-1",
+        state="manual",
+        action_sequence=2,
+        handoff_committed=True,
+    )
+
+    handed_blocked_request, handed_blocked_claim = _new_rpc_claim(
+        conn,
+        tmp_path,
+        request_id=_uuid(27),
+        url="https://boards.greenhouse.io/acme/jobs/459",
+        initialize=False,
+    )
+    assert update_rpc_run_state(
+        conn,
+        run_id=handed_blocked_claim.run_id,
+        coordinator_id="coord-1",
+        state="running",
+        action_sequence=1,
+    )
+    finish_application_run(conn, run_id=handed_blocked_claim.run_id, status="blocked", reason_code="ats_mismatch")
+    assert update_rpc_run_state(
+        conn,
+        run_id=handed_blocked_claim.run_id,
+        coordinator_id="coord-1",
+        state="blocked",
+        action_sequence=2,
+        handoff_committed=True,
+    )
+
+    monkeypatch.setattr(
+        db_module,
+        "_process_group_state",
+        lambda pid, expected=None: "live" if pid == 91001 else "unknown",
+    )
+    protected = (live_claim, unknown_claim, handed_manual_claim, handed_blocked_claim)
+    before_rpc = {
+        claim.run_id: tuple(
+            conn.execute(
+                "SELECT state, handoff_committed, version FROM application_rpc_runs WHERE run_id=?",
+                (claim.run_id,),
+            ).fetchone()
+        )
+        for claim in protected
+    }
+    result = reconcile_abandoned_rpc_runs(conn)
+    assert result.status == "conflict"
+    assert result.conflict_run_ids == (live_claim.run_id, unknown_claim.run_id)
+    for claim, request in (
+        (live_claim, live_request),
+        (unknown_claim, unknown_request),
+        (handed_manual_claim, handed_manual_request),
+        (handed_blocked_claim, handed_blocked_request),
+    ):
+        after_rpc = tuple(
+            conn.execute(
+                "SELECT state, handoff_committed, version FROM application_rpc_runs WHERE run_id=?",
+                (claim.run_id,),
+            ).fetchone()
+        )
+        assert after_rpc == before_rpc[claim.run_id]
+        app = conn.execute(
+            "SELECT status, outcome, reviewed_at FROM application_runs WHERE id=?",
+            (claim.run_id,),
+        ).fetchone()
+        assert app["outcome"] is None and app["reviewed_at"] is None  # type: ignore[index]
+        job = conn.execute(
+            "SELECT j.status FROM jobs j JOIN application_runs a ON a.job_id=j.id WHERE a.id=?",
+            (claim.run_id,),
+        ).fetchone()
+        assert job["status"] == "in_progress"  # type: ignore[index]
+        assert get_rpc_request(conn, request.request_id).state == "pending"  # type: ignore[union-attr]
+        assert replay_rpc_events(conn, claim.run_id) == []
+
+
+def test_rpc_reconciliation_completes_null_run_pending_start(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    request = _rpc_request(request_id=_uuid(12))
+    claim = claim_application_job_for_rpc(
+        conn, owner="rpc-owner", request=request, coordinator_id="coord-1"
+    )
+    assert claim.outcome == "unavailable"
+    result = reconcile_abandoned_rpc_runs(conn)
+    assert result.status == "reconciled" and result.run_ids == ()
+    stored = get_rpc_request(conn, request.request_id)
+    assert stored.state == "completed" and json.loads(stored.response_json)["error"]["code"] == "internal_error"  # type: ignore[union-attr]
+
+
+def test_rpc_reconciliation_live_or_unknown_identity_is_fixed_conflict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(13))
+    conn.execute(
+        """
+        UPDATE application_rpc_runs
+        SET omp_process_pid=12345, omp_process_pgid=12345,
+            omp_process_birth='birth-a', omp_session_sha256=?
+        WHERE run_id=?
+        """,
+        ("a" * 64, claim.run_id),
+    )
+    conn.commit()
+    before = tuple(conn.execute("SELECT state, version FROM application_rpc_runs WHERE run_id=?", (claim.run_id,)).fetchone())
+    monkeypatch.setattr(db_module, "_process_group_state", lambda pid, expected=None: "live")
+    conflict = reconcile_abandoned_rpc_runs(conn)
+    assert conflict.status == "conflict"
+    after = tuple(conn.execute("SELECT state, version FROM application_rpc_runs WHERE run_id=?", (claim.run_id,)).fetchone())
+    assert after == before
+    monkeypatch.setattr(db_module, "_process_group_state", lambda pid, expected=None: "unknown")
+    assert reconcile_abandoned_rpc_runs(conn).status == "conflict"
+
+
+def test_rpc_precommit_closed_cleanup_requeues_only_after_generic_reconcile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    parent, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(40))
+    observation_sha256 = "a" * 64
+    child = _rpc_request(
+        request_id=_uuid(41),
+        operation="browser.prepare_human_handoff",
+        run_id=claim.run_id,
+        payload={"observation_sha256": observation_sha256},
+    )
+    reserve_rpc_request(conn, request=child, parent_request_id=parent.request_id)
+    owner = {"pid": 12460, "pgid": 12460, "birth": "fixture-process"}
+    browser = {"pid": 23470, "pgid": 23470, "birth": "fixture-process"}
+    omp = {"pid": 34580, "pgid": 34580, "birth": "fixture-process"}
+    original_capture = db_module._capture_process_identity
+
+    def capture(pid: int):
+        if pid in {owner["pid"], browser["pid"], omp["pid"]}:
+            return {"pid": pid, "pgid": pid, "birth": "fixture-process"}
+        return original_capture(pid)
+
+    monkeypatch.setattr(db_module, "_capture_process_identity", capture)
+    assert update_rpc_run_process(
+        conn,
+        run_id=claim.run_id,
+        coordinator_id="coord-1",
+        pid=omp["pid"],
+        session_sha256="b" * 64,
+    )
+    assert register_application_artifact(conn, run_id=claim.run_id, artifact_dir=f"run-{claim.run_id}")
+    assert register_application_session(conn, run_id=claim.run_id, session_id="precommit-session", session_state="open")
+    assert mark_application_spawn_attempted(conn, run_id=claim.run_id, session_id="precommit-session")
+    assert register_application_owner_process(
+        conn, run_id=claim.run_id, owner_pid=owner["pid"], process_identity=owner
+    )
+    assert register_application_browser_process(
+        conn, run_id=claim.run_id, browser_pid=browser["pid"], process_identity=browser
+    )
+    token = "c" * 64
+    finalization = {
+        "artifact_dir": f"run-{claim.run_id}",
+        "observation_summary": {},
+        "plan_summary": {},
+        "reason_code": "draft_ready",
+        "status": "review_ready",
+    }
+    proposal_result = {
+        "outcome": "committed",
+        "reason_code": "draft_ready",
+        "observation_sha256": observation_sha256,
+        "unresolved_required_count": 0,
+        "automated_submission": False,
+    }
+    root = ArtifactRoot.open(tmp_path / "artifacts", cwd=tmp_path)
+    with root.create_run_dir(claim.run_id) as run:
+        run.write_json(
+            "run.json",
+            {
+                "run_id": claim.run_id,
+                "job_id": int(claim.claim.job["id"]),  # type: ignore[union-attr]
+                "ats_policy": "greenhouse",
+                "commit_token_sha256": token,
+            },
+        )
+        run_raw = run.read_bytes("run.json")
+        run.write_json(
+            "review_session.json",
+            {
+                "version": 1,
+                "run_id": claim.run_id,
+                "job_id": int(claim.claim.job["id"]),  # type: ignore[union-attr]
+                "session_id": "precommit-session",
+                "owner_pid": owner["pid"],
+                "owner_pgid": owner["pgid"],
+                "owner_birth": owner["birth"],
+                "owner_identity": owner,
+                "browser_pid": browser["pid"],
+                "browser_pgid": browser["pgid"],
+                "browser_birth": browser["birth"],
+                "browser_identity": browser,
+                "state": "closed",
+                "cleanup": True,
+                "cleanup_trigger": "stdin_eof",
+                "terminal_reason": "page_not_stable",
+                "commit_token_sha256": None,
+            },
+        )
+    intent = {
+        "application_finalization": finalization,
+        "artifact_manifest_sha256": hashlib.sha256(run_raw).hexdigest(),
+        "artifact_sha256": "d" * 64,
+        "child_request_id": child.request_id,
+        "commit_token_sha256": token,
+        "job_id": int(claim.claim.job["id"]),  # type: ignore[union-attr]
+        "observation_sha256": observation_sha256,
+        "parent_request_id": parent.request_id,
+        "session_id": "precommit-session",
+        "proposal_result": proposal_result,
+    }
+    conn.execute(
+        "UPDATE application_rpc_runs SET ats_policy='greenhouse' WHERE run_id=?",
+        (claim.run_id,),
+    )
+    conn.commit()
+    bound = bind_rpc_handoff_intent(
+        conn, request=child, coordinator_id="coord-1", intent=intent
+    )
+    assert bound["expected_rpc_version"] >= 1
+    conn.execute(
+        """
+        UPDATE application_rpc_runs
+        SET coordinator_pid=987654, coordinator_pgid=987654,
+            coordinator_birth='gone-coordinator'
+        WHERE run_id=?
+        """,
+        (claim.run_id,),
+    )
+    conn.commit()
+    monkeypatch.setattr(db_module, "_capture_process_identity", lambda pid: None)
+    monkeypatch.setattr(db_module, "_process_group_state", lambda pid, expected=None: "absent")
+    recovered = recover_rpc_handoffs(conn, artifact_root=root)
+    assert recovered.status == "recovered"
+    assert recovered.run_ids == (claim.run_id,)
+    assert get_rpc_request(conn, child.request_id).state == "pending"  # type: ignore[union-attr]
+    reconciled = reconcile_abandoned_rpc_runs(conn)
+    assert reconciled.status == "reconciled"
+    app_row = conn.execute(
+        "SELECT status, reason_code, outcome FROM application_runs WHERE id=?", (claim.run_id,)
+    ).fetchone()
+    assert tuple(app_row) == ("failed", "abandoned_running_attempt", "retry")
+    assert conn.execute("SELECT status FROM jobs WHERE id=?", (int(claim.claim.job["id"]),)).fetchone()["status"] == "queued"  # type: ignore[union-attr]
+    child_after = get_rpc_request(conn, child.request_id)
+    assert child_after.state == "completed"  # type: ignore[union-attr]
+    response_json = child_after.response_json  # type: ignore[union-attr]
+    assert reconcile_abandoned_rpc_runs(conn).status == "noop"
+    assert get_rpc_request(conn, child.request_id).response_json == response_json  # type: ignore[union-attr]
+    root.close()
+    conn.close()
+
+
+def _rpc_handoff_recovery_fixture(
+    conn: sqlite3.Connection,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    committed: bool,
+    review_state: str,
+    detached: bool | None = True,
+    owner_live: bool = True,
+    browser_live: bool = True,
+    omp_live: bool = False,
+    include_review: bool = True,
+) -> tuple[ArtifactRoot, int, ApplicationRpcRequest, dict[str, dict[str, object]], dict[str, bool], list[tuple[int, signal.Signals]]]:
+    parent, claim = _new_rpc_claim(
+        conn, tmp_path, request_id=_uuid(80)
+    )
+    observation_sha256 = "a" * 64
+    child = _rpc_request(
+        request_id=_uuid(81),
+        operation="browser.prepare_human_handoff",
+        run_id=claim.run_id,
+        payload={"observation_sha256": observation_sha256},
+    )
+    reserve_rpc_request(conn, request=child, parent_request_id=parent.request_id)
+    identities: dict[str, dict[str, object]] = {
+        "owner": {"pid": 61101, "pgid": 61101, "birth": "owner-birth"},
+        "browser": {"pid": 61202, "pgid": 61202, "birth": "browser-birth"},
+        "omp": {"pid": 61303, "pgid": 61303, "birth": "omp-birth"},
+    }
+    live = {"owner": True, "browser": True, "omp": True}
+    signals: list[tuple[int, signal.Signals]] = []
+
+    def capture(pid: int) -> dict[str, object] | None:
+        for kind, identity in identities.items():
+            if identity["pid"] == pid:
+                return dict(identity) if live[kind] else None
+        return None
+
+    def process_state(pid: int, *, expected: dict[str, object] | None = None) -> str:
+        for kind, identity in identities.items():
+            if identity["pid"] == pid:
+                if not live[kind]:
+                    return "absent"
+                if expected is not None and dict(expected) != dict(identity):
+                    return "unknown"
+                return "live"
+        return "absent"
+
+    def killpg(pgid: int, signum: signal.Signals) -> None:
+        signals.append((pgid, signum))
+        if signum == signal.SIGKILL:
+            for kind, identity in identities.items():
+                if identity["pgid"] == pgid:
+                    live[kind] = False
+
+    monkeypatch.setattr(db_module, "_capture_process_identity", capture)
+    monkeypatch.setattr(db_module, "_RPC_HANDOFF_TERM_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr(db_module, "_RPC_HANDOFF_KILL_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr(db_module, "_RPC_HANDOFF_PROBE_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(db_module.os, "killpg", killpg)
+    monkeypatch.setattr(db_module, "_process_group_state", process_state)
+    assert update_rpc_run_process(
+        conn,
+        run_id=claim.run_id,
+        coordinator_id="coord-1",
+        pid=int(identities["omp"]["pid"]),
+        session_sha256="b" * 64,
+    )
+    assert register_application_artifact(
+        conn, run_id=claim.run_id, artifact_dir=f"run-{claim.run_id}"
+    )
+    assert register_application_session(
+        conn,
+        run_id=claim.run_id,
+        session_id="handoff-session",
+        session_state="open" if committed else "prepared",
+    )
+    assert mark_application_spawn_attempted(
+        conn, run_id=claim.run_id, session_id="handoff-session"
+    )
+    assert register_application_owner_process(
+        conn,
+        run_id=claim.run_id,
+        owner_pid=int(identities["owner"]["pid"]),
+        process_identity=identities["owner"],  # type: ignore[arg-type]
+    )
+    assert register_application_browser_process(
+        conn,
+        run_id=claim.run_id,
+        browser_pid=int(identities["browser"]["pid"]),
+        process_identity=identities["browser"],  # type: ignore[arg-type]
+    )
+    token = "c" * 64
+    job_id = int(claim.claim.job["id"])  # type: ignore[union-attr]
+    finalization = {
+        "artifact_dir": f"run-{claim.run_id}",
+        "observation_summary": {},
+        "plan_summary": {},
+        "reason_code": "draft_ready",
+        "status": "review_ready",
+    }
+    proposal_result = {
+        "outcome": "committed",
+        "reason_code": "draft_ready",
+        "observation_sha256": observation_sha256,
+        "unresolved_required_count": 0,
+        "automated_submission": False,
+    }
+    finalization_artifact = {
+        "version": 1,
+        "run_id": claim.run_id,
+        "job_id": job_id,
+        "operation": "browser.prepare_human_handoff",
+        "session_id": "handoff-session",
+        "child_request_id": child.request_id,
+        "parent_request_id": parent.request_id,
+        "commit_token_sha256": token,
+        "observation_sha256": observation_sha256,
+        "automated_submission": False,
+        "status": "review_ready",
+        "reason_code": "draft_ready",
+        "unresolved_required_count": 0,
+    }
+    root = ArtifactRoot.open(tmp_path / "artifacts", cwd=tmp_path)
+    with root.create_run_dir(claim.run_id) as run:
+        run.write_json("handoff_finalization.json", finalization_artifact)
+        finalization_raw = run.read_bytes("handoff_finalization.json")
+        finalization_sha = hashlib.sha256(finalization_raw).hexdigest()
+        run.write_json(
+            "run.json",
+            {
+                "run_id": claim.run_id,
+                "job_id": job_id,
+                "ats_policy": "greenhouse",
+                "commit_token_sha256": token,
+                "artifacts": {
+                    "handoff_finalization": {
+                        "path": "handoff_finalization.json",
+                        "sha256": finalization_sha,
+                        "iteration": 0,
+                        "stage": "finished",
+                    }
+                },
+            },
+        )
+        run_raw = run.read_bytes("run.json")
+        if include_review:
+            review: dict[str, object] = {
+                "version": 1,
+                "ats_policy": "greenhouse",
+                "run_id": claim.run_id,
+                "job_id": job_id,
+                "session_id": "handoff-session",
+                "owner_pid": identities["owner"]["pid"],
+                "owner_pgid": identities["owner"]["pgid"],
+                "owner_birth": identities["owner"]["birth"],
+                "owner_identity": identities["owner"],
+                "browser_pid": identities["browser"]["pid"],
+                "browser_pgid": identities["browser"]["pgid"],
+                "browser_birth": identities["browser"]["birth"],
+                "browser_identity": identities["browser"],
+                "state": review_state,
+                "spawn_attempted": True,
+                "commit_token_sha256": token if (committed or review_state == "open_guarded") else None,
+            }
+            if detached is not None:
+                review["detached"] = detached
+            if review_state == "closed":
+                review.update(
+                    {
+                        "cleanup": True,
+                        "cleanup_trigger": "stdin_eof",
+                        "terminal_reason": "page_not_stable",
+                    }
+                )
+            run.write_json("review_session.json", review)
+    intent = {
+        "application_finalization": finalization,
+        "artifact_manifest_sha256": hashlib.sha256(run_raw).hexdigest(),
+        "artifact_sha256": finalization_sha,
+        "child_request_id": child.request_id,
+        "commit_token_sha256": token,
+        "job_id": job_id,
+        "observation_sha256": observation_sha256,
+        "parent_request_id": parent.request_id,
+        "session_id": "handoff-session",
+        "proposal_result": proposal_result,
+    }
+    conn.execute(
+        "UPDATE application_rpc_runs SET ats_policy='greenhouse' WHERE run_id=?",
+        (claim.run_id,),
+    )
+    conn.commit()
+    bind_rpc_handoff_intent(
+        conn, request=child, coordinator_id="coord-1", intent=intent
+    )
+    if committed:
+        conn.execute(
+            """
+            UPDATE application_runs
+            SET status='review_ready', reason_code='draft_ready',
+                finished_at=COALESCE(finished_at, ?)
+            WHERE id=?
+            """,
+            (db_module.utc_now(), claim.run_id),
+        )
+        conn.execute(
+            """
+            UPDATE application_rpc_requests
+            SET state='completed', response_json='{}', completed_at=?
+            WHERE request_id=?
+            """,
+            (db_module.utc_now(), child.request_id),
+        )
+        conn.execute(
+            """
+            UPDATE application_rpc_runs
+            SET state='review_ready', human_review_ready=1,
+                handoff_committed=1
+            WHERE run_id=?
+            """,
+            (claim.run_id,),
+        )
+    else:
+        conn.execute(
+            "UPDATE application_rpc_runs SET state='running' WHERE run_id=?",
+            (claim.run_id,),
+        )
+    conn.execute(
+        """
+        UPDATE application_rpc_runs
+        SET coordinator_pid=987654, coordinator_pgid=987654,
+            coordinator_birth='gone-coordinator'
+        WHERE run_id=?
+        """,
+        (claim.run_id,),
+    )
+    conn.commit()
+    live.update(
+        owner=owner_live,
+        browser=browser_live,
+        omp=omp_live,
+    )
+    return root, claim.run_id, child, identities, live, signals
+
+
+def test_prepared_live_handoff_cleanup_requeues_via_generic_reconcile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, child, identities, live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=False,
+        review_state="prepared",
+    )
+    result = recover_rpc_handoffs(conn, artifact_root=root)
+    assert result.status == "recovered" and result.run_ids == (run_id,)
+    assert signals == [
+        (identities["owner"]["pgid"], signal.SIGTERM),
+        (identities["owner"]["pgid"], signal.SIGKILL),
+        (identities["browser"]["pgid"], signal.SIGTERM),
+        (identities["browser"]["pgid"], signal.SIGKILL),
+    ]
+    observation = json.loads(
+        conn.execute(
+            "SELECT observation_json FROM application_runs WHERE id=?", (run_id,)
+        ).fetchone()[0]
+    )
+    assert "_handoff_intent" not in observation
+    assert "_handoff_precommit_intent" in observation
+    assert reconcile_abandoned_rpc_runs(conn).status == "reconciled"
+    app_row = conn.execute(
+        "SELECT status, outcome FROM application_runs WHERE id=?", (run_id,)
+    ).fetchone()
+    assert tuple(app_row) == ("failed", "retry")
+    assert get_rpc_request(conn, child.request_id).state == "completed"  # type: ignore[union-attr]
+    root.close()
+    conn.close()
+
+
+def test_initialize_requeues_precommit_after_live_recovery_rebind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, child, identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=False,
+        review_state="prepared",
+    )
+    root.close()
+    current_identity = db_module._capture_rpc_coordinator_identity()
+    assert current_identity is not None
+    original_capture = db_module._capture_process_identity
+    original_process_state = db_module._process_group_state
+
+    def capture_with_coordinator(pid: int) -> dict[str, object] | None:
+        if pid == current_identity["pid"]:
+            return dict(current_identity)
+        return original_capture(pid)
+
+    def process_state_with_coordinator(
+        pid: int, *, expected: dict[str, object] | None = None
+    ) -> str:
+        if pid == current_identity["pid"]:
+            return (
+                "live"
+                if expected is None or dict(expected) == dict(current_identity)
+                else "unknown"
+            )
+        return original_process_state(pid, expected=expected)
+
+    monkeypatch.setattr(
+        db_module, "_capture_process_identity", capture_with_coordinator
+    )
+    monkeypatch.setattr(
+        db_module, "_process_group_state", process_state_with_coordinator
+    )
+    monkeypatch.setattr(
+        db_module,
+        "_capture_rpc_coordinator_identity",
+        lambda: dict(current_identity),
+    )
+    with ArtifactRoot.open(tmp_path / "artifacts", cwd=tmp_path) as recovery_root:
+        initialize_database(
+            conn,
+            migration_artifact_root=recovery_root,
+            expected_coordinator_id="coord-1",
+        )
+    assert signals == [
+        (identities["owner"]["pgid"], signal.SIGTERM),
+        (identities["owner"]["pgid"], signal.SIGKILL),
+        (identities["browser"]["pgid"], signal.SIGTERM),
+        (identities["browser"]["pgid"], signal.SIGKILL),
+    ]
+    assert tuple(
+        conn.execute(
+            "SELECT status, outcome FROM application_runs WHERE id=?", (run_id,)
+        ).fetchone()
+    ) == ("failed", "retry")
+    assert tuple(
+        conn.execute(
+            "SELECT state, handoff_committed FROM application_rpc_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+    ) == ("failed", 0)
+    assert get_rpc_request(conn, child.request_id).state == "completed"  # type: ignore[union-attr]
+    conn.close()
+
+
+def test_precommit_recovery_marker_survives_coordinator_crash_gap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, child, _identities, _live, _signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=False,
+        review_state="prepared",
+    )
+    root.close()
+    current_identity = db_module._capture_rpc_coordinator_identity()
+    assert current_identity is not None
+    original_capture = db_module._capture_process_identity
+    original_process_state = db_module._process_group_state
+
+    def capture_with_coordinator(pid: int) -> dict[str, object] | None:
+        if pid == current_identity["pid"]:
+            return dict(current_identity)
+        return original_capture(pid)
+
+    def process_state_with_coordinator(
+        pid: int, *, expected: dict[str, object] | None = None
+    ) -> str:
+        if pid == current_identity["pid"]:
+            return (
+                "live"
+                if expected is None or dict(expected) == dict(current_identity)
+                else "unknown"
+            )
+        return original_process_state(pid, expected=expected)
+
+    monkeypatch.setattr(
+        db_module, "_capture_process_identity", capture_with_coordinator
+    )
+    monkeypatch.setattr(
+        db_module, "_process_group_state", process_state_with_coordinator
+    )
+    monkeypatch.setattr(
+        db_module,
+        "_capture_rpc_coordinator_identity",
+        lambda: dict(current_identity),
+    )
+    with ArtifactRoot.open(tmp_path / "artifacts", cwd=tmp_path) as recovery_root:
+        result = recover_rpc_handoffs(
+            conn,
+            artifact_root=recovery_root,
+            expected_coordinator_id="coord-1",
+        )
+    assert result.status == "recovered" and result.run_ids == (run_id,)
+    marker = json.loads(
+        conn.execute(
+            "SELECT observation_json FROM application_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()[0]
+    )["_handoff_precommit_recovery"]
+    assert marker["coordinator_pid"] == current_identity["pid"]
+
+    # The next startup sees the exact recorded coordinator as absent.
+    def former_owner_absent(pid: int) -> dict[str, object] | None:
+        if pid == current_identity["pid"]:
+            return None
+        return original_capture(pid)
+
+    def process_state_after_crash(
+        pid: int, *, expected: dict[str, object] | None = None
+    ) -> str:
+        if pid == current_identity["pid"]:
+            return "absent"
+        return original_process_state(pid, expected=expected)
+
+    monkeypatch.setattr(db_module, "_capture_process_identity", former_owner_absent)
+    monkeypatch.setattr(
+        db_module, "_process_group_state", process_state_after_crash
+    )
+    former_row = conn.execute(
+        "SELECT * FROM application_rpc_runs WHERE run_id=?", (run_id,)
+    ).fetchone()
+    assert db_module._coordinator_identity_state(former_row) == "absent"
+    result = reconcile_abandoned_rpc_runs(
+        conn, expected_coordinator_id="coord-1"
+    )
+    assert result.status == "reconciled"
+    assert result.run_ids == (run_id,)
+    assert tuple(
+        conn.execute(
+            "SELECT status, outcome FROM application_runs WHERE id=?", (run_id,)
+        ).fetchone()
+    ) == ("failed", "retry")
+    assert get_rpc_request(conn, child.request_id).state == "completed"  # type: ignore[union-attr]
+    conn.close()
+
+
+@pytest.mark.parametrize("subordinate", ("omp_live", "malformed_browser"))
+def test_precommit_recovery_marker_does_not_override_subordinate_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    subordinate: str,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, _child, _identities, live, _signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=False,
+        review_state="prepared",
+    )
+    root.close()
+    current_identity = db_module._capture_rpc_coordinator_identity()
+    assert current_identity is not None
+    original_capture = db_module._capture_process_identity
+    original_process_state = db_module._process_group_state
+
+    def capture_with_coordinator(pid: int) -> dict[str, object] | None:
+        if pid == current_identity["pid"]:
+            return dict(current_identity)
+        return original_capture(pid)
+
+    def process_state_with_coordinator(
+        pid: int, *, expected: dict[str, object] | None = None
+    ) -> str:
+        if pid == current_identity["pid"]:
+            return (
+                "live"
+                if expected is None or dict(expected) == dict(current_identity)
+                else "unknown"
+            )
+        return original_process_state(pid, expected=expected)
+
+    monkeypatch.setattr(
+        db_module, "_capture_process_identity", capture_with_coordinator
+    )
+    monkeypatch.setattr(
+        db_module, "_process_group_state", process_state_with_coordinator
+    )
+    monkeypatch.setattr(
+        db_module,
+        "_capture_rpc_coordinator_identity",
+        lambda: dict(current_identity),
+    )
+    with ArtifactRoot.open(tmp_path / "artifacts", cwd=tmp_path) as recovery_root:
+        result = recover_rpc_handoffs(
+            conn,
+            artifact_root=recovery_root,
+            expected_coordinator_id="coord-1",
+        )
+    assert result.status == "recovered" and result.run_ids == (run_id,)
+    if subordinate == "omp_live":
+        live["omp"] = True
+    else:
+        observation = json.loads(
+            conn.execute(
+                "SELECT observation_json FROM application_runs WHERE id=?",
+                (run_id,),
+            ).fetchone()[0]
+        )
+        process = observation["_process"]
+        process.pop("browser")
+        conn.execute(
+            "UPDATE application_runs SET observation_json=? WHERE id=?",
+            (json.dumps(observation), run_id),
+        )
+        conn.commit()
+    before = tuple(
+        conn.execute(
+            "SELECT state, version FROM application_rpc_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+    )
+    result = reconcile_abandoned_rpc_runs(
+        conn, expected_coordinator_id="coord-1"
+    )
+    assert result.status == "conflict"
+    assert result.conflict_run_ids == (run_id,)
+    assert tuple(
+        conn.execute(
+            "SELECT state, version FROM application_rpc_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+    ) == before
+    conn.close()
+
+
+
+
+
+
+def test_uncommitted_open_guarded_detached_both_live_replays_without_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, child, _identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=False,
+        review_state="open_guarded",
+        detached=True,
+        owner_live=True,
+        browser_live=True,
+    )
+    result = recover_rpc_handoffs(conn, artifact_root=root)
+    assert result.status == "recovered" and result.run_ids == (run_id,)
+    assert signals == []
+    app_row = conn.execute(
+        "SELECT status, reason_code, outcome FROM application_runs WHERE id=?",
+        (run_id,),
+    ).fetchone()
+    rpc_row = conn.execute(
+        """
+        SELECT state, human_review_ready, handoff_committed
+        FROM application_rpc_runs WHERE run_id=?
+        """,
+        (run_id,),
+    ).fetchone()
+    assert tuple(app_row) == ("review_ready", "draft_ready", None)
+    assert tuple(rpc_row) == ("review_ready", 1, 1)
+    assert get_rpc_request(conn, child.request_id).state == "completed"  # type: ignore[union-attr]
+    root.close()
+    conn.close()
+
+
+def test_uncommitted_open_guarded_partial_handoff_downgrades_non_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, _child, identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=False,
+        review_state="open_guarded",
+        detached=True,
+        owner_live=False,
+        browser_live=True,
+    )
+    result = recover_rpc_handoffs(conn, artifact_root=root)
+    assert result.status == "recovered" and result.run_ids == (run_id,)
+    assert signals == [
+        (identities["browser"]["pgid"], signal.SIGTERM),
+        (identities["browser"]["pgid"], signal.SIGKILL),
+    ]
+    app_row = conn.execute(
+        "SELECT status, reason_code FROM application_runs WHERE id=?", (run_id,)
+    ).fetchone()
+    rpc_row = conn.execute(
+        "SELECT state, human_review_ready, handoff_committed FROM application_rpc_runs WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    assert tuple(app_row) == ("manual", "page_not_stable")
+    assert tuple(rpc_row) == ("manual", 0, 1)
+    root.close()
+    conn.close()
+
+
+def test_uncommitted_recovery_rebinds_then_closed_window_downgrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, _child, _identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=False,
+        review_state="open_guarded",
+        detached=True,
+        owner_live=False,
+        browser_live=True,
+        omp_live=False,
+    )
+    current = db_module._capture_rpc_coordinator_identity()
+    assert current is not None
+    result = recover_rpc_handoffs(conn, artifact_root=root)
+    assert result.status == "recovered" and result.run_ids == (run_id,)
+    row = conn.execute(
+        """
+        SELECT coordinator_pid, coordinator_pgid, coordinator_birth,
+               omp_session_sha256, state, handoff_committed
+        FROM application_rpc_runs WHERE run_id=?
+        """,
+        (run_id,),
+    ).fetchone()
+    assert (
+        row["coordinator_pid"],
+        row["coordinator_pgid"],
+        row["coordinator_birth"],
+        row["omp_session_sha256"],
+        row["state"],
+        row["handoff_committed"],
+    ) == (
+        current["pid"],
+        current["pgid"],
+        current["birth"],
+        "b" * 64,
+        "manual",
+        1,
+    )
+    assert signals == [
+        (_identities["browser"]["pgid"], signal.SIGTERM),
+        (_identities["browser"]["pgid"], signal.SIGKILL),
+    ]
+    with root.open_run_dir(run_id) as run:
+        review = run.read_json("review_session.json")
+        review.update(
+            {
+                "state": "closed",
+                "cleanup": True,
+                "cleanup_trigger": "stdin_eof",
+                "detached": False,
+                "terminal_reason": "page_not_stable",
+            }
+        )
+        run.write_json("review_session.json", review)
+    assert db_module.reconcile_committed_handoff_failure(
+        conn,
+        run_id=run_id,
+        coordinator_id="coord-1",
+        artifact_root=root,
+    )
+    status = get_rpc_run_status(conn, run_id)
+    assert status is not None
+    assert status.state == "manual"
+    assert status.reason_code == "page_not_stable"
+    root.close()
+    conn.close()
+
+
+def test_coordinator_pid_reuse_is_absent_without_signaling_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, _child, _identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=True,
+        review_state="open_guarded",
+        detached=True,
+        omp_live=False,
+    )
+    recorded = conn.execute(
+        "SELECT coordinator_pid, coordinator_pgid, coordinator_birth FROM application_rpc_runs WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    previous_capture = db_module._capture_process_identity
+
+    def capture(pid: int) -> dict[str, object] | None:
+        if pid == int(recorded["coordinator_pid"]):
+            return {
+                "pid": int(recorded["coordinator_pid"]),
+                "pgid": int(recorded["coordinator_pgid"]),
+                "birth": "replacement-birth",
+            }
+        return previous_capture(pid)
+
+    monkeypatch.setattr(db_module, "_capture_process_identity", capture)
+    assert db_module._coordinator_identity_state(recorded) == "absent"
+    result = recover_rpc_handoffs(conn, artifact_root=root)
+    assert result.status == "noop"
+    assert signals == []
+    row = conn.execute(
+        "SELECT state, human_review_ready FROM application_rpc_runs WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    assert tuple(row) == ("review_ready", 1)
+    root.close()
+    conn.close()
+
+
+def test_committed_missing_review_manifest_quarantines_non_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, _child, identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=True,
+        review_state="open_guarded",
+        detached=True,
+        include_review=False,
+    )
+    result = recover_rpc_handoffs(conn, artifact_root=root)
+    assert result.status == "recovered" and result.run_ids == (run_id,)
+    assert signals == [
+        (identities["owner"]["pgid"], signal.SIGTERM),
+        (identities["owner"]["pgid"], signal.SIGKILL),
+        (identities["browser"]["pgid"], signal.SIGTERM),
+        (identities["browser"]["pgid"], signal.SIGKILL),
+    ]
+    app_row = conn.execute(
+        "SELECT status, reason_code FROM application_runs WHERE id=?", (run_id,)
+    ).fetchone()
+    rpc_row = conn.execute(
+        "SELECT state, human_review_ready FROM application_rpc_runs WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    assert tuple(app_row) == ("manual", "page_not_stable")
+    assert tuple(rpc_row) == ("manual", 0)
+    root.close()
+    conn.close()
+
+
+def test_committed_handoff_drains_bound_live_omp_before_healthy_fast_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, _child, identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=True,
+        review_state="open_guarded",
+        detached=True,
+        omp_live=True,
+    )
+    result = recover_rpc_handoffs(conn, artifact_root=root)
+    assert result.status == "noop"
+    assert signals == [
+        (identities["omp"]["pgid"], signal.SIGTERM),
+        (identities["omp"]["pgid"], signal.SIGKILL),
+    ]
+    rpc_row = conn.execute(
+        "SELECT state, human_review_ready FROM application_rpc_runs WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    assert tuple(rpc_row) == ("review_ready", 1)
+    root.close()
+    conn.close()
+
+
+def test_committed_review_identity_mismatch_quarantines_without_signal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, _child, identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=True,
+        review_state="open_guarded",
+        detached=True,
+    )
+    with root.open_run_dir(run_id) as run:
+        review = json.loads(run.read_bytes("review_session.json").decode("utf-8"))
+        review["owner_pid"] = int(identities["owner"]["pid"]) + 1
+        run.write_json("review_session.json", review)
+    result = recover_rpc_handoffs(conn, artifact_root=root)
+    assert result.status == "recovered" and result.run_ids == (run_id,)
+    assert signals == [
+        (identities["owner"]["pgid"], signal.SIGTERM),
+        (identities["owner"]["pgid"], signal.SIGKILL),
+        (identities["browser"]["pgid"], signal.SIGTERM),
+        (identities["browser"]["pgid"], signal.SIGKILL),
+    ]
+    app_row = conn.execute(
+        "SELECT status, reason_code FROM application_runs WHERE id=?", (run_id,)
+    ).fetchone()
+    rpc_row = conn.execute(
+        "SELECT state, human_review_ready FROM application_rpc_runs WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    assert tuple(app_row) == ("manual", "page_not_stable")
+    assert tuple(rpc_row) == ("manual", 0)
+    root.close()
+    conn.close()
+
+
+def test_committed_corrupt_review_manifest_cleans_bound_groups_before_quarantine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, _child, identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=True,
+        review_state="open_guarded",
+        detached=True,
+    )
+    with root.open_run_dir(run_id) as run:
+        run.write_bytes("review_session.json", b"{")
+    result = recover_rpc_handoffs(conn, artifact_root=root)
+    assert result.status == "recovered" and result.run_ids == (run_id,)
+    assert signals == [
+        (identities["owner"]["pgid"], signal.SIGTERM),
+        (identities["owner"]["pgid"], signal.SIGKILL),
+        (identities["browser"]["pgid"], signal.SIGTERM),
+        (identities["browser"]["pgid"], signal.SIGKILL),
+    ]
+    assert tuple(
+        conn.execute(
+            "SELECT status, reason_code FROM application_runs WHERE id=?",
+            (run_id,),
+        ).fetchone()
+    ) == ("manual", "page_not_stable")
+    root.close()
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("absent_kind", "live_kind"),
+    [("owner", "browser"), ("browser", "owner")],
+)
+def test_partial_handoff_cleanup_supervises_only_exact_live_sibling(
+    absent_kind: str,
+    live_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    identities = {
+        "owner": {"pid": 50101, "pgid": 50101, "birth": "owner-birth"},
+        "browser": {"pid": 50202, "pgid": 50202, "birth": "browser-birth"},
+    }
+    live = {kind: kind == live_kind for kind in identities}
+    signals: list[tuple[int, signal.Signals]] = []
+
+    def capture(pid: int) -> dict[str, object] | None:
+        for kind, identity in identities.items():
+            if identity["pid"] == pid:
+                return dict(identity) if live[kind] else None
+        return None
+
+    def killpg(pgid: int, signum: signal.Signals) -> None:
+        signals.append((pgid, signum))
+        if signum == signal.SIGKILL:
+            for kind, identity in identities.items():
+                if identity["pgid"] == pgid:
+                    live[kind] = False
+
+    monkeypatch.setattr(
+        db_module,
+        "_process_group_state",
+        lambda pid, expected=None: (
+            "live"
+            if any(identity["pid"] == pid and live[kind] for kind, identity in identities.items())
+            else "absent"
+        ),
+    )
+    monkeypatch.setattr(db_module, "_capture_process_identity", capture)
+    monkeypatch.setattr(db_module, "_RPC_HANDOFF_TERM_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr(db_module, "_RPC_HANDOFF_KILL_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr(db_module, "_RPC_HANDOFF_PROBE_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(db_module.os, "killpg", killpg)
+
+    mode = db_module._supervise_partial_handoff_processes(identities)
+
+    assert mode == "partial"
+    assert signals == [
+        (identities[live_kind]["pgid"], signal.SIGTERM),
+        (identities[live_kind]["pgid"], signal.SIGKILL),
+    ]
+    assert not live[absent_kind] and not live[live_kind]
+
+
+def test_partial_handoff_cleanup_unknown_identity_fails_closed_without_signal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = {"pid": 50303, "pgid": 50303, "birth": "owner-birth"}
+    browser = {"pid": 50404, "pgid": 50404, "birth": "browser-birth"}
+    signals: list[tuple[int, signal.Signals]] = []
+
+    def capture(pid: int) -> dict[str, object] | None:
+        if pid == owner["pid"]:
+            return None
+        if pid == browser["pid"]:
+            return {"pid": pid, "pgid": pid, "birth": "reused-browser"}
+        return None
+
+    monkeypatch.setattr(
+        db_module,
+        "_process_group_state",
+        lambda pid, expected=None: (
+            "unknown" if pid == browser["pid"] else "absent"
+        ),
+    )
+    monkeypatch.setattr(db_module, "_capture_process_identity", capture)
+    monkeypatch.setattr(
+        db_module.os,
+        "killpg",
+        lambda pgid, signum: signals.append((pgid, signum)),
+    )
+
+    with pytest.raises(RuntimeError, match="unknown"):
+        db_module._supervise_partial_handoff_processes(
+            {"owner": owner, "browser": browser}
+        )
+    assert signals == []
+
+
+def test_partial_handoff_cleanup_both_live_preserves_healthy_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    owner = {"pid": 50505, "pgid": 50505, "birth": "owner-birth"}
+    browser = {"pid": 50606, "pgid": 50606, "birth": "browser-birth"}
+    signals: list[tuple[int, signal.Signals]] = []
+    monkeypatch.setattr(
+        db_module,
+        "_process_group_state",
+        lambda pid, expected=None: "live",
+    )
+    monkeypatch.setattr(
+        db_module,
+        "_capture_process_identity",
+        lambda pid: (
+            dict(owner)
+            if pid == owner["pid"]
+            else (dict(browser) if pid == browser["pid"] else None)
+        ),
+    )
+    monkeypatch.setattr(
+        db_module.os,
+        "killpg",
+        lambda pgid, signum: signals.append((pgid, signum)),
+    )
+
+    assert (
+        db_module._supervise_partial_handoff_processes(
+            {"owner": owner, "browser": browser}
+        )
+        == "healthy"
+    )
+    assert signals == []
+
+
+def test_handoff_quarantine_running_state_sets_finished_at_and_keeps_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    parent, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(70))
+    child = _rpc_request(
+        request_id=_uuid(71),
+        operation="browser.prepare_human_handoff",
+        run_id=claim.run_id,
+        payload={"observation_sha256": "a" * 64},
+    )
+    reserve_rpc_request(conn, request=child, parent_request_id=parent.request_id)
+    observation = json.loads(
+        conn.execute(
+            "SELECT observation_json FROM application_runs WHERE id=?",
+            (claim.run_id,),
+        ).fetchone()[0]
+    )
+    observation["_handoff_intent"] = {
+        "child_request_id": child.request_id,
+        "parent_request_id": parent.request_id,
+        "observation_sha256": "a" * 64,
+    }
+    conn.execute(
+        """
+        UPDATE application_runs SET observation_json=? WHERE id=?
+        """,
+        (json.dumps(observation), claim.run_id),
+    )
+    conn.execute(
+        """
+        UPDATE application_rpc_runs
+        SET coordinator_pid=987654, coordinator_pgid=987654,
+            coordinator_birth='gone-coordinator'
+        WHERE run_id=?
+        """,
+        (claim.run_id,),
+    )
+    conn.commit()
+    monkeypatch.setattr(db_module, "_capture_process_identity", lambda pid: None)
+    rpc_row = conn.execute(
+        "SELECT * FROM application_rpc_runs WHERE run_id=?", (claim.run_id,)
+    ).fetchone()
+    app_row = conn.execute(
+        "SELECT * FROM application_runs WHERE id=?", (claim.run_id,)
+    ).fetchone()
+
+    assert db_module._quarantine_rpc_handoff(
+        conn, rpc_row=rpc_row, application_row=app_row
+    )
+    app_after = conn.execute(
+        "SELECT status, reason_code, finished_at, outcome FROM application_runs WHERE id=?",
+        (claim.run_id,),
+    ).fetchone()
+    rpc_after = conn.execute(
+        "SELECT state, human_review_ready, handoff_committed FROM application_rpc_runs WHERE run_id=?",
+        (claim.run_id,),
+    ).fetchone()
+    assert tuple(app_after) == ("manual", "page_not_stable", app_after["finished_at"], None)
+    assert app_after["finished_at"]
+    assert tuple(rpc_after) == ("manual", 0, 0)
+    assert tuple(
+        conn.execute(
+            "SELECT event_type, summary_code FROM application_progress_events WHERE run_id=?",
+            (claim.run_id,),
+        ).fetchone()
+    ) == ("manual_intervention_required", "page_not_stable")
+    child_after = get_rpc_request(conn, child.request_id)
+    assert child_after.state == "completed"  # type: ignore[union-attr]
+    assert json.loads(child_after.response_json)["result"]["reason_code"] == "page_not_stable"  # type: ignore[union-attr]
+    conn.close()
+
+
+def test_registration_rejects_cross_run_session_reuse_transactionally(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    _job(conn, url="https://boards.greenhouse.io/acme/jobs/session-a")
+    _job(conn, url="https://boards.greenhouse.io/acme/jobs/session-b")
+    first = claim_next_application_job(conn, owner="owner-a")
+    second = claim_next_application_job(conn, owner="owner-b")
+    assert first is not None and second is not None
+    assert register_application_artifact(conn, run_id=first.run_id, artifact_dir=f"run-{first.run_id}")
+    assert register_application_artifact(conn, run_id=second.run_id, artifact_dir=f"run-{second.run_id}")
+    assert register_application_session(conn, run_id=first.run_id, session_id="shared-session")
+    before = tuple(
+        conn.execute(
+            "SELECT session_id, observation_json FROM application_runs WHERE id=?",
+            (second.run_id,),
+        ).fetchone()
+    )
+    assert register_application_session(conn, run_id=second.run_id, session_id="shared-session") is False
+    after = tuple(
+        conn.execute(
+            "SELECT session_id, observation_json FROM application_runs WHERE id=?",
+            (second.run_id,),
+        ).fetchone()
+    )
+    assert after == before
+
+
+def test_registration_rejects_exact_identity_across_runs_and_kinds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    _job(conn, url="https://boards.greenhouse.io/acme/jobs/process-a")
+    _job(conn, url="https://boards.greenhouse.io/acme/jobs/process-b")
+    first = claim_next_application_job(conn, owner="owner-a")
+    second = claim_next_application_job(conn, owner="owner-b")
+    assert first is not None and second is not None
+    for claim, session_id in ((first, "process-session-a"), (second, "process-session-b")):
+        assert register_application_artifact(conn, run_id=claim.run_id, artifact_dir=f"run-{claim.run_id}")
+        assert register_application_session(conn, run_id=claim.run_id, session_id=session_id)
+        assert mark_application_spawn_attempted(conn, run_id=claim.run_id, session_id=session_id)
+    identities = {
+        601: {"pid": 601, "pgid": 601, "birth": "birth-owner"},
+        602: {"pid": 602, "pgid": 602, "birth": "birth-browser"},
+        603: {"pid": 603, "pgid": 603, "birth": "birth-second-owner"},
+    }
+    monkeypatch.setattr(db_module, "_capture_process_identity", lambda pid: identities[pid])
+    assert register_application_owner_process(
+        conn, run_id=first.run_id, owner_pid=601, process_identity=identities[601]
+    )
+    assert register_application_browser_process(
+        conn, run_id=first.run_id, browser_pid=602, process_identity=identities[602]
+    )
+    before = tuple(
+        conn.execute(
+            "SELECT owner_pid, browser_pid, observation_json FROM application_runs WHERE id=?",
+            (second.run_id,),
+        ).fetchone()
+    )
+    assert register_application_owner_process(
+        conn, run_id=second.run_id, owner_pid=601, process_identity=identities[601]
+    ) is False
+    assert tuple(
+        conn.execute(
+            "SELECT owner_pid, browser_pid, observation_json FROM application_runs WHERE id=?",
+            (second.run_id,),
+        ).fetchone()
+    ) == before
+    assert register_application_owner_process(
+        conn, run_id=second.run_id, owner_pid=603, process_identity=identities[603]
+    )
+    assert register_application_browser_process(
+        conn, run_id=second.run_id, browser_pid=601, process_identity=identities[601]
+    ) is False
+
+
+def test_registration_allows_reused_pid_after_reviewed_owner_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    _job(conn, url="https://boards.greenhouse.io/acme/jobs/reuse-a")
+    first = claim_next_application_job(conn, owner="owner-a")
+    assert first is not None
+    assert register_application_artifact(conn, run_id=first.run_id, artifact_dir=f"run-{first.run_id}")
+    assert register_application_session(conn, run_id=first.run_id, session_id="reuse-session-a")
+    assert mark_application_spawn_attempted(conn, run_id=first.run_id, session_id="reuse-session-a")
+    birth = {"value": "birth-old"}
+    monkeypatch.setattr(
+        db_module,
+        "_capture_process_identity",
+        lambda pid: {"pid": pid, "pgid": pid, "birth": birth["value"]},
+    )
+    old_identity = {"pid": 604, "pgid": 604, "birth": "birth-old"}
+    assert register_application_owner_process(
+        conn, run_id=first.run_id, owner_pid=604, process_identity=old_identity
+    )
+    finish_application_run(conn, run_id=first.run_id, status="failed", reason_code="browser_error")
+    conn.execute(
+        "UPDATE application_runs SET outcome='skipped', reviewed_at=? WHERE id=?",
+        ("2026-07-10T00:04:00+00:00", first.run_id),
+    )
+    conn.commit()
+
+    _job(conn, url="https://boards.greenhouse.io/acme/jobs/reuse-b")
+    second = claim_next_application_job(conn, owner="owner-b")
+    assert second is not None
+    assert register_application_artifact(conn, run_id=second.run_id, artifact_dir=f"run-{second.run_id}")
+    assert register_application_session(conn, run_id=second.run_id, session_id="reuse-session-b")
+    assert mark_application_spawn_attempted(conn, run_id=second.run_id, session_id="reuse-session-b")
+    birth["value"] = "birth-new"
+    new_identity = {"pid": 604, "pgid": 604, "birth": "birth-new"}
+    assert register_application_owner_process(
+        conn, run_id=second.run_id, owner_pid=604, process_identity=new_identity
+    )
+
+
+def test_process_probe_distinguishes_surviving_group_from_pid_reuse(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = {"pgid": 44, "birth": "birth-a"}
+    monkeypatch.setattr(
+        db_module,
+        "_capture_process_identity",
+        lambda pid: None,
+    )
+    monkeypatch.setattr(
+        db_module,
+        "_group_members",
+        lambda pgid: {999},
+    )
+    assert db_module._process_group_state(
+        123,
+        expected=expected,
+    ) == "live"
+    monkeypatch.setattr(
+        db_module,
+        "_capture_process_identity",
+        lambda pid: {
+            "pid": pid,
+            "pgid": 44,
+            "birth": "birth-new",
+        },
+    )
+    assert db_module._process_group_state(
+        123,
+        expected=expected,
+    ) == "unknown"
+    monkeypatch.setattr(
+        db_module,
+        "_group_members",
+        lambda pgid: {123},
+    )
+    assert db_module._process_group_state(
+        123,
+        expected=expected,
+    ) == "unknown"
+    monkeypatch.setattr(
+        db_module,
+        "_group_members",
+        lambda pgid: set(),
+    )
+    assert db_module._process_group_state(
+        123,
+        expected=expected,
+    ) == "unknown"
+
+
+def test_reconcile_closed_page_not_stable_downgrades_without_manifest_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    job_id = _job(conn, url="https://boards.greenhouse.io/acme/jobs/452")
+    claim = claim_next_application_job(conn, owner="owner")
+    assert claim is not None
+    root = ArtifactRoot.open(tmp_path / "artifacts", cwd=tmp_path)
+    owner = {"pid": 12452, "pgid": 12452, "birth": "birth-owner-proof"}
+    browser = {"pid": 23462, "pgid": 23462, "birth": "birth-browser-proof"}
+    monkeypatch.setattr(db_module, "_process_group_state", lambda pid, expected=None: "absent")
+    monkeypatch.setattr(
+        db_module,
+        "_capture_process_identity",
+        lambda pid: {"pid": pid, "pgid": pid, "birth": owner["birth"] if pid == owner["pid"] else browser["birth"]},
+    )
+    assert register_application_artifact(conn, run_id=claim.run_id, artifact_dir=f"run-{claim.run_id}")
+    assert register_application_session(conn, run_id=claim.run_id, session_id="session-closed-proof", session_state="open")
+    assert mark_application_spawn_attempted(conn, run_id=claim.run_id, session_id="session-closed-proof")
+    assert register_application_owner_process(
+        conn, run_id=claim.run_id, owner_pid=owner["pid"], process_identity=owner
+    )
+    assert register_application_browser_process(
+        conn, run_id=claim.run_id, browser_pid=browser["pid"], process_identity=browser
+    )
+    monkeypatch.setattr(db_module, "_capture_process_identity", lambda pid: None)
+    with root.create_run_dir(claim.run_id) as run:
+        _write_review_manifest(
+            run,
+            {
+                "run_id": claim.run_id,
+                "job_id": job_id,
+                "session_id": "session-closed-proof",
+                "owner_pid": owner["pid"],
+                "owner_pgid": owner["pgid"],
+                "owner_birth": owner["birth"],
+                "browser_pid": browser["pid"],
+                "browser_pgid": browser["pgid"],
+                "browser_birth": browser["birth"],
+                "state": "closed",
+                "cleanup": True,
+                "cleanup_trigger": "browser_exit",
+                "terminal_reason": "page_not_stable",
+            },
+        )
+        before_manifest = run.read_bytes("review_session.json")
+    finish_application_run(
+        conn,
+        run_id=claim.run_id,
+        status="review_ready",
+        reason_code="draft_ready",
+    )
+    assert reconcile_open_session_failure(
+        conn,
+        run_id=claim.run_id,
+        session_id="session-closed-proof",
+        reason_code="page_not_stable",
+        artifact_root=root,
+    ) is True
+    row = conn.execute(
+        "SELECT status, reason_code FROM application_runs WHERE id=?", (claim.run_id,)
+    ).fetchone()
+    assert (row["status"], row["reason_code"]) == ("manual", "page_not_stable")
+    assert conn.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()["status"] == "in_progress"
+    with root.open_run_dir(claim.run_id) as run:
+        assert run.read_bytes("review_session.json") == before_manifest
+    root.close()
+    conn.close()
+
+
+def test_committed_partial_handoff_cleans_sibling_and_downgrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, _child, identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=True,
+        review_state="open_guarded",
+        detached=True,
+        owner_live=False,
+        browser_live=True,
+    )
+    result = recover_rpc_handoffs(conn, artifact_root=root)
+    assert result.status == "recovered" and result.run_ids == (run_id,)
+    assert signals == [
+        (identities["browser"]["pgid"], signal.SIGTERM),
+        (identities["browser"]["pgid"], signal.SIGKILL),
+    ]
+    app_row = conn.execute(
+        "SELECT status, reason_code FROM application_runs WHERE id=?", (run_id,)
+    ).fetchone()
+    rpc_row = conn.execute(
+        "SELECT state, human_review_ready FROM application_rpc_runs WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    assert tuple(app_row) == ("manual", "page_not_stable")
+    assert tuple(rpc_row) == ("manual", 0)
+    root.close()
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("durable_state", "reason_code"),
+    [
+        ("review_ready", "draft_ready"),
+        ("manual", "page_not_stable"),
+        ("blocked", "ats_mismatch"),
+    ],
+)
+def test_committed_healthy_handoff_requires_exact_binding_and_stays_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    durable_state: str,
+    reason_code: str,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, _child, _identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=True,
+        review_state="open_guarded",
+        detached=True,
+    )
+    conn.execute(
+        "UPDATE application_runs SET status=?, reason_code=? WHERE id=?",
+        (durable_state, reason_code, run_id),
+    )
+    conn.execute(
+        "UPDATE application_rpc_runs SET state=?, human_review_ready=? WHERE run_id=?",
+        (durable_state, int(durable_state == "review_ready"), run_id),
+    )
+    conn.commit()
+    result = recover_rpc_handoffs(conn, artifact_root=root)
+    assert result.status == "noop"
+    assert signals == []
+    app_row = conn.execute(
+        "SELECT status, reason_code FROM application_runs WHERE id=?", (run_id,)
+    ).fetchone()
+    rpc_row = conn.execute(
+        "SELECT state, human_review_ready FROM application_rpc_runs WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    assert tuple(app_row) == (durable_state, reason_code)
+    assert tuple(rpc_row) == (durable_state, int(durable_state == "review_ready"))
+    root.close()
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("durable_state", "reason_code"),
+    [
+        ("review_ready", "draft_ready"),
+        ("manual", "page_not_stable"),
+        ("blocked", "ats_mismatch"),
+    ],
+)
+def test_committed_handoff_restart_rebinds_owner_for_later_close(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    durable_state: str,
+    reason_code: str,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    root, run_id, _child, _identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=True,
+        review_state="open_guarded",
+        detached=True,
+    )
+    conn.execute(
+        "UPDATE application_runs SET status=?, reason_code=? WHERE id=?",
+        (durable_state, reason_code, run_id),
+    )
+    conn.execute(
+        "UPDATE application_rpc_runs SET state=?, human_review_ready=? WHERE run_id=?",
+        (durable_state, int(durable_state == "review_ready"), run_id),
+    )
+    conn.commit()
+    before = conn.execute(
+        "SELECT coordinator_pid, coordinator_birth FROM application_rpc_runs WHERE run_id=?",
+        (run_id,),
+    ).fetchone()
+    assert db_module.reconcile_committed_handoff_failure(
+        conn,
+        run_id=run_id,
+        coordinator_id="coord-1",
+        artifact_root=root,
+        recovery=True,
+    ) is False
+    after = conn.execute(
+        """
+        SELECT coordinator_id, state, human_review_ready,
+               coordinator_pid, coordinator_pgid, coordinator_birth
+        FROM application_rpc_runs WHERE run_id=?
+        """,
+        (run_id,),
+    ).fetchone()
+    assert (after["state"], after["human_review_ready"]) == (
+        durable_state,
+        int(durable_state == "review_ready"),
+    )
+    assert (after["coordinator_pid"], after["coordinator_birth"]) != (
+        before["coordinator_pid"],
+        before["coordinator_birth"],
+    )
+    assert db_module._rpc_owner_matches(after, "coord-1")
+    assert signals == []
+    root.close()
+    conn.close()
+
+
+def test_rpc_recovery_expected_coordinator_filters_foreign_rows_and_allows_rightful_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "jobs.sqlite3"
+    conn = connect(db_path)
+    root, run_id, _child, _identities, _live, signals = _rpc_handoff_recovery_fixture(
+        conn,
+        tmp_path,
+        monkeypatch,
+        committed=True,
+        review_state="open_guarded",
+        detached=True,
+        owner_live=False,
+        browser_live=False,
+    )
+    root.close()
+    before = tuple(
+        conn.execute(
+            """
+            SELECT coordinator_id, coordinator_pid, coordinator_pgid,
+                   coordinator_birth, state, handoff_committed
+            FROM application_rpc_runs WHERE run_id=?
+            """,
+            (run_id,),
+        ).fetchone()
+    )
+    foreign = connect(db_path)
+    with ArtifactRoot.open(tmp_path / "artifacts", cwd=tmp_path) as foreign_root:
+        initialize_database(
+            foreign,
+            migration_artifact_root=foreign_root,
+            expected_coordinator_id="coord-2",
+        )
+    foreign.close()
+    assert signals == []
+    assert tuple(
+        conn.execute(
+            """
+            SELECT coordinator_id, coordinator_pid, coordinator_pgid,
+                   coordinator_birth, state, handoff_committed
+            FROM application_rpc_runs WHERE run_id=?
+            """,
+            (run_id,),
+        ).fetchone()
+    ) == before
+    with ArtifactRoot.open(tmp_path / "artifacts", cwd=tmp_path) as rightful_root:
+        result = recover_rpc_handoffs(
+            conn,
+            artifact_root=rightful_root,
+            expected_coordinator_id="coord-1",
+        )
+    assert result.status == "recovered"
+    assert result.run_ids == (run_id,)
+    assert signals == []
+    assert tuple(
+        conn.execute(
+            "SELECT coordinator_id, state FROM application_rpc_runs WHERE run_id=?",
+            (run_id,),
+        ).fetchone()
+    ) == ("coord-1", "manual")
+    conn.close()
+
+
+def test_rpc_recovery_competing_stale_claim_cannot_quarantine_winner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "jobs.sqlite3"
+    setup = connect(db_path)
+    root, run_id, _child, identities, _live, signals = _rpc_handoff_recovery_fixture(
+        setup,
+        tmp_path,
+        monkeypatch,
+        committed=True,
+        review_state="open_guarded",
+        detached=True,
+        include_review=False,
+    )
+    root.close()
+    setup.close()
+    current_identity = db_module._capture_rpc_coordinator_identity()
+    assert current_identity is not None
+    original_capture = db_module._capture_process_identity
+    original_process_state = db_module._process_group_state
+
+    def capture_with_coordinator(pid: int) -> dict[str, object] | None:
+        if pid == current_identity["pid"]:
+            return dict(current_identity)
+        return original_capture(pid)
+
+    def process_state_with_coordinator(
+        pid: int, *, expected: dict[str, object] | None = None
+    ) -> str:
+        if pid == current_identity["pid"]:
+            return (
+                "live"
+                if expected is None or dict(expected) == dict(current_identity)
+                else "unknown"
+            )
+        return original_process_state(pid, expected=expected)
+
+    def capture_coordinator_identity() -> dict[str, object]:
+        return dict(current_identity)
+
+    monkeypatch.setattr(
+        db_module, "_capture_process_identity", capture_with_coordinator
+    )
+    monkeypatch.setattr(
+        db_module, "_process_group_state", process_state_with_coordinator
+    )
+    monkeypatch.setattr(
+        db_module, "_capture_rpc_coordinator_identity", capture_coordinator_identity
+    )
+    barrier = threading.Barrier(2)
+    original_claim = db_module._claim_rpc_handoff_recovery
+
+    def synchronized_claim(*args: object, **kwargs: object) -> object:
+        barrier.wait(timeout=5)
+        return original_claim(*args, **kwargs)
+
+    monkeypatch.setattr(
+        db_module, "_claim_rpc_handoff_recovery", synchronized_claim
+    )
+
+    def recover_one() -> object:
+        connection = connect(db_path)
+        try:
+            with ArtifactRoot.open(tmp_path / "artifacts", cwd=tmp_path) as artifact_root:
+                return recover_rpc_handoffs(
+                    connection,
+                    artifact_root=artifact_root,
+                    expected_coordinator_id="coord-1",
+                )
+        finally:
+            connection.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _index: recover_one(), (0, 1)))
+    statuses = sorted(result.status for result in results)  # type: ignore[union-attr]
+    assert statuses == ["noop", "recovered"]
+    assert signals == [
+        (identities["owner"]["pgid"], signal.SIGTERM),
+        (identities["owner"]["pgid"], signal.SIGKILL),
+        (identities["browser"]["pgid"], signal.SIGTERM),
+        (identities["browser"]["pgid"], signal.SIGKILL),
+    ]
+    row = connect(db_path)
+    try:
+        assert tuple(
+            row.execute(
+                "SELECT coordinator_id, state FROM application_rpc_runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+        ) == ("coord-1", "manual")
+    finally:
+        row.close()
+
+
+def test_claim_blocks_unregistered_application_spawn_marker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    job_id = _job(conn, url="https://boards.greenhouse.io/acme/jobs/unregistered")
+    first = claim_next_application_job(conn, owner="first-owner")
+    assert first is not None
+    now = db_module.utc_now()
+    conn.execute(
+        """
+        UPDATE application_runs
+        SET status='failed', reason_code='browser_error', outcome='retry',
+            reviewed_at=?, finished_at=?, observation_json=?
+        WHERE id=?
+        """,
+        (now, now, json.dumps({"_spawn_attempted": True, "_process": {}}), first.run_id),
+    )
+    conn.execute("UPDATE jobs SET status='queued' WHERE id=?", (job_id,))
+    conn.commit()
+    assert claim_next_application_job(conn, owner="blocked") is None
+    conn.execute(
+        """
+        UPDATE application_runs
+        SET owner_pid=101, browser_pid=202, observation_json=?
+        WHERE id=?
+        """,
+        (
+            json.dumps(
+                {
+                    "_spawn_attempted": True,
+                    "_process": {
+                        "owner": {"pid": 101, "pgid": 101, "birth": "owner"},
+                        "browser": {"pid": 202, "pgid": 202, "birth": "browser"},
+                    },
+                }
+            ),
+            first.run_id,
+        ),
+    )
+    conn.commit()
+    monkeypatch.setattr(
+        db_module,
+        "_process_group_state",
+        lambda pid, *, expected=None: "absent",
+    )
+    assert claim_next_application_job(conn, owner="after-proof") is not None
+
+
+def test_rpc_claim_blocks_unregistered_omp_spawn_marker(
+    tmp_path: Path,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    request, first = _new_rpc_claim(conn, tmp_path, request_id=_uuid(71))
+    assert first.run_id is not None
+    now = db_module.utc_now()
+    job_id = int(
+        conn.execute(
+            "SELECT job_id FROM application_runs WHERE id=?", (first.run_id,)
+        ).fetchone()[0]
+    )
+    conn.execute(
+        """
+        UPDATE application_runs
+        SET status='failed', reason_code='browser_error', outcome='retry',
+            reviewed_at=?, finished_at=?, observation_json=?
+        WHERE id=?
+        """,
+        (now, now, json.dumps({"_omp_spawn_attempted": True}), first.run_id),
+    )
+    conn.execute("UPDATE jobs SET status='queued' WHERE id=?", (job_id,))
+    conn.commit()
+    blocked = claim_application_job_for_rpc(
+        conn,
+        owner="rpc-owner-2",
+        request=_rpc_request(request_id=_uuid(72), url=_RPC_URL),
+        coordinator_id="coord-2",
+    )
+    assert blocked.outcome == "unavailable"
+def test_legacy_claim_skips_conflicting_queued_job_and_claims_next_safe_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    first_job = _job(conn, url="https://boards.greenhouse.io/acme/jobs/conflicting")
+    second_job = _job(conn, url="https://boards.greenhouse.io/acme/jobs/safe")
+    first = claim_next_application_job(conn, owner="first-owner")
+    assert first is not None and first.job["id"] == first_job
+    now = db_module.utc_now()
+    conn.execute(
+        """
+        UPDATE application_runs
+        SET status='failed', reason_code='browser_error', outcome='retry',
+            reviewed_at=?, finished_at=?,
+            observation_json=?
+        WHERE id=?
+        """,
+        (now, now, json.dumps({"_spawn_attempted": True, "_process": {}}), first.run_id),
+    )
+    conn.execute("UPDATE jobs SET status='queued' WHERE id=?", (first_job,))
+    conn.commit()
+    assert claim_next_application_job(conn, owner="safe-owner").job["id"] == second_job  # type: ignore[union-attr]
+    assert conn.execute("SELECT status FROM jobs WHERE id=?", (first_job,)).fetchone()[0] == "queued"
+    conn.close()
+
+
+def test_legacy_claim_skips_quarantined_queued_job_and_claims_next_safe_candidate(
+    tmp_path: Path,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    first_job = _job(conn, url="https://boards.greenhouse.io/acme/jobs/quarantined")
+    second_job = _job(conn, url="https://boards.greenhouse.io/acme/jobs/available")
+    first = claim_next_application_job(conn, owner="first-owner")
+    assert first is not None and first.job["id"] == first_job
+    now = db_module.utc_now()
+    conn.execute(
+        """
+        UPDATE application_runs
+        SET status='manual', reason_code='page_not_stable',
+            finished_at=?, observation_json=?
+        WHERE id=?
+        """,
+        (
+            now,
+            json.dumps({"_launch_cleanup_quarantine": {"reason_code": "page_not_stable"}}),
+            first.run_id,
+        ),
+    )
+    conn.execute("UPDATE jobs SET status='queued' WHERE id=?", (first_job,))
+    conn.commit()
+    next_claim = claim_next_application_job(conn, owner="safe-owner")
+    assert next_claim is not None and next_claim.job["id"] == second_job
+    assert conn.execute("SELECT status FROM jobs WHERE id=?", (first_job,)).fetchone()[0] == "queued"
+    conn.close()
+
+
+def test_verified_rpc_pre_spawn_abort_clears_marker_for_retryable_claim(
+    tmp_path: Path,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    request, claim = _new_rpc_claim(conn, tmp_path, request_id=_uuid(903))
+    assert db_module.mark_rpc_omp_spawn_attempted(
+        conn, run_id=claim.run_id, coordinator_id="coord-1"
+    )
+    info = db_module.abort_rpc_start(
+        conn,
+        request=request,
+        coordinator_id="coord-1",
+        error_code="unavailable",
+        release_claim=True,
+    )
+    assert info.state == "completed"
+    observation = json.loads(
+        conn.execute(
+            "SELECT observation_json FROM application_runs WHERE id=?", (claim.run_id,)
+        ).fetchone()[0]
+    )
+    assert "_omp_spawn_attempted" not in observation
+    retried = claim_next_application_job(conn, owner="retry-owner")
+    assert retried is not None and retried.job["id"] == claim.claim.job["id"]  # type: ignore[union-attr]
+    conn.close()
+
+
+def test_rpc_claim_uses_canonical_storage_key_for_explicit_https_default_port(
+    tmp_path: Path,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    db_module.upsert_raw_job(
+        conn,
+        {
+            "source_job_id": "rpc-default-port",
+            "url": "https://boards.greenhouse.io:443/acme/jobs/456",
+            "title": "Engineer",
+            "company": "Acme",
+        },
+        source="fixture",
+    )
+    request = _rpc_request(request_id=_uuid(904), url=_RPC_URL)
+    outcome = claim_application_job_for_rpc(
+        conn,
+        owner="rpc-owner",
+        request=request,
+        coordinator_id="coord-1",
+    )
+    assert outcome.outcome == "new" and outcome.claim is not None
+    assert outcome.claim.job["canonical_url"] == _RPC_URL
+    conn.close()
+
+def test_rpc_no_job_deadline_expiry_rolls_back_rowless_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    conn = connect(tmp_path / "jobs.sqlite3")
+    _initialize(conn, tmp_path)
+    request = _rpc_request(request_id=_uuid(905))
+    original_require = db_module._require_rpc_deadline_live
+    calls = 0
+
+    def expire_before_commit(deadline_unix_ms: int | None) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise db_module.RpcDeadlineExceeded("expired before rowless commit")
+        original_require(deadline_unix_ms)
+
+    monkeypatch.setattr(db_module, "_require_rpc_deadline_live", expire_before_commit)
+    with pytest.raises(db_module.RpcDeadlineExceeded):
+        claim_application_job_for_rpc(
+            conn,
+            owner="rpc-owner",
+            request=request,
+            coordinator_id="coord-1",
+        )
+    assert calls == 2
+    assert conn.in_transaction is False
+    assert conn.execute(
+        "SELECT COUNT(*) FROM application_rpc_requests WHERE request_id=?",
+        (request.request_id,),
+    ).fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM application_runs").fetchone()[0] == 0
+    conn.close()

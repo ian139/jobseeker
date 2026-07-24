@@ -61,7 +61,10 @@ def _upsert_job(conn: sqlite3.Connection, job: JobInput) -> UpsertResult:
             """,
             (job.source, job.source_job_id, canonical, job.title, job.company, job.location, remote, job.posted_at, now, job.description, raw_json, now, now),
         )
-        return UpsertResult(int(cur.lastrowid), True, False)
+        job_id = cur.lastrowid
+        if job_id is None:
+            raise RuntimeError("job id unavailable")
+        return UpsertResult(job_id, True, False)
     conn.execute(
         """
         UPDATE jobs
@@ -191,9 +194,6 @@ def list_backlog_jobs(
     )
 
 
-def job_application_url(row: sqlite3.Row | dict[str, object]) -> str | None:
-    value = row["canonical_url"] if isinstance(row, sqlite3.Row) else row.get("canonical_url")
-    return str(value) if value else None
 
 
 def count_backlog(conn: sqlite3.Connection) -> dict[str, int]:

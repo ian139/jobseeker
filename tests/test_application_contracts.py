@@ -671,6 +671,8 @@ def test_lever_route_graph_accepts_eu_and_requires_canonical_uuid_identity() -> 
     uuid_url = "https://jobs.eu.lever.co/acme/123e4567-e89b-12d3-a456-426614174000"
     assert classify_ats_url(uuid_url, ats_policy="lever", policy=policy).allowed
     assert not classify_ats_url("https://jobs.eu.lever.co/acme/job-123", ats_policy="lever", policy=policy).allowed
+    for suffix in ("?", "#"):
+        assert not classify_ats_url(uuid_url + suffix, ats_policy="lever", policy=policy).allowed
     assert not classify_ats_form_action(
         uuid_url + "/apply",
         ats_policy="lever",
@@ -686,3 +688,77 @@ def test_lever_route_graph_accepts_eu_and_requires_canonical_uuid_identity() -> 
         policy=policy,
     )
     assert cross_host.reason == "same_company_job_required"
+@pytest.mark.parametrize(
+    "descriptor",
+    [
+        "OTP",
+        "mfaRequired",
+        "twoFactorAuthentication",
+        "multi-factor authentication",
+        "oneTimePassword",
+        "passcode",
+        "verificationCode",
+        "emailVerification",
+        "accountCreation",
+        "accountVerification",
+        "verifyYourAccount",
+    ],
+)
+def test_task10_authentication_descriptors_are_manual(descriptor: str) -> None:
+    assert classify_descriptors((descriptor,)) == DescriptorSafety.SENSITIVE
+
+
+@pytest.mark.parametrize(
+    "descriptor",
+    [
+        "codingAssessment",
+        "codingChallenge",
+        "personalityAssessment",
+        "aptitudeAssessment",
+        "cognitiveAssessment",
+        "behavioralAssessment",
+        "workStyleAssessment",
+        "personality assessments",
+        "work-style assessments",
+    ],
+)
+def test_task10_assessment_descriptors_are_manual(descriptor: str) -> None:
+    assert classify_descriptors((descriptor,)) == DescriptorSafety.SENSITIVE
+
+
+@pytest.mark.parametrize(
+    "descriptor",
+    [
+        "relocation",
+        "willingToRelocate",
+        "relocationAssistance",
+    ],
+)
+def test_task10_relocation_descriptors_are_manual(descriptor: str) -> None:
+    assert classify_descriptors((descriptor,)) == DescriptorSafety.SENSITIVE
+
+
+@pytest.mark.parametrize(
+    "descriptor",
+    [
+        "code",
+        "code sample",
+        "test",
+        "test environment",
+        "challenge",
+        "challenge accepted",
+        "verify",
+        "verify input",
+        "account",
+        "account balance",
+        "verification status",
+        "personality type",
+        "aptitude score",
+        "cognitive science",
+        "behavioral interview",
+        "work style preferences",
+        "willing to travel",
+    ],
+)
+def test_task10_bare_security_and_assessment_words_remain_safe(descriptor: str) -> None:
+    assert classify_descriptors((descriptor,)) == DescriptorSafety.SAFE

@@ -8,8 +8,9 @@ import httpx
 
 from jobs_assistant.ats import SUPPORTED_ATS, select_adapter
 from jobs_assistant.backlog import upsert_jobs
+from jobs_assistant.job_source import normalize_job_metadata
 from jobs_assistant.browser_adapter import BrowserAdapterError, validate_ats_url
-from jobs_assistant.contracts import ATSFilter, CreditEstimate, JobInput
+from jobs_assistant.contracts import ATSFilter, JobInput
 
 SEARCH_PATH = "/v1/jobs/search"
 
@@ -75,13 +76,6 @@ def is_credit_safe_payload(payload: dict[str, Any]) -> bool:
     )
 
 
-def estimate_credits(payload: dict[str, Any]) -> CreditEstimate:
-    """Return a credit estimate given a payload."""
-    if is_credit_safe_payload(payload):
-        return CreditEstimate(dry_run_credits=0, paid_mode_max_credits=0)
-    limit = payload.get("limit", 25)
-    max_returned = limit if isinstance(limit, int) and limit > 0 else 25
-    return CreditEstimate(dry_run_credits=0, paid_mode_max_credits=max_returned)
 
 
 # --- Payload builders --------------------------------------------------------
@@ -313,7 +307,7 @@ def select_one_job_per_company(
 
     Returns jobs sorted by discovered_at descending (or posted_at descending).
     """
-    best_by_company: dict[str, tuple[tuple[int, float, float, int], dict[str, Any], int]] = {}
+    best_by_company: dict[str, tuple[tuple[int, float, int], dict[str, Any], int]] = {}
 
     for idx, job in enumerate(raw_jobs):
         title = job.get("job_title") or job.get("title") or ""
@@ -599,51 +593,10 @@ def _select_apply_url(raw: dict[str, Any], ats_filter: ATSFilter) -> Any:
     return None
 
 
-def _non_empty_string(value: Any) -> str | None:
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
-
-
-def _description_value(raw: dict[str, Any]) -> str | None:
-    for key in ("description", "job_description", "description_text", "description_html"):
-        value = _non_empty_string(raw.get(key))
-        if value is not None:
-            return value
-    details = raw.get("details")
-    value = _non_empty_string(details)
-    if value is not None:
-        return value
-    if isinstance(details, dict):
-        for key in ("text", "html", "content", "value"):
-            value = _non_empty_string(details.get(key))
-            if value is not None:
-                return value
-    return None
-
-
-def _location_value(raw: dict[str, Any]) -> str | None:
-    for key in ("location", "job_location", "city", "country_code"):
-        value = _non_empty_string(raw.get(key))
-        if value is not None:
-            return value
-    return None
-
-
-def _date_posted_value(raw: dict[str, Any]) -> str | None:
-    for key in ("date_posted", "posted_at"):
-        value = _non_empty_string(raw.get(key))
-        if value is not None:
-            return value
-    return None
-
-
-def _remote_value(raw: dict[str, Any]) -> bool | None:
-    remote = raw.get("remote")
-    return remote if type(remote) is bool else None
 
 
 def raw_job_to_input(raw: dict[str, Any], *, ats_filter: ATSFilter = "auto") -> JobInput:
+    location, remote, date_posted, description = normalize_job_metadata(raw)
     company = raw.get("company")
     company_name = ""
     if isinstance(company, dict):
@@ -657,10 +610,10 @@ def raw_job_to_input(raw: dict[str, Any], *, ats_filter: ATSFilter = "auto") -> 
         url=None if apply_url is None else str(apply_url),
         title=str(raw.get("job_title") or raw.get("title") or "Untitled role"),
         company=company_name or "Unknown company",
-        location=_location_value(raw),
-        remote=_remote_value(raw),
-        posted_at=_date_posted_value(raw),
-        description=_description_value(raw),
+        location=location,
+        remote=remote,
+        posted_at=date_posted,
+        description=description,
         raw=raw,
     )
 

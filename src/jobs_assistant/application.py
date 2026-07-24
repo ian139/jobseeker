@@ -55,6 +55,7 @@ from .browser_adapter import (
     validate_ats_url,
 )
 from .contracts import (
+    ApplicationClaim,
     ApplicationContext,
     AutofillPlan,
     FieldAnswer,
@@ -78,6 +79,11 @@ from .db import (
     register_application_owner_process,
     register_application_session,
     reconcile_open_session_failure,
+    _supervise_partial_handoff_processes,
+)
+from .application_rpc_contracts import (
+    BrowserToolProposal,
+    validate_public_result,
 )
 from .safety import DescriptorSafety, classify_descriptors, is_ats_interactive_origin
 
@@ -110,7 +116,513 @@ GREENHOUSE_ITERATION_PATH = (
     "claim_job", "observe", "resolve", "execute_one_safe_action", "persist_evidence", "commit_review_handoff"
 )
 
+# The RPC candidate_profile_id for the built-in empty profile is this
+# deterministic canonical content hash.  Explicit JSON and preset profiles
+# use their retained source-byte SHA-256 instead.
+DEFAULT_APPLICATION_PROFILE_SHA256 = hashlib.sha256(
+    json.dumps(
+        {"description": "", "facts": {}, "field_answers": []},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
 
+_CONTROL_PROGRESS_EVENTS = frozenset({
+    "page_observed",
+    "action_allowed",
+    "action_rejected",
+    "screenshot_captured",
+    "manual_intervention_required",
+    "review_ready",
+    "browser_handed_off",
+    "run_failed",
+})
+_CONTROL_PROGRESS_CODES = frozenset({
+    "started",
+    "observed",
+    "allowed",
+    "rejected",
+    "uploaded",
+    "validation_error",
+    "manual_required",
+    "review_ready",
+    "handed_off",
+    "cancelled",
+    "failed",
+    "captured",
+    *(code.value for code in PublicReasonCode),
+})
+_PUBLIC_ID_HMAC_KEY = secrets.token_bytes(32)
+
+
+class ApplicationWorkflowControl:
+    """Minimal duck-typed protocol for external RPC-driven application control.
+
+    Implementations may suspend ``propose_action`` and ``authorize_handoff``.
+    The workflow deliberately awaits those calls without closing the browser
+    session or finalizing the running application row.
+    """
+
+    async def on_claimed(
+        self, run_id: int, job_id: int, ats_policy: str, application_url: str
+    ) -> None:
+        ...
+
+    async def cancellation_requested(self, run_id: int) -> bool:
+        ...
+
+    async def record_progress(
+        self,
+        run_id: int,
+        event_type: str,
+        summary_code: str,
+        action_sequence: int,
+        observation_sha256: str | None = None,
+        request_id: str | None = None,
+    ) -> None:
+        """Persist one event from ``_CONTROL_PROGRESS_EVENTS``."""
+        ...
+
+    async def propose_action(
+        self,
+        run_id: int,
+        iteration: int,
+        observation_sha256: str,
+        public_observation: dict[str, Any],
+        inference_request: dict[str, Any] | None,
+        deterministic_plan: dict[str, Any],
+    ) -> BrowserToolProposal | None:
+        ...
+
+    async def authorize_handoff(
+        self,
+        run_id: int,
+        iteration: int,
+        observation_sha256: str,
+        public_observation: dict[str, Any],
+    ) -> BrowserToolProposal | None:
+        ...
+
+    async def before_action_dispatch(
+        self, proposal: BrowserToolProposal, action_sequence: int
+    ) -> bool:
+        """Atomically enforce deadline/cancellation and mark dispatch."""
+        ...
+
+    async def proposal_finished(
+        self,
+        proposal: BrowserToolProposal,
+        action_sequence: int,
+        ok: bool,
+        state: str,
+        result: Mapping[str, Any] | None = None,
+        error_code: str | None = None,
+        application_finalization: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Resolve one child proposal exactly once; return app-row ownership."""
+        ...
+
+    async def finalize_failure(
+        self,
+        run_id: int,
+        *,
+        status: str,
+        reason_code: str,
+        observation_summary: Mapping[str, Any],
+        plan_summary: Mapping[str, Any],
+        artifact_dir: str | None,
+        pending_proposal: BrowserToolProposal | None = None,
+        action_sequence: int = 0,
+        error_code: str | None = None,
+        observation_sha256: str | None = None,
+        manifest_sha256: str | None = None,
+    ) -> bool:
+        """Atomically finalize the application and RPC failure state."""
+        return False
+
+    async def prepare_handoff_finalization(
+        self,
+        proposal: BrowserToolProposal,
+        *,
+        action_sequence: int,
+        intent: Mapping[str, Any],
+    ) -> bool:
+        return False
+
+    async def reconcile_postcommit_handoff_failure(
+        self,
+        run_id: int,
+        *,
+        session_id: str | None,
+        artifact_root: ArtifactRoot,
+    ) -> bool:
+        return False
+
+    def mark_handoff_committed(self) -> None:
+        return None
+
+
+def _public_id_digest(value: str, *, prefix: str, generation: str | None = None) -> str:
+    """Return a process-private, observation-bound opaque public identifier."""
+    payload = (
+        f"omp-public-id-v2\0{prefix}\0{str(generation or '')}\0{str(value or '')}"
+    ).encode("utf-8")
+    digest = hmac.new(_PUBLIC_ID_HMAC_KEY, payload, hashlib.sha256).hexdigest()[:32]
+    return f"{prefix}-{digest}"
+
+
+def _public_element_id(
+    value: str,
+    *,
+    prefix: str = "el",
+    generation: str | None = None,
+) -> str:
+    """Return an opaque, generation-bound public element identifier."""
+    return _public_id_digest(value, prefix=prefix, generation=generation)
+
+
+def _opaque_option_id(
+    observation_generation: str,
+    target_id: str,
+    index: int,
+) -> str:
+    return _public_id_digest(
+        f"{target_id}\0{index}",
+        prefix="opt",
+        generation=observation_generation,
+    )
+
+
+def _public_frame_id(frame_id: str, *, generation: str | None = None) -> str:
+    return _public_id_digest(frame_id, prefix="frame", generation=generation)
+
+
+def _observation_generation(
+    observation: PageObservation,
+    observation_sha256: str | None = None,
+) -> str:
+    """Bind public IDs to this immutable in-process observation instance."""
+    snapshot_sha256 = str(
+        observation_sha256 or _observation_snapshot_sha256(observation)
+    )
+    return f"{id(observation):x}\0{observation.observation_id}\0{snapshot_sha256}"
+
+
+def _public_label(text: Any, protected: tuple[str, ...]) -> str:
+    redacted = _redact_text(str(text or ""), protected)
+    return redacted[:2000]
+
+
+def _public_page_type(observation: PageObservation) -> str:
+    blocker_codes = {str(item.code) for item in observation.blockers}
+    if "captcha" in blocker_codes:
+        return "captcha"
+    if "authentication_required" in blocker_codes:
+        return "authentication"
+    if "assessment_required" in blocker_codes:
+        return "assessment"
+    markers = {str(item).casefold() for item in observation.site_markers}
+    if "confirmation" in markers or "submitted" in markers:
+        return "confirmation"
+    if observation.fields or observation.buttons:
+        return "application"
+    return "unknown"
+
+
+def _public_control_action_type(button: ObservedButton, *, final: bool) -> str:
+    if final:
+        return "final_submit"
+    if button.effective_action_url or button.href_url:
+        return "navigation"
+    if str(button.button_type).casefold() in {"button", "submit"}:
+        return "continue"
+    return "unknown"
+
+
+def _public_safety_class(field: ObservedField, *, ats_policy: str) -> str:
+    if _field_is_sensitive(field):
+        return "sensitive"
+    if not field.visible or not field.enabled or field.readonly:
+        return "manual"
+    if _field_is_llm_eligible(field):
+        return "safe"
+    return "ambiguous"
+
+
+def _build_public_observation(
+    observation: PageObservation,
+    *,
+    claimed_url: str,
+    ats_policy: str = "greenhouse",
+    observation_sha256: str | None = None,
+    observation_sequence: int = 1,
+    observed_at: str | None = None,
+    protected_values: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Project private browser state through the public RPC observation schema."""
+    if type(claimed_url) is not str or not claimed_url:
+        raise ValueError("claimed_url is required")
+    if observation_sha256 is None:
+        observation_sha256 = _observation_snapshot_sha256(observation)
+    if observed_at is None:
+        observed_at = datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    generation = _observation_generation(observation, observation_sha256)
+    protected = _expanded_protected_values(protected_values)
+    fields: list[dict[str, Any]] = []
+    for field in observation.fields:
+        field_id = _public_element_id(field.target_id, generation=generation)
+        frame_id = _public_frame_id(field.frame_id, generation=generation)
+        options = [
+            {
+                "id": _opaque_option_id(generation, field.target_id, index),
+                "label": _public_label(option.label, protected),
+                "enabled": bool(option.enabled),
+            }
+            for index, option in enumerate(field.options)
+        ]
+        accept = [
+            _public_label(item, protected)[:256]
+            for item in field.accept
+            if str(item)
+        ]
+        fields.append({
+            "element_id": field_id,
+            "frame_id": frame_id,
+            "label": _public_label(field.label or field.name or "", protected),
+            "kind": field.kind,
+            "required": bool(field.required),
+            "disabled": not bool(field.enabled),
+            "readonly": bool(field.readonly),
+            "has_value": _field_has_existing_value(field),
+            "multiple": bool(field.multiple),
+            "options": options,
+            "accept": accept,
+            "safety_class": _public_safety_class(field, ats_policy=ats_policy),
+        })
+    final_ids = frozenset(observation.final_submit_target_ids)
+    controls: list[dict[str, Any]] = []
+    for button in observation.buttons:
+        final = button.target_id in final_ids
+        controls.append({
+            "element_id": _public_element_id(button.target_id, generation=generation),
+            "frame_id": _public_frame_id(button.frame_id, generation=generation),
+            "label": _public_label(button.text, protected),
+            "kind": button.element_kind,
+            "action_type": _public_control_action_type(button, final=final),
+            "enabled": bool(button.visible and button.enabled),
+            "terminal": final,
+        })
+    frame_source = (
+        observation.fields[0].frame_id
+        if observation.fields
+        else observation.buttons[0].frame_id
+        if observation.buttons
+        else "main"
+    )
+    public = {
+        "observation_sha256": observation_sha256,
+        "observation_sequence": int(observation_sequence),
+        "observed_at": observed_at,
+        "url": claimed_url,
+        "ats": ats_policy,
+        "page_type": _public_page_type(observation),
+        "frame_id": _public_frame_id(frame_source, generation=generation),
+        "fields": fields,
+        "controls": controls,
+        "validation_errors": [
+            {
+                "element_id": (
+                    _public_element_id(error.target_id, generation=generation)
+                    if error.target_id is not None
+                    else None
+                ),
+                "code": "page_validation_error",
+            }
+            for error in observation.errors
+        ],
+        "progress": {"step_index": None, "step_count": None},
+        "blocker_codes": [str(item.code) for item in observation.blockers],
+    }
+    # Fail closed if any projection drifts from the host contract.
+    return thaw_json(validate_public_result(public, operation="browser.observe"))
+
+
+def _resolve_public_target(
+    observation: PageObservation,
+    public_id: str,
+    *,
+    observation_sha256: str | None = None,
+    buttons: bool = False,
+) -> str | None:
+    generation = _observation_generation(observation, observation_sha256)
+    items = observation.buttons if buttons else observation.fields
+    matches = [
+        item.target_id
+        for item in items
+        if _public_element_id(item.target_id, generation=generation) == public_id
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _validate_control_proposal(
+    proposal: BrowserToolProposal,
+    observation: PageObservation,
+    observation_sha256: str,
+    deterministic_plan: AutofillPlan,
+    *,
+    ats_policy: str = "greenhouse",
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Validate one host proposal and return a private browser action."""
+    if not isinstance(proposal, BrowserToolProposal):
+        return None, "invalid_proposal"
+    if proposal.tool_name != proposal.request.operation:
+        return None, "invalid_proposal"
+    payload = thaw_json(proposal.request.payload)
+    operation = proposal.request.operation
+    prop_sha = payload.get("observation_sha256")
+    if not isinstance(prop_sha, str) or not hmac.compare_digest(prop_sha, observation_sha256):
+        return None, "stale_observation_hash"
+
+    element_id = payload.get("element_id")
+    if operation == "browser.upload_configured_resume":
+        if not isinstance(element_id, str):
+            return None, "missing_element_id"
+        target_id = _resolve_public_target(
+            observation,
+            element_id,
+            observation_sha256=observation_sha256,
+        )
+        if target_id is None:
+            return None, "target_not_observed"
+        if deterministic_plan.resume_upload_target_id != target_id:
+            return None, "resume_target_mismatch"
+        field = next((item for item in observation.fields if item.target_id == target_id), None)
+        if field is None:
+            return None, "target_not_observed"
+        if str(field.kind).lower() != "file":
+            return None, "not_a_file_field"
+        if not field.visible or not field.enabled or field.readonly:
+            return None, "ineligible_field"
+        if field.file_count != 0:
+            return None, "file_already_uploaded"
+        if _field_is_sensitive(field):
+            return None, "sensitive_field"
+        return {
+            "target_id": target_id,
+            "action": "upload",
+            "kind": "file",
+            "source": "configured",
+        }, None
+
+    if operation == "browser.activate_safe_control":
+        if not isinstance(element_id, str):
+            return None, "missing_element_id"
+        target_id = _resolve_public_target(
+            observation,
+            element_id,
+            observation_sha256=observation_sha256,
+            buttons=True,
+        )
+        if target_id is None:
+            return None, "target_not_observed"
+        button = next((item for item in observation.buttons if item.target_id == target_id), None)
+        if button is None:
+            return None, "target_not_observed"
+        if target_id in frozenset(observation.final_submit_target_ids):
+            return None, "final_submit_control"
+        if not _safe_click_is_eligible(
+            button,
+            observation.final_submit_target_ids,
+            ats_policy=ats_policy,
+            page_url=observation.url,
+        ):
+            return None, "ineligible_control"
+        return {
+            "target_id": target_id,
+            "action": "click",
+            "kind": "button",
+            "source": "inference",
+        }, None
+
+    if operation not in {"browser.fill_field", "browser.select_option", "browser.set_checkbox"}:
+        return None, "unsupported_operation"
+    if not isinstance(element_id, str):
+        return None, "missing_element_id"
+    target_id = _resolve_public_target(
+        observation,
+        element_id,
+        observation_sha256=observation_sha256,
+    )
+    if target_id is None:
+        return None, "target_not_observed"
+    field = next((item for item in observation.fields if item.target_id == target_id), None)
+    if field is None:
+        return None, "target_not_observed"
+    value = payload.get("value")
+    confidence = payload.get("confidence")
+    inference_reason = payload.get("reason")
+    if value is not None or confidence is not None or inference_reason is not None:
+        return None, "unsupported_model_value"
+    det_answer = next(
+        (answer for answer in deterministic_plan.answers if answer.target_id == target_id),
+        None,
+    )
+    if det_answer is None:
+        return None, "no_deterministic_answer"
+    actual_value = det_answer.value
+    source = det_answer.source
+    if _field_has_existing_value(field):
+        return None, "field_already_filled"
+    if _field_is_sensitive(field):
+        return None, "sensitive_field"
+    if not field.visible or not field.enabled or field.readonly:
+        return None, "ineligible_field"
+    if str(field.kind).lower() == "file":
+        return None, "ineligible_field"
+    if target_id in frozenset(deterministic_plan.skipped_target_ids):
+        return None, "tombstoned_target"
+    expected_action = _action_for(field)
+    expected_operation = {
+        "fill": "browser.fill_field",
+        "select": "browser.select_option",
+        "check": "browser.set_checkbox",
+    }[expected_action]
+    if operation != expected_operation:
+        return None, "action_kind_mismatch"
+    return {
+        "target_id": target_id,
+        "action": expected_action,
+        "kind": field.kind,
+        "source": source,
+        "value": actual_value,
+        "confidence": None,
+        "reason": None,
+    }, None
+
+
+def _deterministic_plan_summary(
+    plan: AutofillPlan,
+    *,
+    observation: PageObservation,
+    observation_sha256: str,
+) -> dict[str, Any]:
+    """Expose only observation-scoped availability metadata."""
+    generation = _observation_generation(observation, observation_sha256)
+
+    def public_id(target_id: str) -> str:
+        return _public_element_id(target_id, generation=generation)
+
+    return {
+        "answers": [{"target_id": public_id(answer.target_id)} for answer in plan.answers],
+        "resume_upload_target_id": (
+            public_id(plan.resume_upload_target_id)
+            if plan.resume_upload_target_id is not None
+            else None
+        ),
+        "status": plan.status,
+        "reason_code": plan.reason_code.value,
+        "skipped_target_ids": [public_id(target_id) for target_id in plan.skipped_target_ids],
+    }
 def _enum_reason(value: str | PublicReasonCode) -> PublicReasonCode:
     try:
         return value if isinstance(value, PublicReasonCode) else PublicReasonCode(value)
@@ -163,8 +675,14 @@ def _redact_text(
     for pattern in patterns:
         value = re.sub(pattern, "[REDACTED]", value, flags=re.I)
     for secret in protected:
-        if secret:
-            value = re.sub(re.escape(secret), "[REDACTED]", value, flags=re.I)
+        if not secret:
+            continue
+        value = re.sub(re.escape(secret), "[REDACTED]", value, flags=re.I)
+        normalized = _normal(secret)
+        tokens = normalized.split()
+        if len(tokens) > 1:
+            separator_pattern = r"[\W_]+".join(re.escape(token) for token in tokens)
+            value = re.sub(separator_pattern, "[REDACTED]", value, flags=re.I)
     if strip_header:
         lines = [line.strip() for line in value.splitlines() if line.strip()]
         if lines:
@@ -184,11 +702,28 @@ def _protected_variants(value: Any) -> set[str]:
     if not isinstance(value, str) or not value.strip():
         return set()
     raw = value.strip()
-    values = {raw, _normal(raw), _compact(raw)}
-    digest = hashlib.sha256(raw.encode()).hexdigest()
-    values.add(digest)
-    values.add(base64.b64encode(raw.encode()).decode())
-    return {item for item in values if item}
+    plain = {item for item in (raw, _normal(raw), _compact(raw)) if item}
+    variants: set[str] = set()
+    for item in plain:
+        encoded = item.encode()
+        standard = base64.b64encode(encoded).decode()
+        urlsafe = base64.urlsafe_b64encode(encoded).decode()
+        variants.update({
+            item,
+            hashlib.sha256(encoded).hexdigest(),
+            standard,
+            standard.rstrip("="),
+            urlsafe,
+            urlsafe.rstrip("="),
+        })
+    return {item for item in variants if item}
+
+
+def _expanded_protected_values(values: Any) -> tuple[str, ...]:
+    variants: set[str] = set()
+    for value in values:
+        variants.update(_protected_variants(value))
+    return tuple(sorted(variants, key=lambda item: (-len(item), item)))
 
 
 def _flatten_strings(value: Any, *, depth: int = 0) -> tuple[str, ...]:
@@ -207,6 +742,50 @@ def _flatten_strings(value: Any, *, depth: int = 0) -> tuple[str, ...]:
             result.extend(_flatten_strings(item, depth=depth + 1))
         return tuple(result)
     return ()
+
+def _flatten_prompt_private_values(
+    value: Any,
+    *,
+    depth: int = 0,
+) -> tuple[str, ...]:
+    if depth > 8:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    if type(value) in {int, float}:
+        return (str(value),)
+    if isinstance(value, Mapping):
+        result: list[str] = []
+        for item in value.values():
+            result.extend(
+                _flatten_prompt_private_values(item, depth=depth + 1)
+            )
+        return tuple(result)
+    if isinstance(value, (tuple, list)):
+        result = []
+        for item in value:
+            result.extend(
+                _flatten_prompt_private_values(item, depth=depth + 1)
+            )
+        return tuple(result)
+    return ()
+
+
+def _configured_answer_values(
+    profile: ApplicationProfile,
+    *,
+    preferences: ApplicationPreferences | None = None,
+    deterministic: AutofillPlan | None = None,
+) -> tuple[str, ...]:
+    values: list[FieldValue] = [
+        answer.value
+        for answer in profile.field_answers
+    ]
+    if preferences is not None:
+        values.extend(mapping.value for mapping in preferences.mappings)
+    if deterministic is not None:
+        values.extend(answer.value for answer in deterministic.answers)
+    return _flatten_prompt_private_values(tuple(values))
 
 
 def validate_inference_privacy(plan: AutofillPlan, *, protected_values: tuple[str, ...], source_text: str = "") -> bool:
@@ -721,7 +1300,8 @@ def _plan_summary(plan: AutofillPlan) -> dict[str, Any]:
         "resume_upload": bool(plan.resume_upload_target_id), "safe_click": bool(plan.safe_click_target_id),
     }
 def _answer_payload(field: ObservedField, protected: tuple[str, ...] = ()) -> dict[str, Any]:
-    redact = lambda value: _redact_text(str(value), protected) if value is not None else value
+    def redact(value: Any) -> Any:
+        return _redact_text(str(value), protected) if value is not None else value
     return {
         "target_id": field.target_id,
         "kind": field.kind,
@@ -757,7 +1337,8 @@ def _button_payload(
         page_url=page_url,
     ):
         return None
-    redact = lambda value: _redact_text(str(value), protected) if value is not None else value
+    def redact(value: Any) -> Any:
+        return _redact_text(str(value), protected) if value is not None else value
     return {
         "target_id": button.target_id,
         "text": redact(button.text),
@@ -795,9 +1376,14 @@ def build_inference_request(
     job_description: str | None = None,
     applicant_description: str = "",
     configured_values: tuple[FieldValue, ...] = (),
+    protected_values: tuple[str, ...] = (),
     ats_policy: str = "greenhouse",
 ) -> dict[str, Any]:
-    protected = _flatten_strings(profile_facts) + _flatten_strings(configured_values)
+    protected = _expanded_protected_values(
+        _flatten_prompt_private_values(profile_facts)
+        + _flatten_prompt_private_values(configured_values)
+        + _flatten_prompt_private_values(protected_values)
+    )
     resolved_job_description = str(job_description or str(job.get("description") or ""))
     resolved_applicant_description = str(applicant_description or "")
     if any(
@@ -838,6 +1424,124 @@ def build_inference_request(
     }
     encoded = json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode()
     if len(encoded) > MAX_REQUEST_BYTES:
+        raise ValueError("inference_context_too_large")
+    return request
+
+def _build_control_inference_request(
+    observation: PageObservation,
+    *,
+    observation_sha256: str,
+    job: Mapping[str, Any],
+    applicant_description: str = "",
+    profile_facts: Mapping[str, Any],
+    resume_facts: Mapping[str, Any],
+    resume_basename: str,
+    deterministic: AutofillPlan,
+    ats_policy: str,
+    configured_values: tuple[FieldValue, ...] = (),
+    protected_values: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    """Build only the bounded, untrusted context allowed across the control edge."""
+    protected = _expanded_protected_values(
+        _flatten_prompt_private_values(profile_facts)
+        + _flatten_prompt_private_values(resume_facts)
+        + (str(resume_basename),)
+        + _flatten_prompt_private_values(configured_values)
+        + _flatten_prompt_private_values(protected_values)
+        + _flatten_prompt_private_values(
+            tuple(answer.value for answer in deterministic.answers)
+        )
+    )
+
+    def bounded(value: Any) -> str:
+        return _redact_text(str(value or ""), tuple(protected))[:12000]
+
+    def fact_categories(value: Mapping[str, Any]) -> list[str]:
+        keys: list[str] = []
+
+        def collect(item: Any, *, depth: int = 0) -> None:
+            if depth > 8 or not isinstance(item, Mapping):
+                return
+            for key, child in item.items():
+                keys.append(_normal(str(key)))
+                collect(child, depth=depth + 1)
+
+        collect(value)
+        markers = {
+            "contact": ("contact", "email", "phone"),
+            "education": ("education", "school", "degree", "university"),
+            "experience": ("employment", "employer", "experience", "role", "work"),
+            "links": ("linkedin", "portfolio", "website"),
+            "location": ("address", "city", "country", "location", "state"),
+            "skills": ("framework", "language", "skill", "technology"),
+        }
+        return [
+            category
+            for category, terms in markers.items()
+            if any(any(term in key.split() for term in terms) for key in keys)
+        ]
+
+    def applicant_capabilities(value: str) -> list[str]:
+        normalized = f" {_normal(value)} "
+        markers = {
+            "ai_ml": (" artificial intelligence ", " machine learning "),
+            "backend": (" api ", " backend ", " service "),
+            "data": (" analytics ", " data engineering ", " database "),
+            "distributed_systems": (" distributed system ", " distributed systems "),
+            "frontend": (" frontend ", " user interface ", " web application "),
+            "infrastructure": (" cloud ", " devops ", " infrastructure ", " kubernetes ", " platform "),
+            "leadership": (" leadership ", " management ", " mentor "),
+            "mobile": (" android ", " ios ", " mobile "),
+            "security": (" cybersecurity ", " security "),
+        }
+        return [
+            category
+            for category, terms in markers.items()
+            if any(term in normalized for term in terms)
+        ]
+
+    allowed_job = {
+        key: bounded(job.get(key))
+        for key in ("title", "company", "location", "description")
+    }
+    deterministic_target_ids = {
+        answer.target_id
+        for answer in deterministic.answers
+        if answer.target_id not in frozenset(deterministic.skipped_target_ids)
+    }
+    generation = _observation_generation(observation, observation_sha256)
+    available_targets = [
+        {
+            "target_id": _public_element_id(field.target_id, generation=generation),
+            "kind": _public_element_id(field.kind, prefix="kind", generation=generation),
+        }
+        for field in observation.fields
+        if field.target_id in deterministic_target_ids
+    ]
+    available_targets.extend(
+        {
+            "target_id": _public_element_id(button.target_id, generation=generation),
+            "kind": _public_element_id(button.element_kind, prefix="kind", generation=generation),
+        }
+        for button in observation.buttons
+        if _safe_click_is_eligible(
+            button,
+            observation.final_submit_target_ids,
+            ats_policy=ats_policy,
+            page_url=observation.url,
+        )
+    )
+    request = {
+        "job": allowed_job,
+        "available_targets": available_targets,
+        "context": {
+            "applicant_capabilities": applicant_capabilities(applicant_description),
+            "profile_categories": fact_categories(profile_facts),
+            "resume_categories": fact_categories(resume_facts),
+            "deterministic_answer_count": len(deterministic.answers),
+        },
+    }
+    if len(json.dumps(request, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) > MAX_REQUEST_BYTES:
         raise ValueError("inference_context_too_large")
     return request
 
@@ -1418,6 +2122,9 @@ def resolve_with_llm(
     applicant_description: str = "",
     resume_metadata: Mapping[str, Any] | None = None,
     profile_context: Mapping[str, Any] | ApplicationProfile | None = None,
+    preferences: ApplicationPreferences | None = None,
+    deterministic: AutofillPlan | None = None,
+    protected_values: tuple[str, ...] = (),
     api_key: str | None = None,
     base_url: str | None = None,
     model: str | None = None,
@@ -1427,12 +2134,19 @@ def resolve_with_llm(
     if mutated:
         return AutofillPlan(status="manual", reason_code=PublicReasonCode.no_deterministic_next_step)
     profile_facts: Mapping[str, Any]
-    configured_values: tuple[FieldValue, ...] = ()
+    configured_value_items: list[FieldValue] = []
     if isinstance(profile_context, ApplicationProfile):
         profile_facts = thaw_json(profile_context.facts)
-        configured_values = _flatten_strings(tuple(answer.value for answer in profile_context.field_answers))
+        configured_value_items.extend(
+            answer.value for answer in profile_context.field_answers
+        )
     else:
         profile_facts = profile_context or {}
+    if preferences is not None:
+        configured_value_items.extend(mapping.value for mapping in preferences.mappings)
+    if deterministic is not None:
+        configured_value_items.extend(answer.value for answer in deterministic.answers)
+    configured_values = tuple(configured_value_items)
     text = resume_context.text if isinstance(resume_context, ResumeContext) else str(resume_context or "")
     try:
         request = build_inference_request(
@@ -1441,6 +2155,7 @@ def resolve_with_llm(
             resume_text=text,
             profile_facts=profile_facts,
             configured_values=configured_values,
+            protected_values=protected_values,
             job_description=job_description,
             applicant_description=applicant_description,
             ats_policy=ats_policy,
@@ -1513,7 +2228,11 @@ def resolve_with_llm(
                 allow_ndjson=True,
             )
         plan = parse_llm_plan(_extract_llm_content(raw), observation, ats_policy=ats_policy)
-        protected_sources = _flatten_strings(profile_facts) + configured_values
+        protected_sources = (
+            _flatten_prompt_private_values(profile_facts)
+            + _flatten_prompt_private_values(configured_values)
+            + _flatten_prompt_private_values(protected_values)
+        )
         if not validate_inference_privacy(plan, protected_values=protected_sources, source_text=text):
             return AutofillPlan(status="manual", reason_code=PublicReasonCode.inference_privacy_violation)
         return plan
@@ -2158,6 +2877,216 @@ def _manifest_token_hash(path: Path) -> str | None:
         return None
     value = raw.get("commit_token_sha256") if isinstance(raw, Mapping) else None
     return value if isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) else None
+
+def _manifest_commit_evidence(
+    path: Path,
+    *,
+    token_hash: str,
+    run_id: int,
+    job_id: int,
+    session_id: str,
+    owner_identity: Mapping[str, Any] | None,
+    browser_identity: Mapping[str, Any] | None,
+) -> bool:
+    """Recognize detached ownership only when identities bind exactly."""
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, Mapping):
+        return False
+    if (
+        payload.get("state") not in {"open_guarded", "closed", "failed"}
+        or payload.get("detached") is not True
+        or payload.get("commit_token_sha256") != token_hash
+        or payload.get("run_id") != run_id
+        or payload.get("job_id") != job_id
+        or payload.get("session_id") != session_id
+        or not isinstance(owner_identity, Mapping)
+        or not isinstance(browser_identity, Mapping)
+        or payload.get("owner_identity") != dict(owner_identity)
+        or payload.get("browser_identity") != dict(browser_identity)
+    ):
+        return False
+    return True
+
+
+_HANDOFF_FINALIZATION_ARTIFACT_KEYS = frozenset(
+    {
+        "automated_submission",
+        "child_request_id",
+        "commit_token_sha256",
+        "job_id",
+        "observation_sha256",
+        "operation",
+        "parent_request_id",
+        "reason_code",
+        "run_id",
+        "session_id",
+        "status",
+        "unresolved_required_count",
+        "version",
+    }
+)
+
+
+def _handoff_finalization_payload(
+    *,
+    run_id: int,
+    job_id: int,
+    session_id: str,
+    proposal: BrowserToolProposal,
+    status: str,
+    reason_code: str,
+    observation_sha256: str,
+    unresolved_required_count: int,
+    commit_token_sha256: str,
+) -> dict[str, Any]:
+    payload = {
+        "version": 1,
+        "run_id": run_id,
+        "job_id": job_id,
+        "session_id": session_id,
+        "child_request_id": proposal.request.request_id,
+        "parent_request_id": proposal.parent_request_id,
+        "operation": proposal.request.operation,
+        "status": status,
+        "reason_code": reason_code,
+        "observation_sha256": observation_sha256,
+        "unresolved_required_count": unresolved_required_count,
+        "automated_submission": False,
+        "commit_token_sha256": commit_token_sha256,
+    }
+    if (
+        set(payload) != _HANDOFF_FINALIZATION_ARTIFACT_KEYS
+        or type(run_id) is not int
+        or run_id <= 0
+        or type(job_id) is not int
+        or job_id <= 0
+        or type(session_id) is not str
+        or not session_id
+        or type(payload["child_request_id"]) is not str
+        or type(payload["parent_request_id"]) is not str
+        or re.fullmatch(r"[0-9a-f-]{36}", payload["child_request_id"]) is None
+        or re.fullmatch(r"[0-9a-f-]{36}", payload["parent_request_id"]) is None
+        or proposal.request.operation != "browser.prepare_human_handoff"
+        or type(status) is not str
+        or status not in {"review_ready", "manual", "blocked"}
+        or type(reason_code) is not str
+        or _status_for_reason(reason_code) != status
+        or type(observation_sha256) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", observation_sha256) is None
+        or type(commit_token_sha256) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", commit_token_sha256) is None
+        or type(unresolved_required_count) is not int
+        or unresolved_required_count < 0
+    ):
+        raise RuntimeError("handoff_finalization_schema")
+    return payload
+
+
+def _validate_handoff_finalization_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, Mapping) or set(payload) != _HANDOFF_FINALIZATION_ARTIFACT_KEYS:
+        raise RuntimeError("handoff_finalization_schema")
+    if (
+        type(payload.get("version")) is not int
+        or payload["version"] != 1
+        or type(payload.get("run_id")) is not int
+        or payload["run_id"] <= 0
+        or type(payload.get("job_id")) is not int
+        or payload["job_id"] <= 0
+        or type(payload.get("session_id")) is not str
+        or not payload["session_id"]
+        or type(payload.get("child_request_id")) is not str
+        or re.fullmatch(r"[0-9a-f-]{36}", payload["child_request_id"]) is None
+        or type(payload.get("parent_request_id")) is not str
+        or re.fullmatch(r"[0-9a-f-]{36}", payload["parent_request_id"]) is None
+        or payload.get("operation") != "browser.prepare_human_handoff"
+        or type(payload.get("status")) is not str
+        or payload["status"] not in {"review_ready", "manual", "blocked"}
+        or type(payload.get("reason_code")) is not str
+        or _status_for_reason(payload["reason_code"]) != payload["status"]
+        or type(payload.get("observation_sha256")) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", payload["observation_sha256"]) is None
+        or type(payload.get("commit_token_sha256")) is not str
+        or re.fullmatch(r"[0-9a-f]{64}", payload["commit_token_sha256"]) is None
+        or type(payload.get("unresolved_required_count")) is not int
+        or payload["unresolved_required_count"] < 0
+        or payload.get("automated_submission") is not False
+    ):
+        raise RuntimeError("handoff_finalization_schema")
+    return dict(payload)
+
+
+def _validate_indexed_manifest_artifacts(run: ArtifactRun, manifest: Mapping[str, Any]) -> None:
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, Mapping):
+        raise RuntimeError("manifest_error")
+    screenshot_total = 0
+    screenshot_paths: set[str] = set()
+    for descriptor in artifacts.values():
+        if not isinstance(descriptor, Mapping):
+            raise RuntimeError("manifest_error")
+        path = descriptor.get("path")
+        digest = descriptor.get("sha256")
+        if (
+            type(path) is not str
+            or not path
+            or type(digest) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise RuntimeError("manifest_error")
+        if path.startswith("screenshots/"):
+            max_bytes = MAX_SCREENSHOT_BYTES
+        elif path.startswith("input/"):
+            max_bytes = 10 * 1024 * 1024
+        else:
+            max_bytes = 8 * 1024 * 1024
+        data = run.read_bytes(path, max_bytes=max_bytes, expected_sha256=digest)
+        if path.startswith("screenshots/") and path not in screenshot_paths:
+            screenshot_paths.add(path)
+            screenshot_total += len(data)
+    if len(screenshot_paths) > MAX_SCREENSHOTS_PER_RUN or screenshot_total > MAX_SCREENSHOT_TOTAL_BYTES:
+        raise RuntimeError("manifest_error")
+
+
+def _write_handoff_finalization_artifact(
+    run: ArtifactRun,
+    manifest_payload: dict[str, Any],
+    payload: Mapping[str, Any],
+    *,
+    iteration: int,
+) -> tuple[Any, Any]:
+    validated = _validate_handoff_finalization_payload(payload)
+    artifact = _write_json_verified(run, "handoff_finalization.json", validated)
+    _manifest_set_artifact(
+        manifest_payload,
+        "handoff_finalization",
+        artifact,
+        "handoff_finalization.json",
+        iteration=iteration,
+        stage="prepared",
+    )
+    manifest_result = _write_run_manifest(run, manifest_payload)
+    _validate_indexed_manifest_artifacts(run, manifest_payload)
+    return artifact, manifest_result
+@dataclass(frozen=True)
+class _BrowserCallOutcome:
+    """Preserve a browser call outcome when the waiting task is cancelled."""
+
+    cancelled: bool
+    value: Any = None
+    error: BaseException | None = None
+
+
+def _unwrap_browser_call_outcome(value: Any) -> Any:
+    if not isinstance(value, _BrowserCallOutcome):
+        return value
+    if value.error is not None:
+        raise value.error
+    return value.value
+
+
 @dataclass(frozen=True)
 class _BrowserFailure(Exception):
     stage: str
@@ -2191,9 +3120,32 @@ async def _invoke_browser(
     stage: str,
     iteration: int,
     call: Any,
+    *,
+    capture_cancellation: bool = False,
 ) -> Any:
     try:
-        return await _maybe(call())
+        result = await _await_browser_call(
+            call,
+            capture_cancellation=capture_cancellation,
+        )
+        if isinstance(result, _BrowserCallOutcome) and result.error is not None:
+            error = result.error
+            if isinstance(error, _BrowserFailure):
+                raise error
+            if isinstance(error, BrowserAdapterError):
+                raise _BrowserFailure(
+                    stage,
+                    operation,
+                    normalize_browser_error_code(str(error)),
+                    iteration,
+                ) from None
+            raise _BrowserFailure(
+                stage,
+                operation,
+                "browser_command_failed",
+                iteration,
+            ) from None
+        return _unwrap_browser_call_outcome(result)
     except _BrowserFailure:
         raise
     except BrowserAdapterError as exc:
@@ -2210,6 +3162,45 @@ async def _invoke_browser(
             "browser_command_failed",
             iteration,
         ) from None
+
+
+async def _run_browser_call(call: Any) -> Any:
+    result = await asyncio.to_thread(call)
+    return await _maybe(result)
+
+
+async def _drain_browser_call(task: asyncio.Task[Any]) -> None:
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            continue
+        except BaseException:
+            return
+
+
+async def _await_browser_call(
+    call: Any,
+    *,
+    capture_cancellation: bool = False,
+) -> Any:
+    task = asyncio.create_task(_run_browser_call(call), name="application-browser-call")
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await _drain_browser_call(task)
+        # A cancellation raised by the browser coroutine itself is an
+        # operation outcome, not cancellation of the workflow waiter.
+        if task.cancelled() or not capture_cancellation:
+            raise
+        try:
+            value = task.result()
+        except BaseException as error:
+            return _BrowserCallOutcome(cancelled=True, error=error)
+        return _BrowserCallOutcome(cancelled=True, value=value)
+    except BaseException:
+        await _drain_browser_call(task)
+        raise
 def _observation_from_browser_payload(payload: Any, *, iteration: int) -> PageObservation:
     try:
         return _observation_from_payload(payload)
@@ -2230,8 +3221,7 @@ async def _maybe(value: Any) -> Any:
 async def _close_session(session: Any) -> None:
     if session is None:
         return
-    result = session.close()
-    await _maybe(result)
+    await _await_browser_call(session.close)
 
 
 def _session_process_closed(session: Any) -> bool | None:
@@ -2245,6 +3235,189 @@ def _session_process_closed(session: Any) -> bool | None:
     except Exception:
         return None
 
+def _supervise_postcommit_handoff_failure(session: Any) -> str:
+    """Probe and, when partial, reap the exact bound handoff identities."""
+    identities = {
+        "owner": getattr(session, "_handoff_owner_identity", None)
+        or getattr(session, "owner_identity", None),
+        "browser": getattr(session, "_handoff_browser_identity", None)
+        or getattr(session, "browser_identity", None),
+    }
+    try:
+        mode = _supervise_partial_handoff_processes(identities)
+    except Exception:
+        return "unknown"
+    return mode if mode in {"healthy", "partial", "absent"} else "unknown"
+
+
+
+def _control_progress_code(event_type: str, summary_code: Any) -> str:
+    if isinstance(summary_code, PublicReasonCode):
+        candidate = summary_code.value
+    else:
+        candidate = str(summary_code or "")
+    if candidate in _CONTROL_PROGRESS_CODES:
+        return candidate
+    return {
+        "page_observed": "observed",
+        "action_allowed": "allowed",
+        "action_rejected": "rejected",
+        "screenshot_captured": "captured",
+        "manual_intervention_required": "manual_required",
+        "review_ready": "review_ready",
+        "browser_handed_off": "handed_off",
+        "run_failed": "failed",
+    }.get(event_type, "failed")
+
+
+async def _record_control_progress(
+    control: ApplicationWorkflowControl,
+    run_id: int,
+    event_type: str,
+    summary_code: Any,
+    action_sequence: int,
+    *,
+    observation_sha256: str | None = None,
+    request_id: str | None = None,
+) -> None:
+    if event_type not in _CONTROL_PROGRESS_EVENTS:
+        raise RuntimeError("invalid_progress_event")
+    await _maybe(control.record_progress(
+        run_id,
+        event_type,
+        _control_progress_code(event_type, summary_code),
+        action_sequence,
+        observation_sha256=observation_sha256,
+        request_id=request_id,
+    ))
+
+
+def _validate_control_result(
+    proposal: BrowserToolProposal,
+    result: Mapping[str, Any],
+    *,
+    state: str,
+) -> dict[str, Any]:
+    try:
+        validated = validate_public_result(
+            result,
+            operation=proposal.request.operation,
+        )
+    except Exception:
+        raise RuntimeError("invalid_control_result") from None
+    if not isinstance(validated, Mapping):
+        raise RuntimeError("invalid_control_result")
+    return thaw_json(validated)
+
+
+async def _finish_control_proposal(
+    control: ApplicationWorkflowControl,
+    proposal: BrowserToolProposal,
+    action_sequence: int,
+    *,
+    ok: bool,
+    state: str,
+    result: Mapping[str, Any] | None = None,
+    error_code: str | None = None,
+    application_finalization: Mapping[str, Any] | None = None,
+) -> bool:
+    validated_result = (
+        _validate_control_result(proposal, result, state=state)
+        if result is not None
+        else None
+    )
+    callback = control.proposal_finished
+    kwargs: dict[str, Any] = {
+        "proposal": proposal,
+        "action_sequence": action_sequence,
+        "ok": bool(ok),
+        "state": state,
+        "result": validated_result,
+        "error_code": error_code,
+    }
+    if application_finalization is not None:
+        kwargs["application_finalization"] = application_finalization
+    try:
+        parameters = inspect.signature(callback).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if parameters and not any(
+        item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+    ):
+        kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if key in parameters
+        }
+    value = await _maybe(callback(**kwargs))
+    return value is True
+
+
+async def _finalize_control_failure(
+    control: ApplicationWorkflowControl,
+    run_id: int,
+    *,
+    status: str,
+    reason_code: str,
+    observation_summary: Mapping[str, Any],
+    plan_summary: Mapping[str, Any],
+    artifact_dir: str | None,
+    pending_proposal: BrowserToolProposal | None = None,
+    action_sequence: int = 0,
+    error_code: str | None = None,
+    observation_sha256: str | None = None,
+    manifest_sha256: str | None = None,
+) -> bool:
+    callback = getattr(control, "finalize_failure", None)
+    if not callable(callback):
+        return False
+    kwargs: dict[str, Any] = {
+        "run_id": run_id,
+        "status": status,
+        "reason_code": reason_code,
+        "observation_summary": observation_summary,
+        "plan_summary": plan_summary,
+        "artifact_dir": artifact_dir,
+        "pending_proposal": pending_proposal,
+        "action_sequence": action_sequence,
+        "error_code": error_code,
+        "observation_sha256": observation_sha256,
+        "manifest_sha256": manifest_sha256,
+    }
+    try:
+        parameters = inspect.signature(callback).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+    if parameters and not any(
+        item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()
+    ):
+        kwargs = {
+            key: value
+            for key, value in kwargs.items()
+            if key in parameters
+        }
+    value = await _maybe(callback(**kwargs))
+    return value is True
+
+
+def _control_error_code(reason: str | None) -> str:
+    if reason in {"stale_observation_hash", "stale_option"}:
+        return "stale_observation"
+    if reason in {"abandoned_running_attempt", "cancelled"}:
+        return "cancelled"
+    if reason in {"manual_intervention_required", "no_deterministic_next_step"}:
+        return "manual_intervention_required"
+    if reason == "deadline_exceeded":
+        return "deadline_exceeded"
+    return "action_rejected"
+
+
+def _validate_expected_content_hash(value: str | None, *, error_code: str) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError(error_code)
+    return value
 
 async def run_application_workflow(
     connection: Any,
@@ -2259,6 +3432,12 @@ async def run_application_workflow(
     artifact_root: str | Path = "data/application-runs",
     headed: bool = False,
     ats: str = "auto",
+    claim_provider: Any = None,
+    control: ApplicationWorkflowControl | None = None,
+    expected_resume_sha256: str | None = None,
+    expected_profile_sha256: str | None = None,
+    application_preferences_snapshot: ApplicationPreferences | None = None,
+    applicant_description_snapshot: str | None = None,
 ) -> list[dict[str, Any]]:
     if type(limit) is not int or not 1 <= limit <= 10:
         raise ValueError("limit must be between 1 and 10")
@@ -2268,6 +3447,14 @@ async def run_application_workflow(
         raise ValueError("application profile directory requires a preset")
     if ats not in {"auto", *SUPPORTED_ATS}:
         raise ValueError("unsupported_ats")
+    expected_resume_sha256 = _validate_expected_content_hash(
+        expected_resume_sha256,
+        error_code="configured_resume_changed",
+    )
+    expected_profile_sha256 = _validate_expected_content_hash(
+        expected_profile_sha256,
+        error_code="candidate_profile_changed",
+    )
     profile_provenance = None
     profile_json_provenance = None
     if application_profile_preset is not None:
@@ -2289,20 +3476,56 @@ async def run_application_workflow(
                 "source_kind": loaded_profile.source_kind,
                 "sha256": loaded_profile.source_sha256,
             }
-    preferences = load_application_preferences(application_preferences, cwd=Path.cwd())
+    configured_profile_sha256 = (
+        profile_provenance["content_sha256"]
+        if profile_provenance is not None
+        else (
+            profile_json_provenance["sha256"]
+            if profile_json_provenance is not None
+            else DEFAULT_APPLICATION_PROFILE_SHA256
+        )
+    )
+    if application_preferences_snapshot is None:
+        preferences = load_application_preferences(
+            application_preferences,
+            cwd=Path.cwd(),
+        )
+    else:
+        preferences = application_preferences_snapshot
     preferences_provenance = (
         {"sha256": preferences.source_sha256}
         if preferences.source_sha256 is not None
         else None
     )
-    applicant_description = load_applicant_description(applicant_description_file, profile)
+    applicant_description = (
+        applicant_description_snapshot
+        if applicant_description_snapshot is not None
+        else load_applicant_description(applicant_description_file, profile)
+    )
     results: list[dict[str, Any]] = []
     owner = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
     with load_resume_context(resume_file) as resume, ArtifactRoot.open(artifact_root, cwd=Path.cwd()) as artifacts:
-        for _ in range(limit):
-            claim = claim_next_application_job(connection, owner=owner)
+        if (
+            expected_resume_sha256 is not None
+            and not hmac.compare_digest(resume.sha256, expected_resume_sha256)
+        ):
+            raise ValueError("configured_resume_changed")
+        if (
+            expected_profile_sha256 is not None
+            and not hmac.compare_digest(configured_profile_sha256, expected_profile_sha256)
+        ):
+            raise ValueError("candidate_profile_changed")
+        _claim_fn = claim_provider if claim_provider is not None else claim_next_application_job
+        for claim_index in range(limit):
+            # A coordinator-supplied claim is already frozen and owned.  It is
+            # consumed exactly once; never re-query or reclaim it.
+            if claim_provider is not None and claim_index:
+                break
+            claim = _claim_fn(connection, owner=owner)
             if claim is None:
                 break
+            if not isinstance(claim, ApplicationClaim):
+                raise TypeError("claim_provider must return ApplicationClaim")
             run_id = claim.run_id
             job = thaw_json(claim.job)
             run: ArtifactRun | None = None
@@ -2310,16 +3533,33 @@ async def run_application_workflow(
             committed = False
             window_state = "closed"
             session_reconciled = False
-            run_json_written = False
+            application_finished = False
+            post_commit_guard = False
+            handoff_intent_bound = False
             artifact_ref: str | None = None
             reason = PublicReasonCode.browser_error
             status = "failed"
-            adapter_name = "greenhouse"
             run_dir_path: Path | None = None
-            failed_current = False
+            post_commit_reconciled = False
             manifest_payload: dict[str, Any] | None = None
             session_id: str | None = None
             latest_iteration = 0
+            adapter_name = "greenhouse"
+            pending_proposal: BrowserToolProposal | None = None
+            pending_action_sequence = 0
+            pending_action: dict[str, Any] | None = None
+            mutation_count = 0
+            executed_actions: list[dict[str, Any]] = []
+            observation_result: Any | None = None
+            plan_result: Any | None = None
+            actions_result: Any | None = None
+            filled_state_result: Any | None = None
+            run_protected_values: list[str] = []
+
+            def remember_protected_values(value: Any) -> None:
+                for item in _flatten_prompt_private_values(value):
+                    if item and item not in run_protected_values:
+                        run_protected_values.append(item)
             try:
                 run = artifacts.create_run_dir(run_id)
                 artifact_ref = run.public_ref
@@ -2340,6 +3580,13 @@ async def run_application_workflow(
                 application_route_identity = _application_route_identity(url, adapter.name)
                 if application_route_identity is None:
                     raise RuntimeError("invalid_application_url")
+                if control is not None:
+                    await _maybe(control.on_claimed(
+                        run_id=run_id,
+                        job_id=int(job.get("id", 0)),
+                        ats_policy=adapter_name,
+                        application_url=url,
+                    ))
                 claim_result = _write_json_verified(
                     run,
                     "claim.json",
@@ -2388,7 +3635,6 @@ async def run_application_workflow(
                         stage="claimed",
                     )
                 _write_run_manifest(run, manifest_payload)
-                run_json_written = True
                 input_dir = run_dir_path / "input"
                 session_manifest = run_dir_path / "review_session.json"
                 session_id = uuid.uuid4().hex
@@ -2407,8 +3653,26 @@ async def run_application_workflow(
                     raise RuntimeError("database_error")
                 owner_registered = False
                 browser_registered = False
+                startup_owner_identity: dict[str, Any] | None = None
+                startup_browser_identity: dict[str, Any] | None = None
+
                 def _identity_arg(args: tuple[Any, ...]) -> dict[str, Any] | None:
                     return next((item for item in reversed(args) if isinstance(item, Mapping)), None)
+
+                def capture_owner_identity(*args: Any) -> bool:
+                    nonlocal startup_owner_identity
+                    identity = _identity_arg(args)
+                    if identity is not None:
+                        startup_owner_identity = dict(identity)
+                    return True
+
+                def capture_browser_identity(*args: Any) -> bool:
+                    nonlocal startup_browser_identity
+                    identity = _identity_arg(args)
+                    if identity is not None:
+                        startup_browser_identity = dict(identity)
+                    return True
+
                 def on_owner_identity(*args: Any) -> None:
                     nonlocal owner_registered
                     identity = _identity_arg(args)
@@ -2416,6 +3680,7 @@ async def run_application_workflow(
                     owner_registered = register_application_owner_process(connection, run_id=run_id, owner_pid=pid, process_identity=identity, artifact_root=artifacts)
                     if not owner_registered:
                         raise RuntimeError("database_error")
+
                 def on_browser_identity(*args: Any) -> None:
                     nonlocal browser_registered
                     identity = _identity_arg(args)
@@ -2438,9 +3703,9 @@ async def run_application_workflow(
                 if "screenshot_root" not in parameters and not accepts_kwargs:
                     start_kwargs.pop("screenshot_root", None)
                 if "on_owner_identity" in parameters or accepts_kwargs:
-                    start_kwargs["on_owner_identity"] = on_owner_identity
+                    start_kwargs["on_owner_identity"] = capture_owner_identity
                 if "on_browser_identity" in parameters or accepts_kwargs:
-                    start_kwargs["on_browser_identity"] = on_browser_identity
+                    start_kwargs["on_browser_identity"] = capture_browser_identity
                 try:
                     spawn_allowed = mark_application_spawn_attempted(
                         connection,
@@ -2463,18 +3728,51 @@ async def run_application_workflow(
                     "browser_identity": None,
                     "process": {},
                 }), "review_session.json")
-                session = await _invoke_browser(
+                if control is not None and await _maybe(control.cancellation_requested(run_id)):
+                    raise RuntimeError("abandoned_running_attempt")
+                startup_result = await _invoke_browser(
                     "start",
                     "startup",
                     0,
                     lambda: PuppeteerSession.start(**start_kwargs),
+                    capture_cancellation=True,
                 )
+                if isinstance(startup_result, _BrowserCallOutcome):
+                    startup_session = startup_result.value
+                    if startup_session is not None:
+                        session = startup_session
+                        try:
+                            await _invoke_browser(
+                                "close",
+                                "cleanup",
+                                0,
+                                lambda: startup_session.close(),
+                                capture_cancellation=True,
+                            )
+                        except BaseException:
+                            pass
+                    if startup_result.error is not None:
+                        raise startup_result.error
+                    raise asyncio.CancelledError
+                session = startup_result
                 if not owner_registered:
-                    on_owner_identity(getattr(session, "owner_identity", None))
+                    on_owner_identity(startup_owner_identity or getattr(session, "owner_identity", None))
                 if not browser_registered and getattr(session, "browser_pid", None):
-                    on_browser_identity(getattr(session, "browser_identity", None))
+                    on_browser_identity(startup_browser_identity or getattr(session, "browser_identity", None))
                 if not owner_registered or (getattr(session, "browser_pid", None) and not browser_registered):
                     raise RuntimeError("database_error")
+                setattr(
+                    session,
+                    "_handoff_owner_identity",
+                    dict(startup_owner_identity or getattr(session, "owner_identity", {})),
+                )
+                setattr(
+                    session,
+                    "_handoff_browser_identity",
+                    dict(startup_browser_identity or getattr(session, "browser_identity", {})),
+                )
+                if control is not None and await _maybe(control.cancellation_requested(run_id)):
+                    raise RuntimeError("abandoned_running_attempt")
                 await _invoke_browser(
                     "goto",
                     "navigation",
@@ -2495,6 +3793,7 @@ async def run_application_workflow(
                 page_scope_signature: tuple[Any, ...] | None = None
                 executed_actions: list[dict[str, Any]] = []
                 final_plan: AutofillPlan | None = None
+                control_action_sequence = 0
                 def persist_iteration_action_evidence(
                     iteration: int,
                     observation_id: str,
@@ -2539,7 +3838,180 @@ async def run_application_workflow(
                     )
                     _write_run_manifest(run, manifest_payload)
                     return result
-                async def capture_screenshot(slot: str, stage: str, iteration: int) -> None:
+                def persist_action_result(
+                    iteration: int,
+                    observation: PageObservation,
+                    observation_result: Any,
+                    observation_path: str,
+                    iteration_action_evidence: Any,
+                    action_plan: AutofillPlan,
+                    action: Mapping[str, Any],
+                    *,
+                    succeeded: bool,
+                    cancelled: bool,
+                    error_code: str | None = None,
+                    continuation: bool | None = None,
+                ) -> dict[str, Any]:
+                    nonlocal mutation_count
+                    if run is None or manifest_payload is None:
+                        raise RuntimeError("manifest_error")
+                    is_mutation = action["action"] != "click"
+                    if succeeded and is_mutation:
+                        mutation_count += 1
+                    action_result: dict[str, Any] = {
+                        "outcome": "allowed" if succeeded else "manual",
+                        "reason_code": None if succeeded else (error_code or "browser_error"),
+                        "observation_sha256": observation_result.sha256,
+                        "changed": bool(succeeded),
+                    }
+                    executed_action: dict[str, Any] = {
+                        "target_id": action.get("target_id"),
+                        "action": action["action"],
+                        "generation": observation.observation_id,
+                        "executed": bool(succeeded),
+                        "result": action_result,
+                        "cancelled": bool(cancelled),
+                    }
+                    if continuation is not None:
+                        executed_action["continuation"] = bool(continuation)
+                    executed_actions.append(executed_action)
+                    action_path = f"iterations/{iteration:04d}/action.json"
+                    result_path = f"iterations/{iteration:04d}/result.json"
+                    plan_path = f"iterations/{iteration:04d}/plan.json"
+                    checkpoint_path = f"iterations/{iteration:04d}/checkpoint.json"
+                    iteration_action = _write_json_verified(run, action_path, executed_action)
+                    iteration_result = _write_json_verified(run, result_path, action_result)
+                    iteration_plan = _write_json_verified(
+                        run,
+                        plan_path,
+                        _plan_summary(action_plan),
+                    )
+                    iteration_checkpoint = _write_json_verified(
+                        run,
+                        checkpoint_path,
+                        {
+                            "mutation": is_mutation,
+                            "observation_id": observation.observation_id,
+                            "action": action["action"],
+                            "result": action_result,
+                            "filled_state": {"mutation_count": mutation_count},
+                        },
+                    )
+                    _manifest_set_iteration(
+                        manifest_payload,
+                        iteration,
+                        stage="action_applied",
+                        artifacts={
+                            "action_evidence": _manifest_artifact(
+                                iteration_action_evidence,
+                                f"iterations/{iteration:04d}/action_evidence.json",
+                                iteration=iteration,
+                                stage="action_applied",
+                            ),
+                            "action": _manifest_artifact(
+                                iteration_action,
+                                action_path,
+                                iteration=iteration,
+                                stage="action_applied",
+                            ),
+                            "result": _manifest_artifact(
+                                iteration_result,
+                                result_path,
+                                iteration=iteration,
+                                stage="action_applied",
+                            ),
+                            "observation": _manifest_artifact(
+                                observation_result,
+                                observation_path,
+                                iteration=iteration,
+                                stage="action_applied",
+                            ),
+                            "plan": _manifest_artifact(
+                                iteration_plan,
+                                plan_path,
+                                iteration=iteration,
+                                stage="action_applied",
+                            ),
+                            "checkpoint": _manifest_artifact(
+                                iteration_checkpoint,
+                                checkpoint_path,
+                                iteration=iteration,
+                                stage="action_applied",
+                            ),
+                        },
+                    )
+                    _write_run_manifest(run, manifest_payload)
+                    return action_result
+
+                async def cancellation_after_action() -> bool:
+                    if control is None:
+                        return False
+                    task = asyncio.create_task(
+                        _maybe(control.cancellation_requested(run_id)),
+                        name="application-cancellation-check",
+                    )
+                    try:
+                        return bool(await asyncio.shield(task))
+                    except BaseException:
+                        await _drain_browser_call(task)
+                        return True
+
+                def mark_action_cancelled(
+                    iteration: int,
+                    observation: PageObservation,
+                    action: Mapping[str, Any],
+                    action_result: Mapping[str, Any],
+                ) -> None:
+                    if run is None or manifest_payload is None or not executed_actions:
+                        raise RuntimeError("manifest_error")
+                    executed_actions[-1]["cancelled"] = True
+                    action_path = f"iterations/{iteration:04d}/action.json"
+                    checkpoint_path = f"iterations/{iteration:04d}/checkpoint.json"
+                    action_artifact = _write_json_verified(
+                        run,
+                        action_path,
+                        executed_actions[-1],
+                    )
+                    checkpoint_artifact = _write_json_verified(
+                        run,
+                        checkpoint_path,
+                        {
+                            "mutation": action["action"] != "click",
+                            "observation_id": observation.observation_id,
+                            "action": action["action"],
+                            "result": dict(action_result),
+                            "filled_state": {"mutation_count": mutation_count},
+                            "cancelled": True,
+                        },
+                    )
+                    iteration_entry = manifest_payload.get("iterations", {}).get(str(iteration))
+                    if not isinstance(iteration_entry, Mapping):
+                        raise RuntimeError("manifest_error")
+                    artifacts = iteration_entry.get("artifacts")
+                    if not isinstance(artifacts, Mapping):
+                        raise RuntimeError("manifest_error")
+                    updated_artifacts = dict(artifacts)
+                    stage = str(iteration_entry.get("stage", "action_applied"))
+                    updated_artifacts["action"] = _manifest_artifact(
+                        action_artifact,
+                        action_path,
+                        iteration=iteration,
+                        stage=stage,
+                    )
+                    updated_artifacts["checkpoint"] = _manifest_artifact(
+                        checkpoint_artifact,
+                        checkpoint_path,
+                        iteration=iteration,
+                        stage=stage,
+                    )
+                    _manifest_set_iteration(
+                        manifest_payload,
+                        iteration,
+                        stage=stage,
+                        artifacts=updated_artifacts,
+                    )
+                    _write_run_manifest(run, manifest_payload)
+                async def capture_screenshot(slot: str, stage: str, iteration: int) -> dict[str, Any]:
                     if run is None or manifest_payload is None:
                         raise RuntimeError("manifest_error")
                     try:
@@ -2561,6 +4033,7 @@ async def run_application_workflow(
                             iteration=iteration,
                             stage=stage,
                         )
+                        return screenshot
                     except BrowserAdapterError as exc:
                         raise _BrowserFailure(
                             stage,
@@ -2575,12 +4048,17 @@ async def run_application_workflow(
                             "artifact_error",
                             iteration,
                         ) from None
+                if control is not None and await _maybe(control.cancellation_requested(run_id)):
+                    raise RuntimeError("abandoned_running_attempt")
 
                 await capture_screenshot("initial", "observation", 1)
 
 
                 for iteration in range(1, MAX_AUTOFILL_ITERATIONS + 1):
                     latest_iteration = iteration
+                    if control is not None and pending_proposal is None:
+                        if await _maybe(control.cancellation_requested(run_id)):
+                            raise RuntimeError("abandoned_running_attempt")
                     payload = await _invoke_browser(
                         "observe",
                         "observation",
@@ -2588,6 +4066,673 @@ async def run_application_workflow(
                         lambda: session.observe(),
                     )
                     observation = _observation_from_browser_payload(payload, iteration=iteration)
+                    if control is not None:
+                        if pending_proposal is not None and pending_action is not None:
+                            fresh_observation_path = f"iterations/{iteration:04d}/observation.json"
+                            fresh_observation_result = _write_json_verified(
+                                run,
+                                fresh_observation_path,
+                                _observation_snapshot(observation),
+                            )
+                            fresh_observation_sha = _observation_snapshot_sha256(observation)
+                            if not hmac.compare_digest(
+                                fresh_observation_result.sha256,
+                                fresh_observation_sha,
+                            ):
+                                raise RuntimeError("artifact_hash_mismatch")
+                            if manifest_payload is None:
+                                raise RuntimeError("manifest_error")
+                            _manifest_set_iteration(
+                                manifest_payload,
+                                iteration,
+                                stage="action_applied",
+                                artifacts={
+                                    "observation": _manifest_artifact(
+                                        fresh_observation_result,
+                                        fresh_observation_path,
+                                        iteration=iteration,
+                                        stage="action_applied",
+                                    ),
+                                },
+                            )
+                            _write_run_manifest(run, manifest_payload)
+                            pending_changed = False
+                            pending_reason = PublicReasonCode.safe_click_no_progress
+                            if pending_action["action"] == "click":
+                                pending_changed = (
+                                    _observation_semantic_signature(observation)
+                                    != pending_action["prior_signature"]
+                                )
+                            elif pending_action["action"] == "upload":
+                                field = next(
+                                    (
+                                        item
+                                        for item in observation.fields
+                                        if item.target_id == pending_action["target_id"]
+                                    ),
+                                    None,
+                                )
+                                pending_changed = bool(
+                                    field is not None
+                                    and _field_existing_value_resolved(field)
+                                    and resume.basename in field.file_basenames
+                                )
+                                pending_reason = PublicReasonCode.field_value_not_retained
+                            else:
+                                field = next(
+                                    (
+                                        item
+                                        for item in observation.fields
+                                        if item.target_id == pending_action["target_id"]
+                                    ),
+                                    None,
+                                )
+                                pending_changed = bool(
+                                    field is not None
+                                    and _retained_value_equal(
+                                        field,
+                                        pending_action["expected"],
+                                    )
+                                )
+                                pending_reason = PublicReasonCode.field_value_not_retained
+                            pending_result = {
+                                "outcome": "allowed" if pending_changed else "manual",
+                                "reason_code": None if pending_changed else pending_reason.value,
+                                "observation_sha256": fresh_observation_sha,
+                                "changed": pending_changed,
+                            }
+                            await _finish_control_proposal(
+                                control,
+                                pending_proposal,
+                                pending_action_sequence,
+                                ok=pending_changed,
+                                state="running" if pending_changed else MANUAL_STATUS,
+                                result=pending_result,
+                                error_code=(
+                                    None
+                                    if pending_changed
+                                    else _control_error_code(pending_reason.value)
+                                ),
+                            )
+                            pending_proposal = None
+                            pending_action = None
+                            if not pending_changed:
+                                final_plan = AutofillPlan(
+                                    status=MANUAL_STATUS,
+                                    reason_code=pending_reason,
+                                )
+                                reason = pending_reason
+                                break
+                            if await _maybe(control.cancellation_requested(run_id)):
+                                raise RuntimeError("abandoned_running_attempt")
+
+                        final_observation = observation
+                        if observation.blockers:
+                            reason = _enum_reason(observation.blockers[0].code)
+                            final_plan = AutofillPlan(status=MANUAL_STATUS, reason_code=reason)
+                            await capture_screenshot("blocker", "blocker", iteration)
+                            await _record_control_progress(
+                                control,
+                                run_id,
+                                "manual_intervention_required",
+                                reason,
+                                control_action_sequence,
+                                observation_sha256=_observation_snapshot_sha256(observation),
+                            )
+                            break
+                        if observation.errors:
+                            reason = PublicReasonCode.page_validation_error
+                            final_plan = AutofillPlan(status=MANUAL_STATUS, reason_code=reason)
+                            break
+                        sensitive_control = any(
+                            _field_is_sensitive(field)
+                            and field.visible
+                            and field.enabled
+                            and not field.readonly
+                            for field in observation.fields
+                        ) or any(
+                            _field_is_sensitive_button(button)
+                            and button.visible
+                            and button.enabled
+                            for button in observation.buttons
+                        )
+                        if sensitive_control:
+                            reason = PublicReasonCode.required_sensitive_fields_manual
+                            final_plan = AutofillPlan(status=MANUAL_STATUS, reason_code=reason)
+                            await capture_screenshot("blocker", "blocker", iteration)
+                            await _record_control_progress(
+                                control,
+                                run_id,
+                                "manual_intervention_required",
+                                reason,
+                                control_action_sequence,
+                                observation_sha256=_observation_snapshot_sha256(observation),
+                            )
+                            break
+                        deterministic = _configured_and_profile_plan(
+                            observation,
+                            adapter=adapter,
+                            context=context,
+                            profile=profile,
+                            resume=resume,
+                            preferences=preferences,
+                        )
+                        obs_sha256 = _observation_snapshot_sha256(observation)
+                        protected_values = (
+                            _flatten_prompt_private_values(profile.facts)
+                            + _flatten_prompt_private_values(resume.facts.facts)
+                            + (resume.basename,)
+                            + _flatten_prompt_private_values(
+                                tuple(answer.value for answer in deterministic.answers)
+                            )
+                            + _configured_answer_values(
+                                profile,
+                                preferences=preferences,
+                                deterministic=deterministic,
+                            )
+                            + tuple(run_protected_values)
+                        )
+                        observation_path = f"iterations/{iteration:04d}/observation.json"
+                        iteration_observation = _write_json_verified(
+                            run,
+                            observation_path,
+                            _observation_snapshot(observation),
+                        )
+                        if not hmac.compare_digest(iteration_observation.sha256, obs_sha256):
+                            raise RuntimeError("artifact_hash_mismatch")
+                        public_observation = _build_public_observation(
+                            observation,
+                            claimed_url=url,
+                            ats_policy=adapter.name,
+                            observation_sha256=obs_sha256,
+                            observation_sequence=iteration,
+                            protected_values=tuple(protected_values),
+                        )
+                        inference_request = None
+                        if any(
+                            _field_is_llm_eligible(field) and not _field_has_existing_value(field)
+                            for field in observation.fields
+                        ) or any(
+                            _safe_click_is_eligible(
+                                button,
+                                observation.final_submit_target_ids,
+                                ats_policy=adapter.name,
+                                page_url=observation.url,
+                            )
+                            for button in observation.buttons
+                        ):
+                            try:
+                                inference_request = _build_control_inference_request(
+                                    observation,
+                                    job=job,
+                                    observation_sha256=obs_sha256,
+                                    applicant_description=applicant_description,
+                                    profile_facts=profile.facts,
+                                    resume_facts=resume.facts.facts,
+                                    resume_basename=resume.basename,
+                                    deterministic=deterministic,
+                                    ats_policy=adapter.name,
+                                    configured_values=tuple(
+                                        answer.value for answer in profile.field_answers
+                                    ) + tuple(
+                                        mapping.value for mapping in preferences.mappings
+                                    ),
+                                    protected_values=tuple(run_protected_values),
+                                )
+                            except ValueError:
+                                inference_request = None
+                        deterministic_summary = _deterministic_plan_summary(
+                            deterministic,
+                            observation=observation,
+                            observation_sha256=obs_sha256,
+                        )
+                        await _record_control_progress(
+                            control,
+                            run_id,
+                            "page_observed",
+                            "observed",
+                            control_action_sequence,
+                            observation_sha256=obs_sha256,
+                        )
+                        proposal = await _maybe(control.propose_action(
+                            run_id,
+                            iteration,
+                            obs_sha256,
+                            public_observation,
+                            inference_request,
+                            deterministic_summary,
+                        ))
+                        if proposal is None:
+                            final_plan = AutofillPlan(
+                                status=MANUAL_STATUS,
+                                reason_code=PublicReasonCode.no_deterministic_next_step,
+                                skipped_target_ids=deterministic.skipped_target_ids,
+                            )
+                            reason = PublicReasonCode.no_deterministic_next_step
+                            await _record_control_progress(
+                                control,
+                                run_id,
+                                "manual_intervention_required",
+                                reason,
+                                control_action_sequence,
+                                observation_sha256=obs_sha256,
+                            )
+                            break
+                        control_action_sequence += 1
+                        pending_proposal = proposal
+                        pending_action_sequence = control_action_sequence
+                        pending_action = None
+                        request_id = (
+                            proposal.request.request_id
+                            if isinstance(proposal, BrowserToolProposal)
+                            else None
+                        )
+                        proposal_payload = (
+                            thaw_json(proposal.request.payload)
+                            if isinstance(proposal, BrowserToolProposal)
+                            else {}
+                        )
+                        proposal_operation = (
+                            proposal.request.operation
+                            if isinstance(proposal, BrowserToolProposal)
+                            else ""
+                        )
+                        if proposal_operation in {"browser.fill_field", "browser.select_option"}:
+                            remember_protected_values(proposal_payload.get("value"))
+                        if not isinstance(proposal, BrowserToolProposal):
+                            rejection_reason = "invalid_proposal"
+                            persist_iteration_action_evidence(
+                                iteration,
+                                observation.observation_id,
+                                iteration_observation,
+                                [],
+                                [{"action": proposal_operation, "reason": rejection_reason}],
+                            )
+                            await _record_control_progress(
+                                control,
+                                run_id,
+                                "action_rejected",
+                                "rejected",
+                                control_action_sequence,
+                                observation_sha256=obs_sha256,
+                                request_id=request_id,
+                            )
+                            pending_proposal = None
+                            final_plan = AutofillPlan(
+                                status=MANUAL_STATUS,
+                                reason_code=PublicReasonCode.no_deterministic_next_step,
+                            )
+                            reason = final_plan.reason_code
+                            break
+                        if proposal_operation == "browser.capture_screenshot":
+                            if not hmac.compare_digest(
+                                proposal_payload.get("observation_sha256", ""),
+                                obs_sha256,
+                            ):
+                                persist_iteration_action_evidence(
+                                    iteration,
+                                    observation.observation_id,
+                                    iteration_observation,
+                                    [],
+                                    [{"action": proposal_operation, "reason": "stale_observation_hash"}],
+                                )
+                                await _record_control_progress(
+                                    control,
+                                    run_id,
+                                    "action_rejected",
+                                    "rejected",
+                                    control_action_sequence,
+                                    observation_sha256=obs_sha256,
+                                    request_id=request_id,
+                                )
+                                await _finish_control_proposal(
+                                    control,
+                                    proposal,
+                                    control_action_sequence,
+                                    ok=False,
+                                    state=MANUAL_STATUS,
+                                    error_code="stale_observation",
+                                )
+                                pending_proposal = None
+                                final_plan = AutofillPlan(
+                                    status=MANUAL_STATUS,
+                                    reason_code=PublicReasonCode.no_deterministic_next_step,
+                                )
+                                reason = final_plan.reason_code
+                                break
+                            screenshot_action = {
+                                "action": "screenshot",
+                                "target_id": None,
+                                "source": "control",
+                            }
+                            iteration_action_evidence = persist_iteration_action_evidence(
+                                iteration,
+                                observation.observation_id,
+                                iteration_observation,
+                                [screenshot_action],
+                                [],
+                            )
+                            await _record_control_progress(
+                                control,
+                                run_id,
+                                "action_allowed",
+                                "allowed",
+                                control_action_sequence,
+                                observation_sha256=obs_sha256,
+                                request_id=request_id,
+                            )
+                            dispatch_allowed = await _maybe(
+                                control.before_action_dispatch(
+                                    proposal,
+                                    control_action_sequence,
+                                )
+                            )
+                            if not dispatch_allowed:
+                                await _record_control_progress(
+                                    control,
+                                    run_id,
+                                    "action_rejected",
+                                    "rejected",
+                                    control_action_sequence,
+                                    observation_sha256=obs_sha256,
+                                    request_id=request_id,
+                                )
+                                await _finish_control_proposal(
+                                    control,
+                                    proposal,
+                                    control_action_sequence,
+                                    ok=False,
+                                    state=MANUAL_STATUS,
+                                    error_code="cancelled",
+                                )
+                                pending_proposal = None
+                                final_plan = AutofillPlan(
+                                    status=MANUAL_STATUS,
+                                    reason_code=PublicReasonCode.abandoned_running_attempt,
+                                )
+                                reason = final_plan.reason_code
+                                break
+                            screenshot = await capture_screenshot(
+                                "after-reveal",
+                                "screenshot",
+                                iteration,
+                            )
+                            await _record_control_progress(
+                                control,
+                                run_id,
+                                "screenshot_captured",
+                                "captured",
+                                control_action_sequence,
+                                observation_sha256=obs_sha256,
+                                request_id=request_id,
+                            )
+                            await _finish_control_proposal(
+                                control,
+                                proposal,
+                                control_action_sequence,
+                                ok=True,
+                                state="running",
+                                result={
+                                    "evidence_sha256": screenshot["sha256"],
+                                    "observation_sha256": obs_sha256,
+                                },
+                            )
+                            pending_proposal = None
+                            final_plan = deterministic
+                            reason = (
+                                deterministic.reason_code
+                                if deterministic.reason_code != PublicReasonCode.no_deterministic_next_step
+                                else PublicReasonCode.no_deterministic_next_step
+                            )
+                            break
+                        action_dict, rejection_reason = _validate_control_proposal(
+                            proposal,
+                            observation,
+                            obs_sha256,
+                            deterministic,
+                            ats_policy=adapter.name,
+                        )
+                        if action_dict is None:
+                            persist_iteration_action_evidence(
+                                iteration,
+                                observation.observation_id,
+                                iteration_observation,
+                                [],
+                                [{
+                                    "target_id": proposal_payload.get("element_id"),
+                                    "action": proposal_operation,
+                                    "reason": rejection_reason,
+                                }],
+                            )
+                            await _record_control_progress(
+                                control,
+                                run_id,
+                                "action_rejected",
+                                "rejected",
+                                control_action_sequence,
+                                observation_sha256=obs_sha256,
+                                request_id=request_id,
+                            )
+                            await _finish_control_proposal(
+                                control,
+                                proposal,
+                                control_action_sequence,
+                                ok=False,
+                                state=MANUAL_STATUS,
+                                error_code=_control_error_code(rejection_reason),
+                            )
+                            pending_proposal = None
+                            final_plan = AutofillPlan(
+                                status=MANUAL_STATUS,
+                                reason_code=(
+                                    PublicReasonCode.inference_privacy_violation
+                                    if rejection_reason == "inference_privacy_violation"
+                                    else PublicReasonCode.no_deterministic_next_step
+                                ),
+                            )
+                            reason = final_plan.reason_code
+                            break
+                        if action_dict["action"] in {"fill", "select"}:
+                            remember_protected_values(action_dict.get("value"))
+                        action_plan = deterministic
+                        if action_dict["action"] == "click":
+                            action_plan = AutofillPlan(
+                                safe_click_target_id=action_dict["target_id"],
+                                status="ready",
+                                reason_code=PublicReasonCode.draft_ready,
+                            )
+                        iteration_action_evidence = persist_iteration_action_evidence(
+                            iteration,
+                            observation.observation_id,
+                            iteration_observation,
+                            [action_dict],
+                            [],
+                        )
+                        await _record_control_progress(
+                            control,
+                            run_id,
+                            "action_allowed",
+                            "allowed",
+                            control_action_sequence,
+                            observation_sha256=obs_sha256,
+                            request_id=request_id,
+                        )
+                        dispatch_allowed = await _maybe(
+                            control.before_action_dispatch(
+                                proposal,
+                                control_action_sequence,
+                            )
+                        )
+                        if not dispatch_allowed:
+                            await _record_control_progress(
+                                control,
+                                run_id,
+                                "action_rejected",
+                                "rejected",
+                                control_action_sequence,
+                                observation_sha256=obs_sha256,
+                                request_id=request_id,
+                            )
+                            await _finish_control_proposal(
+                                control,
+                                proposal,
+                                control_action_sequence,
+                                ok=False,
+                                state=MANUAL_STATUS,
+                                error_code=(
+                                    "cancelled"
+                                    if await _maybe(control.cancellation_requested(run_id))
+                                    else "action_rejected"
+                                ),
+                            )
+                            pending_proposal = None
+                            final_plan = AutofillPlan(
+                                status=MANUAL_STATUS,
+                                reason_code=(
+                                    PublicReasonCode.abandoned_running_attempt
+                                    if await _maybe(control.cancellation_requested(run_id))
+                                    else PublicReasonCode.no_deterministic_next_step
+                                ),
+                            )
+                            reason = final_plan.reason_code
+                            break
+                        if action_dict["action"] == "click":
+                            browser_outcome = await _invoke_browser(
+                                "click_offline",
+                                "mutation",
+                                iteration,
+                                lambda: session.click_offline(
+                                    action_dict["target_id"],
+                                    continuation=False,
+                                ),
+                                capture_cancellation=True,
+                            )
+                        elif action_dict["action"] == "upload":
+                            browser_outcome = await _invoke_browser(
+                                "upload",
+                                "mutation",
+                                iteration,
+                                lambda: session.upload(action_dict["target_id"]),
+                                capture_cancellation=True,
+                            )
+                        elif action_dict["action"] == "select":
+                            browser_outcome = await _invoke_browser(
+                                "select",
+                                "mutation",
+                                iteration,
+                                lambda: session.select(
+                                    action_dict["target_id"],
+                                    action_dict["value"],
+                                ),
+                                capture_cancellation=True,
+                            )
+                        elif action_dict["action"] == "check":
+                            browser_outcome = await _invoke_browser(
+                                "check",
+                                "mutation",
+                                iteration,
+                                lambda: session.check(
+                                    action_dict["target_id"],
+                                    bool(action_dict["value"]),
+                                ),
+                                capture_cancellation=True,
+                            )
+                        else:
+                            browser_outcome = await _invoke_browser(
+                                "fill",
+                                "mutation",
+                                iteration,
+                                lambda: session.fill(
+                                    action_dict["target_id"],
+                                    str(action_dict["value"]),
+                                ),
+                                capture_cancellation=True,
+                            )
+                        browser_interrupted = (
+                            isinstance(browser_outcome, _BrowserCallOutcome)
+                            and browser_outcome.cancelled
+                        )
+                        try:
+                            _unwrap_browser_call_outcome(browser_outcome)
+                        except _BrowserFailure as browser_error:
+                            action_result = persist_action_result(
+                                iteration,
+                                observation,
+                                iteration_observation,
+                                observation_path,
+                                iteration_action_evidence,
+                                action_plan,
+                                action_dict,
+                                succeeded=False,
+                                cancelled=browser_interrupted,
+                                error_code=browser_error.code,
+                            )
+                            if browser_interrupted or await cancellation_after_action():
+                                mark_action_cancelled(
+                                    iteration,
+                                    observation,
+                                    action_dict,
+                                    action_result,
+                                )
+                                await _finish_control_proposal(
+                                    control,
+                                    proposal,
+                                    control_action_sequence,
+                                    ok=False,
+                                    state=FAILED_STATUS,
+                                    error_code=browser_error.code,
+                                )
+                                pending_proposal = None
+                                final_plan = AutofillPlan(
+                                    status=FAILED_STATUS,
+                                    reason_code=PublicReasonCode.abandoned_running_attempt,
+                                )
+                                reason = final_plan.reason_code
+                                break
+                            raise
+                        action_result = persist_action_result(
+                            iteration,
+                            observation,
+                            iteration_observation,
+                            observation_path,
+                            iteration_action_evidence,
+                            action_plan,
+                            action_dict,
+                            succeeded=True,
+                            cancelled=browser_interrupted,
+                        )
+                        cancelled_after_action = browser_interrupted or await cancellation_after_action()
+                        if cancelled_after_action:
+                            mark_action_cancelled(
+                                iteration,
+                                observation,
+                                action_dict,
+                                action_result,
+                            )
+                            await _finish_control_proposal(
+                                control,
+                                proposal,
+                                control_action_sequence,
+                                ok=True,
+                                state=FAILED_STATUS,
+                                result=action_result,
+                            )
+                            pending_proposal = None
+                            pending_action = None
+                            final_plan = AutofillPlan(
+                                status=FAILED_STATUS,
+                                reason_code=PublicReasonCode.abandoned_running_attempt,
+                            )
+                            reason = final_plan.reason_code
+                            break
+                        pending_action = {
+                            "action": action_dict["action"],
+                            "target_id": action_dict["target_id"],
+                            "expected": action_dict.get("value"),
+                            "prior_signature": _observation_semantic_signature(observation),
+                        }
+                        final_plan = action_plan
+                        continue
                     final_observation = observation
                     cached_click_disappeared_on_scope_change = False
                     current_page_scope_signature = _observation_page_scope_signature(observation)
@@ -2750,6 +4895,9 @@ async def run_application_workflow(
                             job_description=job.get("description"),
                             applicant_description=applicant_description,
                             profile_context=profile,
+                            preferences=preferences,
+                            deterministic=deterministic,
+                            protected_values=tuple(run_protected_values),
                             mutated=False,
                             ats_policy=adapter.name,
                         )
@@ -2846,12 +4994,25 @@ async def run_application_workflow(
                         skipped_target_ids=tuple(sorted(blocked_targets)),
                     )
                     protected_sources = (
-                        _flatten_strings(profile.facts)
-                        + _flatten_strings(resume.facts.facts)
-                        + _flatten_strings(tuple(answer.value for answer in profile.field_answers))
+                        _flatten_prompt_private_values(profile.facts)
+                        + _flatten_prompt_private_values(resume.facts.facts)
+                        + (resume.basename,)
+                        + _flatten_prompt_private_values(
+                            tuple(answer.value for answer in deterministic.answers)
+                        )
+                        + _configured_answer_values(
+                            profile,
+                            preferences=preferences,
+                            deterministic=deterministic,
+                        )
+                        + tuple(run_protected_values)
                     )
                     if not validate_inference_privacy(plan, protected_values=protected_sources, source_text=resume.text):
                         plan = AutofillPlan(status="manual", reason_code=PublicReasonCode.inference_privacy_violation)
+                    else:
+                        remember_protected_values(
+                            tuple(answer.value for answer in llm.answers)
+                        )
                     planned, rejected = plan_action_evidence(observation, plan, ats_policy=adapter.name)
                     if planned and preferences.review_order:
                         ordered_ids = order_actions(
@@ -3144,12 +5305,286 @@ async def run_application_workflow(
                 final_iteration = latest_iteration
                 reason = _enum_reason(final_plan.reason_code)
                 status = _status_for_reason(reason)
-                can_handoff = headed and status in {"review_ready", "manual", "blocked"} and reason not in {PublicReasonCode.unsupported_ats, PublicReasonCode.ats_mismatch, PublicReasonCode.invalid_application_url, PublicReasonCode.unsafe_network_attempt}
+                can_handoff = (
+                    headed
+                    and status in {"review_ready", "manual", "blocked"}
+                    and reason not in {
+                        PublicReasonCode.unsupported_ats,
+                        PublicReasonCode.ats_mismatch,
+                        PublicReasonCode.invalid_application_url,
+                        PublicReasonCode.unsafe_network_attempt,
+                    }
+                    and not (
+                        control is not None
+                        and reason
+                        in {
+                            PublicReasonCode.no_deterministic_next_step,
+                            PublicReasonCode.abandoned_running_attempt,
+                        }
+                    )
+                )
+                authorized_semantic_signature = _observation_semantic_signature(final_observation)
+                authorized_blockers = tuple(
+                    (blocker.code, blocker.frame_id, blocker.text)
+                    for blocker in final_observation.blockers
+                )
+                authorized_final_target_ids = frozenset(final_observation.final_submit_target_ids)
+                if can_handoff and control is not None:
+                    if await _maybe(control.cancellation_requested(run_id)):
+                        raise RuntimeError("abandoned_running_attempt")
+                    obs_sha256 = _observation_snapshot_sha256(final_observation)
+                    handoff_public = _build_public_observation(
+                        final_observation,
+                        claimed_url=url,
+                        ats_policy=adapter_name,
+                        observation_sha256=obs_sha256,
+                        observation_sequence=final_iteration,
+                        protected_values=tuple(
+                            _flatten_prompt_private_values(profile.facts)
+                            + _flatten_prompt_private_values(resume.facts.facts)
+                            + (resume.basename,)
+                            + _flatten_prompt_private_values(
+                                tuple(answer.value for answer in final_plan.answers)
+                            )
+                            + _configured_answer_values(
+                                profile,
+                                preferences=preferences,
+                                deterministic=final_plan,
+                            )
+                            + tuple(run_protected_values)
+                        ),
+                    )
+                    handoff_proposal = await _maybe(control.authorize_handoff(
+                        run_id,
+                        final_iteration,
+                        obs_sha256,
+                        handoff_public,
+                    ))
+                    if handoff_proposal is None:
+                        can_handoff = False
+                        if reason == PublicReasonCode.draft_ready:
+                            status = MANUAL_STATUS
+                            reason = PublicReasonCode.no_deterministic_next_step
+                    elif (
+                        not isinstance(handoff_proposal, BrowserToolProposal)
+                        or handoff_proposal.request.operation != "browser.prepare_human_handoff"
+                        or not hmac.compare_digest(
+                            thaw_json(handoff_proposal.request.payload).get(
+                                "observation_sha256",
+                                "",
+                            ),
+                            obs_sha256,
+                        )
+                    ):
+                        if isinstance(handoff_proposal, BrowserToolProposal):
+                            pending_proposal = handoff_proposal
+                            pending_action_sequence = control_action_sequence + 1
+                            control_action_sequence = pending_action_sequence
+                            await _record_control_progress(
+                                control,
+                                run_id,
+                                "action_rejected",
+                                "rejected",
+                                pending_action_sequence,
+                                observation_sha256=obs_sha256,
+                                request_id=handoff_proposal.request.request_id,
+                            )
+                            await _finish_control_proposal(
+                                control,
+                                handoff_proposal,
+                                pending_action_sequence,
+                                ok=False,
+                                state=MANUAL_STATUS,
+                                error_code="stale_observation",
+                            )
+                            pending_proposal = None
+                        can_handoff = False
+                        if reason == PublicReasonCode.draft_ready:
+                            status = MANUAL_STATUS
+                            reason = PublicReasonCode.no_deterministic_next_step
+                    else:
+                        pending_proposal = handoff_proposal
+                        pending_action_sequence = control_action_sequence + 1
+                        control_action_sequence = pending_action_sequence
                 await capture_screenshot(
                     "final",
                     "handoff" if can_handoff else "final",
                     final_iteration,
                 )
+                if control is not None:
+                    await _record_control_progress(
+                        control,
+                        run_id,
+                        "screenshot_captured",
+                        "captured",
+                        final_iteration,
+                        observation_sha256=_observation_snapshot_sha256(final_observation),
+                    )
+                if can_handoff and control is not None and pending_proposal is not None:
+                    handoff_evidence = _write_json_verified(
+                        run,
+                        "handoff_proposal.json",
+                        {
+                            "operation": pending_proposal.request.operation,
+                            "host_call_id": pending_proposal.host_call_id,
+                            "tool_call_id": pending_proposal.tool_call_id,
+                            "child_request_id": pending_proposal.request.request_id,
+                            "observation_sha256": _observation_snapshot_sha256(final_observation),
+                        },
+                    )
+                    _manifest_set_artifact(
+                        manifest_payload,
+                        "handoff_proposal",
+                        handoff_evidence,
+                        "handoff_proposal.json",
+                        iteration=final_iteration,
+                        stage="handoff",
+                    )
+                    _write_run_manifest(run, manifest_payload)
+                    await _record_control_progress(
+                        control,
+                        run_id,
+                        "action_allowed",
+                        "allowed",
+                        pending_action_sequence,
+                        observation_sha256=_observation_snapshot_sha256(final_observation),
+                        request_id=pending_proposal.request.request_id,
+                    )
+                    dispatch_allowed = await _maybe(
+                        control.before_action_dispatch(
+                            pending_proposal,
+                            pending_action_sequence,
+                        )
+                    )
+                    if not dispatch_allowed:
+                        await _record_control_progress(
+                            control,
+                            run_id,
+                            "action_rejected",
+                            "rejected",
+                            pending_action_sequence,
+                            observation_sha256=_observation_snapshot_sha256(final_observation),
+                            request_id=pending_proposal.request.request_id,
+                        )
+                        await _finish_control_proposal(
+                            control,
+                            pending_proposal,
+                            pending_action_sequence,
+                            ok=False,
+                            state=MANUAL_STATUS,
+                            error_code=(
+                                "cancelled"
+                                if await _maybe(control.cancellation_requested(run_id))
+                                else "action_rejected"
+                            ),
+                        )
+                        pending_proposal = None
+                        can_handoff = False
+                        if reason == PublicReasonCode.draft_ready:
+                            status = MANUAL_STATUS
+                            reason = PublicReasonCode.no_deterministic_next_step
+                if can_handoff and control is not None and pending_proposal is not None:
+                    if await _maybe(control.cancellation_requested(run_id)):
+                        await _record_control_progress(
+                            control,
+                            run_id,
+                            "action_rejected",
+                            "rejected",
+                            pending_action_sequence,
+                            observation_sha256=_observation_snapshot_sha256(final_observation),
+                            request_id=pending_proposal.request.request_id,
+                        )
+                        await _finish_control_proposal(
+                            control,
+                            pending_proposal,
+                            pending_action_sequence,
+                            ok=False,
+                            state=FAILED_STATUS,
+                            error_code="cancelled",
+                        )
+                        pending_proposal = None
+                        can_handoff = False
+                        final_plan = AutofillPlan(
+                            status=FAILED_STATUS,
+                            reason_code=PublicReasonCode.abandoned_running_attempt,
+                        )
+                        status = FAILED_STATUS
+                        reason = PublicReasonCode.abandoned_running_attempt
+                    else:
+                        settled_payload = await _invoke_browser(
+                            "observe",
+                            "handoff",
+                            final_iteration,
+                            lambda: session.observe(),
+                        )
+                        settled_observation = _observation_from_browser_payload(
+                            settled_payload,
+                            iteration=final_iteration,
+                        )
+                        settled_blockers = tuple(
+                            (blocker.code, blocker.frame_id, blocker.text)
+                            for blocker in settled_observation.blockers
+                        )
+                        settled_final_target_ids = frozenset(
+                            settled_observation.final_submit_target_ids
+                        )
+                        if (
+                            _observation_semantic_signature(settled_observation)
+                            != authorized_semantic_signature
+                            or settled_blockers != authorized_blockers
+                            or settled_final_target_ids != authorized_final_target_ids
+                        ):
+                            await _record_control_progress(
+                                control,
+                                run_id,
+                                "action_rejected",
+                                "rejected",
+                                pending_action_sequence,
+                                observation_sha256=_observation_snapshot_sha256(final_observation),
+                                request_id=pending_proposal.request.request_id,
+                            )
+                            await _finish_control_proposal(
+                                control,
+                                pending_proposal,
+                                pending_action_sequence,
+                                ok=False,
+                                state=MANUAL_STATUS,
+                                error_code="stale_observation",
+                            )
+                            pending_proposal = None
+                            can_handoff = False
+                            final_plan = AutofillPlan(
+                                status=MANUAL_STATUS,
+                                reason_code=PublicReasonCode.page_not_stable,
+                            )
+                            status = MANUAL_STATUS
+                            reason = PublicReasonCode.page_not_stable
+                        elif await _maybe(control.cancellation_requested(run_id)):
+                            await _record_control_progress(
+                                control,
+                                run_id,
+                                "action_rejected",
+                                "rejected",
+                                pending_action_sequence,
+                                observation_sha256=_observation_snapshot_sha256(final_observation),
+                                request_id=pending_proposal.request.request_id,
+                            )
+                            await _finish_control_proposal(
+                                control,
+                                pending_proposal,
+                                pending_action_sequence,
+                                ok=False,
+                                state=FAILED_STATUS,
+                                error_code="cancelled",
+                            )
+                            pending_proposal = None
+                            can_handoff = False
+                            final_plan = AutofillPlan(
+                                status=FAILED_STATUS,
+                                reason_code=PublicReasonCode.abandoned_running_attempt,
+                            )
+                            status = FAILED_STATUS
+                            reason = PublicReasonCode.abandoned_running_attempt
                 if can_handoff:
                     await _invoke_browser(
                         "prepare_handoff",
@@ -3169,35 +5604,219 @@ async def run_application_workflow(
                     _manifest_set_artifact(manifest_payload, "actions", actions_result, "actions.json", iteration=final_iteration, stage="prepared")
                     _manifest_set_artifact(manifest_payload, "filled_state", filled_state_result, "filled_state.json", iteration=final_iteration, stage="prepared")
                     _write_run_manifest(run, manifest_payload)
-                    run_json_written = True
-                    await _invoke_browser(
-                        "commit_handoff",
-                        "handoff",
-                        final_iteration,
-                        lambda: session.commit_handoff(token),
+                    unresolved_count = len(
+                        unresolved_required_fields(
+                            final_observation,
+                            final_plan.answers,
+                        )
                     )
+                    observation_sha256 = _observation_snapshot_sha256(final_observation)
+                    application_finalization = {
+                        "artifact_dir": artifact_ref,
+                        "observation_summary": _observation_summary(final_observation),
+                        "plan_summary": _plan_summary(final_plan),
+                        "reason_code": reason.value,
+                        "status": status,
+                    }
+                    proposal_result = {
+                        "outcome": "committed",
+                        "reason_code": reason.value,
+                        "observation_sha256": observation_sha256,
+                        "unresolved_required_count": unresolved_count,
+                        "automated_submission": False,
+                    }
+                    finalization_result = None
+                    manifest_result = _write_run_manifest(run, manifest_payload)
+                    if control is not None and pending_proposal is not None:
+                        finalization_artifact = _handoff_finalization_payload(
+                            run_id=run_id,
+                            job_id=int(job.get("id", 0)),
+                            session_id=session_id,
+                            proposal=pending_proposal,
+                            status=status,
+                            reason_code=reason.value,
+                            observation_sha256=observation_sha256,
+                            unresolved_required_count=unresolved_count,
+                            commit_token_sha256=token_hash,
+                        )
+                        finalization_result, manifest_result = _write_handoff_finalization_artifact(
+                            run,
+                            manifest_payload,
+                            finalization_artifact,
+                            iteration=final_iteration,
+                        )
+                        intent = {
+                            "application_finalization": application_finalization,
+                            "proposal_result": proposal_result,
+                            "artifact_manifest_sha256": manifest_result.sha256,
+                            "artifact_sha256": finalization_result.sha256,
+                            "child_request_id": pending_proposal.request.request_id,
+                            "commit_token_sha256": token_hash,
+                            "job_id": int(job.get("id", 0)),
+                            "observation_sha256": observation_sha256,
+                            "parent_request_id": pending_proposal.parent_request_id,
+                            "session_id": session_id,
+                        }
+                        if (
+                            pending_proposal.request.deadline_unix_ms
+                            <= int(datetime.now(timezone.utc).timestamp() * 1000)
+                        ):
+                            raise RuntimeError("deadline_exceeded")
+                        prepare_intent = getattr(control, "prepare_handoff_finalization", None)
+                        if callable(prepare_intent):
+                            handoff_intent_bound = (
+                                await _maybe(
+                                    prepare_intent(
+                                        pending_proposal,
+                                        action_sequence=pending_action_sequence,
+                                        intent=intent,
+                                    )
+                                )
+                            ) is True
+                        if (
+                            getattr(control, "requires_handoff_intent", False)
+                            and not handoff_intent_bound
+                        ):
+                            raise RuntimeError("handoff_intent_unbound")
+                    if control is not None and await _maybe(control.cancellation_requested(run_id)):
+                        raise RuntimeError("abandoned_running_attempt")
+                    if (
+                        control is not None
+                        and pending_proposal is not None
+                        and pending_proposal.request.deadline_unix_ms
+                        <= int(datetime.now(timezone.utc).timestamp() * 1000)
+                    ):
+                        raise RuntimeError("deadline_exceeded")
+                    commit_error: BaseException | None = None
+                    try:
+                        await _invoke_browser(
+                            "commit_handoff",
+                            "handoff",
+                            final_iteration,
+                            lambda: session.commit_handoff(token),
+                        )
+                    except BaseException as exc:
+                        commit_error = exc
                     if not hmac.compare_digest(_manifest_token_hash(session_manifest) or "", token_hash):
+                        if commit_error is not None:
+                            raise commit_error
                         raise RuntimeError("handoff_failed")
+                    post_commit_guard = True
+                    committed = True
+                    window_state = "open_guarded"
+                    if control is not None:
+                        mark_handoff_committed = getattr(control, "mark_handoff_committed", None)
+                        if callable(mark_handoff_committed):
+                            await _maybe(mark_handoff_committed())
                     if not register_application_session(connection, run_id=run_id, session_id=session_id, session_state="open"):
                         raise RuntimeError("database_error")
                     status = "review_ready" if reason == PublicReasonCode.draft_ready else status
-                    finish_application_run(connection, run_id=run_id, status=status, reason_code=reason.value, observation_summary=_observation_summary(final_observation), plan_summary=_plan_summary(final_plan), artifact_dir=artifact_ref)
+                    consumed_application = False
+                    if control is not None and pending_proposal is not None:
+                        consumed_application = await _finish_control_proposal(
+                            control,
+                            pending_proposal,
+                            pending_action_sequence,
+                            ok=True,
+                            state=status,
+                            result=proposal_result,
+                            application_finalization=application_finalization,
+                        )
+                        pending_proposal = None
+                    if not consumed_application:
+                        finish_application_run(
+                            connection,
+                            run_id=run_id,
+                            status=status,
+                            reason_code=reason.value,
+                            observation_summary=_observation_summary(final_observation),
+                            plan_summary=_plan_summary(final_plan),
+                            artifact_dir=artifact_ref,
+                        )
+                    application_finished = True
                     try:
-                        release_result = await _maybe(session.release_handoff())
+                        release_result = await _await_browser_call(session.release_handoff)
                         if not isinstance(release_result, Mapping) or release_result.get("released") is not True:
                             raise RuntimeError("handoff_release_unconfirmed")
-                        committed = True
                         window_state = "open"
                     except Exception:
-                        # A failed release is reconciled through the bounded close
-                        # path; never report an open window without release proof.
-                        committed = False
-                        try:
-                            await _close_session(session)
-                        except Exception:
-                            pass
-                        session_reconciled = True
-                        window_state = "closed" if _session_process_closed(session) is True else "unknown"
+                        supervision = _supervise_postcommit_handoff_failure(session)
+                        committed = supervision == "healthy"
+                        # A detached adapter has already closed its transport;
+                        # calling close() cannot supervise the owner/browser
+                        # groups and must never be the cleanup mechanism here.
+                        if supervision != "healthy" and getattr(session, "_detached", None) is not True:
+                            try:
+                                await _close_session(session)
+                            except Exception:
+                                pass
+                        reconcile_postcommit = getattr(
+                            control,
+                            "reconcile_postcommit_handoff_failure",
+                            None,
+                        ) if control is not None else None
+                        if not callable(reconcile_postcommit):
+                            session_reconciled = True
+                            window_state = (
+                                "open"
+                                if supervision == "healthy"
+                                else ("closed" if supervision in {"partial", "absent"} else "unknown")
+                            )
+                        else:
+                            try:
+                                reconciled = await _maybe(
+                                    reconcile_postcommit(
+                                        run_id,
+                                        session_id=session_id,
+                                        artifact_root=artifacts,
+                                    )
+                                )
+                            except Exception as reconcile_error:
+                                raise RuntimeError(
+                                    "postcommit_reconciliation_failed"
+                                ) from reconcile_error
+                            # RpcApplicationControl returns False for a healthy
+                            # both-live handoff: durable reconciliation correctly
+                            # leaves that ownership intact.  A partial/absent
+                            # handoff must have been reaped before this call and
+                            # therefore returns True after its durable downgrade.
+                            reconciled_state = (
+                                (
+                                    reconciled.get("state")
+                                    or reconciled.get("browser_state")
+                                )
+                                if isinstance(reconciled, Mapping)
+                                else (
+                                    reconciled
+                                    if isinstance(reconciled, str)
+                                    else None
+                                )
+                            )
+                            healthy_result = (
+                                supervision == "healthy"
+                                and (
+                                    reconciled is False
+                                    or reconciled_state in {"healthy", "open", "open_guarded"}
+                                )
+                            )
+                            cleaned_result = (
+                                supervision in {"partial", "absent"}
+                                and (
+                                    reconciled is True
+                                    or reconciled_state in {"closed", "failed", "manual", "terminal"}
+                                )
+                            )
+                            if healthy_result:
+                                post_commit_reconciled = True
+                                window_state = "open"
+                            elif cleaned_result:
+                                post_commit_reconciled = True
+                                status = MANUAL_STATUS
+                                reason = PublicReasonCode.page_not_stable
+                                session_reconciled = True
+                                window_state = "closed"
+                            else:
+                                raise RuntimeError("postcommit_reconciliation_failed")
                 else:
                     manifest_payload["stage"] = "finished"
                     manifest_payload["commit_token_sha256"] = None
@@ -3207,11 +5826,60 @@ async def run_application_workflow(
                     _manifest_set_artifact(manifest_payload, "actions", actions_result, "actions.json", iteration=final_iteration, stage="finished")
                     _manifest_set_artifact(manifest_payload, "filled_state", filled_state_result, "filled_state.json", iteration=final_iteration, stage="finished")
                     _write_run_manifest(run, manifest_payload)
-                    run_json_written = True
                     finish_application_run(connection, run_id=run_id, status=status, reason_code=reason.value, observation_summary=_observation_summary(final_observation), plan_summary=_plan_summary(final_plan), artifact_dir=artifact_ref)
                 results.append({"job_id": int(job.get("id", 0)), "run_id": run_id, "status": status, "reason_code": reason.value, "ats": adapter_name, "artifact_ref": artifact_ref, "window_state": window_state})
             except Exception as exc:
-                failed_current = True
+                if post_commit_guard:
+                    if not post_commit_reconciled:
+                        reconcile_postcommit = getattr(
+                            control,
+                            "reconcile_postcommit_handoff_failure",
+                            None,
+                        ) if control is not None else None
+                        if not callable(reconcile_postcommit):
+                            if application_finished:
+                                results.append({
+                                    "job_id": int(job.get("id", 0)),
+                                    "run_id": run_id,
+                                    "status": status,
+                                    "reason_code": reason.value,
+                                    "ats": adapter_name,
+                                    "artifact_ref": artifact_ref,
+                                    "window_state": window_state,
+                                })
+                                continue
+                            raise RuntimeError("database_error") from None
+                        try:
+                            reconciled = await _maybe(
+                                reconcile_postcommit(
+                                    run_id,
+                                    session_id=session_id,
+                                    artifact_root=artifacts,
+                                )
+                            )
+                        except Exception as reconcile_error:
+                            raise RuntimeError(
+                                "postcommit_reconciliation_failed"
+                            ) from reconcile_error
+                        if reconciled is not True:
+                            raise RuntimeError(
+                                "postcommit_reconciliation_failed"
+                            ) from exc
+                        post_commit_reconciled = True
+                        status = MANUAL_STATUS
+                        reason = PublicReasonCode.page_not_stable
+                    if application_finished:
+                        results.append({
+                            "job_id": int(job.get("id", 0)),
+                            "run_id": run_id,
+                            "status": status,
+                            "reason_code": reason.value,
+                            "ats": adapter_name,
+                            "artifact_ref": artifact_ref,
+                            "window_state": window_state,
+                        })
+                        continue
+                    raise RuntimeError("database_error") from None
                 browser_failure = exc if isinstance(exc, _BrowserFailure) else None
                 if browser_failure is not None:
                     failure_code = browser_failure.code
@@ -3269,7 +5937,6 @@ async def run_application_workflow(
                             except Exception:
                                 pass
                         _write_run_manifest(run, manifest_payload)
-                        run_json_written = True
                     except Exception:
                         pass
                 summary: dict[str, Any] = {"error_code": reason.value}
@@ -3301,7 +5968,7 @@ async def run_application_workflow(
             finally:
                 try:
                     cleanup_failure: _BrowserFailure | None = None
-                    if session is not None and not committed and not session_reconciled:
+                    if session is not None and not committed and not post_commit_guard and not session_reconciled:
                         try:
                             await _close_session(session)
                         except BrowserAdapterError as exc:
@@ -3352,6 +6019,7 @@ async def run_application_workflow(
                                     results[-1]["window_state"] = "unknown"
                     if (
                         not committed
+                        and not post_commit_guard
                         and not session_reconciled
                         and reason is PublicReasonCode.browser_error
                         and session_id is not None

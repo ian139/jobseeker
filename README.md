@@ -8,7 +8,7 @@ The application imports and deduplicates listings into a local SQLite backlog. T
 
 1. Discover listings with TheirStack, a JSON fixture, or a normalized `/v1/jobs` feed.
 2. Normalize, filter, quality-gate, and deduplicate into the SQLite backlog.
-3. Run `autofill` against queued jobs. Each run atomically claims one job, selects the validated Greenhouse or Lever adapter, resolves explicit profile/resume context plus the job description, and performs at most one safe action per observation iteration. An explicit reviewed retry may requeue the job for a new run.
+3. Run `autofill` against queued jobs. Each run atomically claims one job, selects the validated Greenhouse or Lever adapter, resolves explicit profile/resume context plus the job description, and performs at most one safe action per observation iteration. An explicit reviewed retry may requeue the job for a new run. To orchestrate one persistent OMP-owned coordinator instead, start `application-rpc`; it enters the same claim, ATS-policy, resolver, guarded-action, evidence, and headed-handoff workflow.
 4. Inspect handoffs with `autofill-review list`. A headed handoff is a draft for a human to review; the human decides whether to submit, skip, or retry.
 5. Record that human decision with `autofill-review complete` or queue an explicit `autofill-review retry`.
 
@@ -134,6 +134,7 @@ Add `--dry-run` to validate and simulate the same import without creating or mod
 | `job-scrape` | Compatibility wrapper for `theirstack-sync`; `--count` maps to TheirStack paid-fetch `limit`, and SQLite dedupe still removes duplicates by source job ID and canonical URL |
 | `import-feed` | Import normalized jobs from a JSON fixture or `GET /v1/jobs` feed |
 | `autofill` | Claim up to ten queued Greenhouse or Lever jobs, fill safe non-final fields, persist evidence, and optionally release a guarded headed window |
+| `application-rpc` | Serve the persistent guarded application coordinator over local JSONL; external callers receive lifecycle operations only |
 | `autofill-review list` | List the latest unreviewed application runs |
 | `autofill-review complete` | Record the human's `submitted` or `skipped` decision |
 | `autofill-review retry` | Queue an explicit retry for a reviewed run |
@@ -255,6 +256,34 @@ uv run --frozen jobs-assistant --db /tmp/jobs.sqlite3 autofill \
 
 Omit `--headed` for headless processing. `--headed` is host-only: after the durable handoff is committed, the CLI releases the browser owner and returns while the review window remains independently alive. Closing the browser tab/window is the user-controlled end of that handoff; it is not a timer and the parent does not reconnect through CDP. Close the tab before completing or retrying a headed run, then pass `--confirm-window-closed` to prove that cleanup is complete.
 
+## Persistent application RPC
+
+`application-rpc` is the orchestration boundary for a long-running OMP-controlled draft. It uses the same SQLite claim and `run_application_workflow` path as `autofill`; it does not add a second planner or browser-control path.
+
+The coordinator consumes the configured resume snapshot; it does not generate a resume or couple resume generation to application execution.
+
+```bash
+uv run --frozen jobs-assistant application-rpc \
+  --db /tmp/jobs.sqlite3 \
+  --resume-file path/to/configured-resume.pdf \
+  --application-profile-json path/to/application-profile.json \
+  --artifact-root /tmp/jobs-assistant-artifacts \
+  --omp-runtime-root /tmp/jobs-assistant-omp \
+  --ats auto
+```
+
+The native child is supplied by the project-locked `@oh-my-pi/pi-coding-agent` package. Run `npm install` first. By default, the CLI resolves `node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js`; a trusted executable may instead be selected with `--omp-executable` or `JOBS_ASSISTANT_OMP_EXECUTABLE`. `--omp-runtime-root` defaults to the private `data/omp-rpc` directory; the invoking user must be able to create and write that mode-`0700` runtime tree. `--omp-profile` defaults to `jobs-assistant-rpc`.
+
+OMP authentication is configuration-dependent. When explicitly configured, export only `OMP_AUTH_BROKER_URL`, `OMP_AUTH_BROKER_TOKEN`, and/or `OPENAI_API_KEY` (or provide them through a private `.env` used by the host/Compose invocation). Only those allow-listed values are forwarded to the native child; ambient shell variables, proxies, and PATH are not. Never place credentials in JSONL requests or responses.
+
+The process reads one bounded JSON object per stdin line and writes redacted responses and durable progress events as JSONL. Public requests have exactly `protocol_version`, `request_id`, `operation`, `deadline_unix_ms`, `run_id`, and `payload`; unknown fields fail closed. `request_id` is a canonical UUID, deadlines are at most five minutes ahead, and retries with the same request ID and intent are idempotent. New intent requires a new request ID.
+
+External callers may use only `run.start`, `run.status`, `run.resume`, and `run.cancel`. `run.start` requires the fixed goal `prepare_application_draft`, an exact supported Greenhouse/Lever URL, the configured resume and candidate-profile SHA-256 identifiers, and `headed: true`. The service derives those opaque identifiers from immutable startup snapshots; private profile/resume paths and raw profile data are never returned in RPC envelopes.
+
+OMP receives the narrower host-tool surface `browser.observe`, `browser.fill_field`, `browser.select_option`, `browser.set_checkbox`, `browser.upload_configured_resume`, `browser.activate_safe_control`, `browser.capture_screenshot`, and `browser.prepare_human_handoff`. These internal operations require the current observation hash and opaque observation-scoped element IDs where applicable. There is no submit, arbitrary navigation, evaluation, cookie, arbitrary upload, shell, extension, subagent, or session-reconnect tool. A final-submit control is always a terminal stop for human review.
+
+Closing the service cancels active work and validates process-group teardown. Evidence remains private under the configured artifact root; public RPC output contains only bounded redacted responses/events and opaque run/observation identifiers.
+
 ## Review commands
 
 All review commands accept the global `--db PATH` before `autofill-review` and `--artifact-root PATH` after it. The artifact-root default is `data/application-runs`.
@@ -375,7 +404,7 @@ SQLite paths are fail-closed for privacy. The database is created mode `0600`, i
 
 ## Host and container execution
 
-Run headed review only on the host with a working desktop display. The container profile is headless-only and runs the image's non-root `app` user. Compose maps that user to the invoking host identity:
+Run headed review only on the host with a working desktop display. Container verification is limited to packaging, the CLI, OMP-process lifecycle, packaged Chromium, and UID/GID/bind-mount checks; it does not perform browser-backed coordinator work. Compose maps the image's non-root `app` user to the invoking host identity:
 
 ```bash
 export HOST_UID="$(id -u)"
@@ -391,19 +420,23 @@ HOST_UID="$HOST_UID" HOST_GID="$HOST_GID" docker compose ps
 HOST_UID="$HOST_UID" HOST_GID="$HOST_GID" docker compose down
 ```
 
-Compose performs `${VAR:-default}` interpolation from the invoking shell and (when present) the project `.env`; `.env.example` is documentation only and is never injected. Supported interpolated values include `DATABASE_URL`, `JOB_SOURCE_BASE_URL`, `JOB_SOURCE_API_KEY`, `THEIRSTACK_API_KEY`, `THEIRSTACK_ENABLE_PAID_FETCH`, `THEIRSTACK_BASE_URL`, `OLLAMA_CLOUD_API_KEY`, `OLLAMA_CLOUD_BASE_URL`, `OLLAMA_CLOUD_MODEL`, `OLLAMA_CLOUD_THINK`, and `HOST_UID`/`HOST_GID`. Set credentials in the shell or a private `.env`, inspect the resolved configuration with `docker compose config`, and never commit secrets.
+Compose performs `${VAR:-default}` interpolation from the invoking shell and (when present) the project `.env`; `.env.example` is documentation only and is never injected. Supported interpolated values include `DATABASE_URL`, `JOB_SOURCE_BASE_URL`, `JOB_SOURCE_API_KEY`, `THEIRSTACK_API_KEY`, `THEIRSTACK_ENABLE_PAID_FETCH`, `THEIRSTACK_BASE_URL`, `OMP_AUTH_BROKER_URL`, `OMP_AUTH_BROKER_TOKEN`, `OPENAI_API_KEY`, `OLLAMA_CLOUD_API_KEY`, `OLLAMA_CLOUD_BASE_URL`, `OLLAMA_CLOUD_MODEL`, `OLLAMA_CLOUD_THINK`, and `HOST_UID`/`HOST_GID`. Set credentials in the shell or a private `.env`, inspect the resolved configuration with `docker compose config`, and never commit secrets.
 
-Compose bind-mounts existing `./data` read/write at `/app/data` and existing `./resume` read-only at `/app/resume`; it does not copy or invent application data. `/home/app` is a mode-`0700` UID/GID-matched tmpfs. The image uses Debian `chromium-headless-shell`; compose sets `JOBS_ASSISTANT_CONTAINER_NO_SANDBOX=1` for this local Docker smoke path. Do not use `--headed` in the container.
+Compose bind-mounts existing `./data` read/write at `/app/data` and existing `./resume` read-only at `/app/resume`; it does not copy or invent application data. `/home/app` is a mode-`0700` UID/GID-matched tmpfs. The image uses Debian `chromium-headless-shell`; compose sets `JOBS_ASSISTANT_CONTAINER_NO_SANDBOX=1` for this local Docker smoke path.
+Compose provides no `DISPLAY`, so headed review and browser-backed `application-rpc` runs are unsupported there; do not use `--headed` in the container.
 
 The deterministic container check (including UID/GID, bind mounts, non-root execution, packaged policy, and headless Chromium) is:
 
 ```bash
 sh scripts/container-smoke.sh
 ```
+The container smoke covers packaged policy, headless Chromium, CLI help, and an OMP child launch/teardown.
+That CLI help includes `application-rpc --help`; it does not start a browser-backed coordinator workflow. The coordinator is headed-only (`run.start` requires `headed: true`), and current Compose has no `DISPLAY`, so run it only on a headed host.
+
 
 ## Help and verification
 
-Install the browser-adapter dependencies before any local browser run:
+Install the locked browser-adapter and OMP RPC dependencies before any local application run:
 
 ```bash
 npm install
@@ -420,6 +453,7 @@ uv run --frozen jobs-assistant import-feed --help
 uv run --frozen jobs-assistant theirstack-preview --help
 uv run --frozen jobs-assistant theirstack-sync --help
 uv run --frozen jobs-assistant autofill --help
+uv run --frozen jobs-assistant application-rpc --help
 uv run --frozen jobs-assistant application-preferences --help
 uv run --frozen jobs-assistant application-preferences init --help
 uv run --frozen jobs-assistant application-preferences show --help
@@ -446,8 +480,8 @@ uv run --frozen --extra dev python -m pytest tests/test_cli_smoke.py
 sh scripts/container-smoke.sh
 ```
 
-The host-only `puppeteer-verify` command runs every automated browser-adapter check, including the headed local diagnostic on supported hosts, and deselects only the physical headed review-window survival check. It preserves terminal attribution for post-mutation fetch, WebSocket, and popup traffic while treating only Chromium's exact implicit same-origin `/favicon.ico` request as ambient; detached-test cleanup validates and removes both owner and browser process groups. Use `scripts/container-smoke.sh`, not this headed-capable command, for container verification.
+The host-only `puppeteer-verify` command runs every automated browser-adapter check, including the headed local diagnostic on supported hosts, and deselects the two physical headed handoff checks. It preserves terminal attribution for post-mutation fetch, WebSocket, and popup traffic while treating only Chromium's exact implicit same-origin `/favicon.ico` request as ambient; detached-test cleanup validates and removes both owner and browser process groups. Use `scripts/container-smoke.sh`, not this headed-capable command, for container verification.
 
-For the complete Python gate, run `uv run --frozen --extra dev python -m pytest`; headed survival is a manual host check requiring a physical benign click/tab close. The review workflow has no final-submit automation, no user-facing timer, and no CDP attach/reconnect path.
+For the complete Python gate, run `uv run --frozen --extra dev python -m pytest`; headed handoff survival and trusted-gesture activation are manual host checks requiring a physical benign click and tab/window close. The review workflow has no final-submit automation, no user-facing timer, and no CDP attach/reconnect path.
 
-Coding-agent practices and project policy live in `AGENTS.md`. Historical snapshots live under `archive/`.
+Coding-agent practices and project policy live in `AGENTS.md`. Historical snapshots are preserved in git history only.

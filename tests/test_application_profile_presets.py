@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import stat
 from pathlib import Path
 from types import MappingProxyType
 
@@ -10,7 +9,6 @@ import pytest
 
 
 import jobs_assistant.application_profiles as profiles
-import jobs_assistant.ats as ats
 from jobs_assistant.ats import ApplicationProfile, ConfiguredFieldAnswer
 from jobs_assistant.application_profiles import (
     APPLICATION_PROFILE_SCHEMA_VERSION,

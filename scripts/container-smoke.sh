@@ -1,5 +1,10 @@
 #!/usr/bin/env sh
 set -eu
+UID_VALUE="$(id -u)"
+if [ "$UID_VALUE" -eq 0 ]; then
+  echo '{"error":{"code":"root_uid_unsupported","message":"container smoke requires a nonzero invoking UID"}}' >&2
+  exit 2
+fi
 
 if ! command -v docker >/dev/null 2>&1; then
   echo '{"error":{"code":"docker_unavailable","message":"docker command is unavailable"}}' >&2
@@ -21,20 +26,28 @@ cleanup() {
   rm -rf "$ROOT"
 }
 trap cleanup EXIT INT TERM
-UID_VALUE="$(id -u)"
 GID_VALUE="$(id -g)"
 SMOKE_THEIRSTACK_API_KEY='container-smoke-theirstack-value'
 SMOKE_JOB_SOURCE_API_KEY='container-smoke-source-value'
 SMOKE_OLLAMA_CLOUD_API_KEY='container-smoke-ollama-value'
+SMOKE_OMP_AUTH_BROKER_URL='https://broker.example.test'
+SMOKE_OMP_AUTH_BROKER_TOKEN='container-smoke-broker-value'
+SMOKE_OPENAI_API_KEY='container-smoke-openai-value'
 INTERPOLATED_CONFIG="$ROOT/interpolated-compose.json"
 THEIRSTACK_API_KEY="$SMOKE_THEIRSTACK_API_KEY" \
 JOB_SOURCE_API_KEY="$SMOKE_JOB_SOURCE_API_KEY" \
 OLLAMA_CLOUD_API_KEY="$SMOKE_OLLAMA_CLOUD_API_KEY" \
+OMP_AUTH_BROKER_URL="$SMOKE_OMP_AUTH_BROKER_URL" \
+OMP_AUTH_BROKER_TOKEN="$SMOKE_OMP_AUTH_BROKER_TOKEN" \
+OPENAI_API_KEY="$SMOKE_OPENAI_API_KEY" \
   HOST_UID="$UID_VALUE" HOST_GID="$GID_VALUE" \
   docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml config --format json >"$INTERPOLATED_CONFIG"
 THEIRSTACK_API_KEY="$SMOKE_THEIRSTACK_API_KEY" \
 JOB_SOURCE_API_KEY="$SMOKE_JOB_SOURCE_API_KEY" \
 OLLAMA_CLOUD_API_KEY="$SMOKE_OLLAMA_CLOUD_API_KEY" \
+OMP_AUTH_BROKER_URL="$SMOKE_OMP_AUTH_BROKER_URL" \
+OMP_AUTH_BROKER_TOKEN="$SMOKE_OMP_AUTH_BROKER_TOKEN" \
+OPENAI_API_KEY="$SMOKE_OPENAI_API_KEY" \
   python3 - "$INTERPOLATED_CONFIG" <<'PY'
 import json
 import os
@@ -43,7 +56,14 @@ from pathlib import Path
 
 config = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 environment = config["services"]["jobs-assistant"]["environment"]
-for key in ("THEIRSTACK_API_KEY", "JOB_SOURCE_API_KEY", "OLLAMA_CLOUD_API_KEY"):
+for key in (
+    "THEIRSTACK_API_KEY",
+    "JOB_SOURCE_API_KEY",
+    "OLLAMA_CLOUD_API_KEY",
+    "OMP_AUTH_BROKER_URL",
+    "OMP_AUTH_BROKER_TOKEN",
+    "OPENAI_API_KEY",
+):
     assert environment[key] == os.environ[key]
 PY
 rm -f "$INTERPOLATED_CONFIG"
@@ -74,6 +94,9 @@ for key in (
     "THEIRSTACK_BASE_URL",
     "OLLAMA_CLOUD_API_KEY",
     "OLLAMA_CLOUD_BASE_URL",
+    "OMP_AUTH_BROKER_URL",
+    "OMP_AUTH_BROKER_TOKEN",
+    "OPENAI_API_KEY",
     "OLLAMA_CLOUD_MODEL",
     "OLLAMA_CLOUD_THINK",
 ):
@@ -81,19 +104,15 @@ for key in (
 volumes = service["volumes"]
 assert len(volumes) == 2
 data, resume = volumes
-assert data == {
-    "type": "bind",
-    "source": str(Path.cwd() / "data"),
-    "target": "/app/data",
-    "bind": {"create_host_path": False},
-}
-assert resume == {
-    "type": "bind",
-    "source": str(Path.cwd() / "resume"),
-    "target": "/app/resume",
-    "read_only": True,
-    "bind": {"create_host_path": False},
-}
+assert data["type"] == "bind"
+assert Path(data["source"]).samefile(Path.cwd() / "data")
+assert data["target"] == "/app/data"
+assert data["bind"] == {"create_host_path": False}
+assert resume["type"] == "bind"
+assert Path(resume["source"]).samefile(Path.cwd() / "resume")
+assert resume["target"] == "/app/resume"
+assert resume["read_only"] is True
+assert resume["bind"] == {"create_host_path": False}
 PY
 
 mkdir -p "$DATA_ROOT" "$RESUME_ROOT"
@@ -152,7 +171,41 @@ EOF
 
 HOST_UID="$UID_VALUE" HOST_GID="$GID_VALUE" docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml -f "$OVERRIDE" up --build --abort-on-container-exit --exit-code-from jobs-assistant
 
-HOST_UID="$UID_VALUE" HOST_GID="$GID_VALUE" docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml -f "$OVERRIDE" run --rm --no-deps --entrypoint python jobs-assistant -c 'import os; from importlib import resources; from jobs_assistant.browser_adapter import PuppeteerSession; p=resources.files("jobs_assistant"); assert (p / "puppeteer_runner.js").is_file(); assert (p / "safety_policy.json").is_file(); assert os.getuid() == int(os.environ["HOST_UID"]); assert os.environ["PUPPETEER_EXECUTABLE_PATH"] == "/usr/bin/chromium-headless-shell"; assert PuppeteerSession.preflight(headed=False, timeout=15)["puppeteer"] == "24.43.1"'
+HOST_UID="$UID_VALUE" HOST_GID="$GID_VALUE" docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml -f "$OVERRIDE" run --rm -T --no-deps --entrypoint /app/.venv/bin/python jobs-assistant - <<'PY'
+import asyncio
+import os
+from importlib import resources
+from pathlib import Path
+
+from jobs_assistant.browser_adapter import PuppeteerSession
+from jobs_assistant.cli import _application_rpc_omp_launch_config, build_parser
+from jobs_assistant.omp_rpc import OmpRpcProcess
+
+package = resources.files("jobs_assistant")
+assert (package / "puppeteer_runner.js").is_file()
+assert (package / "safety_policy.json").is_file()
+assert os.getuid() == int(os.environ["HOST_UID"])
+assert os.environ["PUPPETEER_EXECUTABLE_PATH"] == "/usr/bin/chromium-headless-shell"
+omp = Path(os.environ["JOBS_ASSISTANT_OMP_EXECUTABLE"])
+assert omp.is_file() and os.access(omp, os.X_OK)
+args = build_parser().parse_args(["application-rpc"])
+launch_config = _application_rpc_omp_launch_config(args)
+assert Path(launch_config.executable) == omp
+assert PuppeteerSession.preflight(headed=False, timeout=15)["puppeteer"] == "24.43.1"
+
+async def verify_omp_runtime():
+    process = await OmpRpcProcess.launch(launch_config)
+    try:
+        assert process.verified
+        assert not process.poisoned
+    finally:
+        await process.close()
+    assert process.closed
+    assert not process.poisoned
+
+asyncio.run(verify_omp_runtime())
+PY
+HOST_UID="$UID_VALUE" HOST_GID="$GID_VALUE" docker compose -p "$COMPOSE_PROJECT_NAME" -f docker-compose.yml -f "$OVERRIDE" run --rm --no-deps jobs-assistant application-rpc --help
 
 python3 - "$DATA_ROOT" "$RESUME_ROOT" <<'PY'
 import sqlite3

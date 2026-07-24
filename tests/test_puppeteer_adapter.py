@@ -44,6 +44,27 @@ CLEAN_FIXTURE = b"""<!doctype html>
 </form>
 <script>window.addEventListener("input",()=>{fetch("/exfil-after-input").catch(()=>{});const image=new Image();image.src="http://attacker.invalid/leak"});</script>
 </body></html>"""
+TEXT_VALUE_REBIND_FIXTURE = b"""<!doctype html>
+<html><head><title>Text Value Rebinding Fixture</title></head>
+<body><form><label for="text-drift">First Name</label><input id="text-drift" name="first_name" value="before"></form>
+<script>setTimeout(() => { document.getElementById("text-drift").value = "autofill"; }, 3000);</script></body></html>"""
+CHECKED_REBIND_FIXTURE = b"""<!doctype html>
+<html><head><title>Checked Rebinding Fixture</title></head>
+<body><form><label for="check-drift">Choice</label><input id="check-drift" name="choice" type="checkbox"></form>
+<script>setTimeout(() => { document.getElementById("check-drift").checked = true; }, 3000);</script></body></html>"""
+FILE_REBIND_FIXTURE = b"""<!doctype html>
+<html><head><title>File Rebinding Fixture</title></head>
+<body><form><label for="file-drift">Resume</label><input id="file-drift" name="resume" type="file" accept="application/pdf,.pdf"></form>
+<script>setTimeout(() => {
+  const input = document.getElementById("file-drift");
+  const transfer = new DataTransfer();
+  transfer.items.add(new File(["autofill"], "autofill.pdf", {type: "application/pdf"}));
+  input.files = transfer.files;
+}, 3000);</script></body></html>"""
+DESCRIPTOR_REBIND_FIXTURE = b"""<!doctype html>
+<html><head><title>Descriptor Rebinding Fixture</title></head>
+<body><form><label for="descriptor-drift">First Name</label><input id="descriptor-drift" name="first_name" autocomplete="given-name"></form>
+<script>setTimeout(() => { document.getElementById("descriptor-drift").setAttribute("autocomplete", "family-name"); }, 3000);</script></body></html>"""
 CITIZENSHIP_STATUS_FIXTURE = b"""<!doctype html>
 <html><head><title>Citizenship Status Fixture</title></head>
 <body><form>
@@ -51,6 +72,33 @@ CITIZENSHIP_STATUS_FIXTURE = b"""<!doctype html>
 <label for="citizenship-status">Citizenship Status*</label><input id="citizenship-status" name="citizenshipStatus" required>
 <label for="usCitizen">Are you a U.S. citizen?</label><input id="usCitizen" name="usCitizen" required>
 <button type="submit" id="submit-final">Submit Application</button>
+</form></body></html>"""
+DYNAMIC_SENSITIVE_MUTATION_FIXTURE = b"""<!doctype html>
+<html><head><title>Dynamic Sensitive Reclassification Fixture</title></head>
+<body><form action="/fixture/jobs/123?gh_src=human-review" method="post">
+<label for="dynamic-fill">First Name</label><input id="dynamic-fill" name="first_name">
+<label for="dynamic-check">Choice</label><input id="dynamic-check" name="choice" type="checkbox">
+<label for="dynamic-select">Region</label><select id="dynamic-select" name="region"><option value="west">West</option><option value="east">East</option></select>
+<label for="dynamic-upload">Resume</label><input id="dynamic-upload" name="resume" type="file" accept="application/pdf,.pdf">
+<input type="submit" id="human-submit" value="Review Application">
+</form>
+<script>
+const dynamicFill = document.getElementById("dynamic-fill");
+const dynamicCheck = document.getElementById("dynamic-check");
+dynamicFill.addEventListener("input", () => dynamicFill.setAttribute("aria-label", "SSN"));
+dynamicFill.addEventListener("change", () => dynamicFill.setAttribute("type", "password"));
+dynamicCheck.addEventListener("input", () => dynamicCheck.setAttribute("aria-label", "SSN"));
+dynamicCheck.addEventListener("change", () => dynamicCheck.setAttribute("type", "password"));
+document.getElementById("dynamic-select").addEventListener("change", event => event.target.setAttribute("aria-label", "SSN"));
+document.getElementById("dynamic-upload").addEventListener("change", event => event.target.setAttribute("aria-label", "SSN"));
+</script></body></html>"""
+INPUT_SUBMIT_HANDOFF_FIXTURE = b"""<!doctype html>
+<html><head><title>Input Submit Handoff Fixture</title></head>
+<body><form action="/fixture/jobs/123?gh_src=human-review" method="get">
+<input type="submit" id="human-review-control" value="Review Application">
+<input type="submit" id="ambiguous-submit" name="ambiguous" value="Ambiguous">
+<input type="submit" id="ambiguous-submit" name="ambiguous" value="Ambiguous">
+<input type="submit" id="hidden-submit" name="hidden" value="Hidden" style="display:none">
 </form></body></html>"""
 
 def _field_cap_fixture(count: int) -> bytes:
@@ -245,6 +293,54 @@ NATIVE_AUTH_BLOCKER_FIXTURE = b"""<!doctype html>
 <button type="button" id="create-account-button">Create account</button>
 <button type="button" id="log-in-button">Log in</button>
 </body></html>"""
+
+TASK10_AUTH_BLOCKER_FIXTURE = b"""<!doctype html>
+<html><head><title>Task 10 Authentication Blocker Fixture</title></head>
+<body><form>
+<label>Task 10 auth response <input id="task10-auth-field" name="task10_auth_field"></label>
+<button type="button" id="task10-auth-button">Continue</button>
+<p>Enter the one-time password or MFA passcode to finish email verification; account creation requires account verification.</p>
+<script>
+const authField = document.getElementById("task10-auth-field");
+const authButton = document.getElementById("task10-auth-button");
+const markAuthMutation = () => {
+  document.body.dataset.task10Mutated = "yes";
+  const marker = document.createElement("button");
+  marker.type = "button";
+  marker.id = "task10-auth-mutated";
+  marker.textContent = "MUTATED";
+  document.body.append(marker);
+};
+authField.addEventListener("input", markAuthMutation);
+authButton.addEventListener("click", markAuthMutation);
+</script></form></body></html>"""
+
+TASK10_PASSWORD_BLOCKER_FIXTURE = TASK10_AUTH_BLOCKER_FIXTURE.replace(
+    b"<p>Enter the one-time password or MFA passcode to finish email verification; account creation requires account verification.</p>",
+    b"<p>Password required.</p>",
+)
+
+TASK10_ASSESSMENT_BLOCKER_FIXTURE = b"""<!doctype html>
+<html><head><title>Task 10 Assessment Blocker Fixture</title></head>
+<body><form>
+<label>Task 10 assessment response <input id="task10-assessment-field" name="task10_assessment_field"></label>
+<button type="button" id="task10-assessment-button">Continue</button>
+<p>Complete the coding assessment, personality assessment, aptitude assessment, cognitive assessment, behavioral assessment, and work-style assessment.</p>
+<script>
+const assessmentField = document.getElementById("task10-assessment-field");
+const assessmentButton = document.getElementById("task10-assessment-button");
+const markAssessmentMutation = () => {
+  document.body.dataset.task10Mutated = "yes";
+  const marker = document.createElement("button");
+  marker.type = "button";
+  marker.id = "task10-assessment-mutated";
+  marker.textContent = "MUTATED";
+  document.body.append(marker);
+};
+assessmentField.addEventListener("input", markAssessmentMutation);
+assessmentButton.addEventListener("click", markAssessmentMutation);
+</script></form></body></html>"""
+
 NATIVE_PROGRESS_DRIFT_FIXTURE = b"""<!doctype html>
 <html><head><title>Native Progress Drift Fixture</title></head>
 <body>
@@ -285,6 +381,14 @@ SCRIPT_WEBSOCKET_CONTINUATION_FIXTURE = SUBMIT_CONTINUATION_FIXTURE.replace(
 SCRIPT_POPUP_CONTINUATION_FIXTURE = SUBMIT_CONTINUATION_FIXTURE.replace(
     b'history.pushState({}, "", "/fixture/jobs/123?gh_src=step-2");document.body.dataset.continued="yes"',
     b'window.open("https://www.google.com/jobs-assistant-probe")',
+)
+SAME_ATS_POPUP_WORKER_FIXTURE = SUBMIT_CONTINUATION_FIXTURE.replace(
+    b'history.pushState({}, "", "/fixture/jobs/123?gh_src=step-2");document.body.dataset.continued="yes"',
+    b'''history.pushState({}, "", "/fixture/jobs/123?gh_src=step-2");
+const popup = window.open("https://boards.greenhouse.io/fixture/jobs/123?gh_src=step-2");
+const worker = new Worker(URL.createObjectURL(new Blob([
+  'fetch("https://boards.greenhouse.io/fixture/jobs/123?gh_src=popup-worker-upstream").catch(() => {})'
+], {type: "text/javascript"})));''',
 )
 BLOCKER_FIXTURE = b"""<!doctype html><form>
 <label>First Name <input name="first_name" required></label>
@@ -536,7 +640,14 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
     static_requests = 0
     logical_urls: list[str] = []
 
+    popup_worker_upstream_requests = 0
     def do_GET(self):  # noqa: N802
+        if self.path.startswith("/fixture/jobs/123?gh_src=popup-worker-upstream"):
+            type(self).popup_worker_upstream_requests += 1
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(b"popup worker upstream reached")
+            return
         type(self).fixture_requests += 1
         if self.path.startswith("/assets/"):
             type(self).static_requests += 1
@@ -616,12 +727,16 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         logical = type(self).logical_urls[-1] if type(self).logical_urls else ""
         body = (
-            LEVER_FIXTURE.read_bytes()
+            TASK10_PASSWORD_BLOCKER_FIXTURE if self.path.startswith("/task10-password-blocker")
+            else TASK10_AUTH_BLOCKER_FIXTURE if self.path.startswith("/task10-auth-blocker")
+            else TASK10_ASSESSMENT_BLOCKER_FIXTURE if self.path.startswith("/task10-assessment-blocker")
+            else LEVER_FIXTURE.read_bytes()
             if logical.startswith("https://jobs.lever.co/")
             else SCRIPT_FAVICON_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-favicon-script")
             else SCRIPT_CROSS_ORIGIN_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-cross-origin-script")
             else SCRIPT_WEBSOCKET_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-websocket-script")
             else SCRIPT_POPUP_CONTINUATION_FIXTURE if self.path.startswith("/continue-native-popup-script")
+            else SAME_ATS_POPUP_WORKER_FIXTURE if self.path.startswith("/continue-native-popup-worker")
             else OLD_PAGE_PAGEHIDE_STATIC_CONTINUATION_FIXTURE if self.path.startswith("/continue-anchor-pagehide-static")
             else STATIC_CAP_CONTINUATION_FIXTURE if self.path.startswith("/continue-anchor-static-cap")
             else STATIC_ASSET_CONTINUATION_FIXTURE if self.path.startswith("/continue-anchor-static")
@@ -661,6 +776,12 @@ class FixtureHandler(http.server.SimpleHTTPRequestHandler):
             else BUTTON_CAP_OVERFLOW_FIXTURE if self.path.startswith("/button-cap-overflow")
             else ARIA_HIDDEN_FIXTURE if self.path.startswith("/aria-hidden")
             else CITIZENSHIP_STATUS_FIXTURE if self.path.startswith("/citizenship-status")
+            else INPUT_SUBMIT_HANDOFF_FIXTURE if self.path.startswith("/human-input-handoff")
+            else DYNAMIC_SENSITIVE_MUTATION_FIXTURE if self.path.startswith("/dynamic-sensitive")
+            else TEXT_VALUE_REBIND_FIXTURE if self.path.startswith("/rebind-text-value")
+            else CHECKED_REBIND_FIXTURE if self.path.startswith("/rebind-checked")
+            else FILE_REBIND_FIXTURE if self.path.startswith("/rebind-file")
+            else DESCRIPTOR_REBIND_FIXTURE if self.path.startswith("/rebind-descriptor")
             else CLEAN_FIXTURE if self.path.startswith("/clean") else FIXTURE.read_bytes()
         )
         self.wfile.write(body)
@@ -674,6 +795,7 @@ def fixture_server():
     FixtureHandler.final_like_requests = 0
     FixtureHandler.fixture_requests = 0
     FixtureHandler.benign_requests = 0
+    FixtureHandler.popup_worker_upstream_requests = 0
     FixtureHandler.static_requests = 0
     FixtureHandler.logical_urls = []
     with socketserver.TCPServer(("127.0.0.1", 0), FixtureHandler) as server:
@@ -690,7 +812,7 @@ def field_by_name(observation: dict, name: str) -> dict:
     return next(field for field in observation["fields"] if field.get("name") == name)
 
 def _validated_emergency_cleanup(identities: dict, manifest: Path) -> bool:
-    """Kill only verified released owner and browser process groups."""
+    """Kill only verified committed owner and browser process groups."""
     def matches(identity: dict) -> bool:
         try:
             return _capture_process_identity(identity["pid"]) == identity
@@ -738,7 +860,7 @@ def _validated_emergency_cleanup(identities: dict, manifest: Path) -> bool:
         groups = {browser["pgid"], owner["pgid"]}
         if current.get("state") == "closed":
             return current.get("cleanup") is True and groups_absent(groups)
-        if current.get("state") != "open_guarded":
+        if current.get("state") != "open_guarded" or current.get("detached") is not True:
             return False
         identity_matches = {
             identity["pgid"]: matches(identity)
@@ -749,10 +871,6 @@ def _validated_emergency_cleanup(identities: dict, manifest: Path) -> bool:
             for pgid, verified in identity_matches.items()
             if verified
         }
-        unverified_group_present = any(
-            not verified and group_exists(pgid)
-            for pgid, verified in identity_matches.items()
-        )
         for pgid in verified_groups:
             try:
                 os.killpg(pgid, signal.SIGTERM)
@@ -765,7 +883,10 @@ def _validated_emergency_cleanup(identities: dict, manifest: Path) -> bool:
                     os.killpg(pgid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-        return groups_absent(groups) and not unverified_group_present
+        # Never signal a group whose exact birth identity no longer matches.
+        # It may already be exiting; success still requires every recorded
+        # group to become absent within the bounded cleanup window.
+        return groups_absent(groups)
     except (KeyError, TypeError, ValueError, OSError, AttributeError, json.JSONDecodeError):
         return False
 
@@ -800,6 +921,8 @@ def test_lever_url_validation_is_exact_and_apply_scoped():
     for url in [
         "http://jobs.eu.lever.co/acme/123e4567-e89b-12d3-a456-426614174000",
         uuid_url + "?next=confirm",
+        uuid_url + "?",
+        uuid_url + "#",
         "https://jobs.eu.lever.co/acme/job-123",
         "https://jobs.eu.lever.co/acme/123E4567-E89B-12D3-A456-426614174000",
         uuid_url + "/confirmation",
@@ -1164,6 +1287,126 @@ def test_citizenship_status_observation_is_sensitive_and_fill_denied(fixture_ser
         with pytest.raises(BrowserAdapterError, match="sensitive_field"):
             session.fill(citizenship["target_id"], "United States")
 
+@BROWSER_INTEGRATION_SKIP
+@pytest.mark.parametrize(("action", "field_name"), (("fill", "first_name"), ("check", "choice"), ("select", "region")))
+def test_dynamic_sensitive_reclassification_is_terminal_for_mutations(fixture_server, action, field_name):
+    transport_url = fixture_server.replace("/clean", "/dynamic-sensitive")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id=f"session-dynamic-{action}",
+        run_id=37,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        observation = session.observe()
+        field = field_by_name(observation, field_name)
+        with pytest.raises(BrowserAdapterError, match="sensitive_field"):
+            if action == "fill":
+                session.fill(field["target_id"], "Ada")
+            elif action == "check":
+                session.check(field["target_id"], True)
+            else:
+                session.select(field["target_id"], "east")
+        counters = session.network_counters()
+        assert counters["terminal_reason"] == "sensitive_field"
+        assert counters["review_state"] == "closed"
+@BROWSER_INTEGRATION_SKIP
+def test_dynamic_sensitive_reclassification_is_terminal_for_upload(fixture_server, tmp_path):
+    input_root = tmp_path / "input"
+    input_root.mkdir()
+    staged = input_root / "resume.pdf"
+    staged.write_bytes(b"dynamic sensitive upload")
+    session = PuppeteerSession.start(
+        headless=True,
+        session_id="session-dynamic-upload",
+        run_id=39,
+        job_id=123,
+        input_root=input_root,
+        staged_input=staged.name,
+        staged_sha256=hashlib.sha256(staged.read_bytes()).hexdigest(),
+        staged_media_type="application/pdf",
+        internal_transport_url=fixture_server.replace("/clean", "/dynamic-sensitive"),
+    )
+    try:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        field = field_by_name(session.observe(), "resume")
+        with pytest.raises(BrowserAdapterError, match="sensitive_field"):
+            session.upload(field["target_id"])
+        counters = session.network_counters()
+        assert counters["terminal_reason"] == "sensitive_field"
+        assert counters["review_state"] == "closed"
+    finally:
+        session.close(force=True)
+
+@BROWSER_INTEGRATION_SKIP
+@pytest.mark.parametrize(
+    ("endpoint", "field_name", "action", "proposal"),
+    (
+        ("rebind-text-value", "first_name", "fill", "Ada"),
+        ("rebind-checked", "choice", "check", False),
+        ("rebind-file", "resume", "upload", None),
+        ("rebind-descriptor", "first_name", "fill", "Ada"),
+    ),
+)
+def test_pending_proposal_rejects_current_observation_rebinding(
+    fixture_server, endpoint, field_name, action, proposal,
+):
+    transport_url = fixture_server.replace("/clean", f"/{endpoint}")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id=f"session-rebind-{endpoint}",
+        run_id=40,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        field = field_by_name(session.observe(), field_name)
+        time.sleep(3.2)
+        with pytest.raises(BrowserAdapterError, match="stale_generation"):
+            if action == "fill":
+                session.fill(field["target_id"], proposal)
+            elif action == "check":
+                session.check(field["target_id"], proposal)
+            else:
+                session.upload(field["target_id"])
+        after = field_by_name(session.observe(), field_name)
+        if endpoint == "rebind-text-value":
+            assert after["value"] == "autofill"
+        elif endpoint == "rebind-checked":
+            assert after["value"] is True
+        elif endpoint == "rebind-file":
+            assert after["file_count"] == 1
+            assert after["file_basenames"] == ["autofill.pdf"]
+        else:
+            assert "family-name" in after["safety_descriptors"]
+            assert "given-name" not in after["safety_descriptors"]
+        assert session.network_counters()["terminal_reason"] is None
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_input_submit_is_human_only_and_ambiguous_controls_are_blocked(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/human-input-handoff")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-input-submit-handoff",
+        run_id=38,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        observation = session.observe()
+        unique = next(button for button in observation["buttons"] if button["element_id"] == "human-review-control")
+        assert unique["button_type"] == "submit"
+        assert unique["value"] == "Review Application"
+        assert unique["click_key"]
+        ambiguous = [button for button in observation["buttons"] if button["element_id"] == "ambiguous-submit"]
+        assert len(ambiguous) == 2
+        assert all(button["click_key"] is None for button in ambiguous)
+        with pytest.raises(BrowserAdapterError, match="final_or_anchor_not_automated"):
+            session.click_offline(unique["target_id"])
+        counters = session.network_counters()
+        assert counters["terminal_reason"] is None
 @BROWSER_INTEGRATION_SKIP
 def test_observation_field_cap_accepts_global_boundary(fixture_server):
     transport_url = fixture_server.replace("/clean", "/field-cap-boundary")
@@ -1895,6 +2138,82 @@ def test_native_auth_controls_are_observation_blockers(fixture_server):
         assert any(button["element_id"] == "create-account-button" for button in observation["buttons"])
         assert session.network_counters()["terminal_reason"] is None
 
+
+@pytest.mark.parametrize(
+    ("endpoint", "expected_code", "field_name", "button_id", "marker_id"),
+    [
+        (
+            "task10-auth-blocker",
+            "authentication_required",
+            "task10_auth_field",
+            "task10-auth-button",
+            "task10-auth-mutated",
+        ),
+        (
+            "task10-password-blocker",
+            "authentication_required",
+            "task10_auth_field",
+            "task10-auth-button",
+            "task10-auth-mutated",
+        ),
+        (
+            "task10-assessment-blocker",
+            "assessment_required",
+            "task10_assessment_field",
+            "task10-assessment-button",
+            "task10-assessment-mutated",
+        ),
+    ],
+    ids=("authentication", "password", "assessment"),
+)
+@pytest.mark.parametrize(
+    ("ats_policy", "logical_url"),
+    [
+        ("greenhouse", "https://boards.greenhouse.io/fixture/jobs/123"),
+        ("lever", "https://jobs.lever.co/example/123e4567-e89b-12d3-a456-426614174000"),
+    ],
+    ids=("greenhouse", "lever"),
+)
+@BROWSER_INTEGRATION_SKIP
+def test_task10_visible_blockers_deny_later_fill_and_click_without_mutation(
+    fixture_server,
+    endpoint,
+    expected_code,
+    field_name,
+    button_id,
+    marker_id,
+    ats_policy,
+    logical_url,
+):
+    transport_url = fixture_server.replace("/clean", f"/{endpoint}")
+    with PuppeteerSession.start(
+        headless=True,
+        ats_policy=ats_policy,
+        session_id=f"session-task10-{ats_policy}-{endpoint}",
+        run_id=47,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto(logical_url)
+        observation = session.observe()
+        blockers = [blocker for blocker in observation["blockers"] if blocker["code"] == expected_code]
+        assert blockers
+        assert not any(
+            blocker["code"] in {"authentication_required", "assessment_required"}
+            and blocker["code"] != expected_code
+            for blocker in observation["blockers"]
+        )
+        field = field_by_name(observation, field_name)
+        button = next(item for item in observation["buttons"] if item["element_id"] == button_id)
+        with pytest.raises(BrowserAdapterError, match="browser_command_failed"):
+            session.fill(field["target_id"], "MUTATED")
+        with pytest.raises(BrowserAdapterError, match="browser_command_failed"):
+            session.click_offline(button["target_id"])
+        after = session.observe()
+        assert field_by_name(after, field_name)["value"] == ""
+        assert not any(item["element_id"] == marker_id for item in after["buttons"])
+        assert session.network_counters()["terminal_reason"] is None
+
 @pytest.mark.parametrize(
     "endpoint",
     (
@@ -1929,6 +2248,37 @@ def test_script_network_request_after_click_remains_terminal(fixture_server, end
         assert counters["terminal_reason"] == "unsafe_network_attempt"
         assert counters["upstreamConnectAttempts"] == before["upstreamConnectAttempts"]
         assert counters["dnsLookups"] == before["dnsLookups"]
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+
+@BROWSER_INTEGRATION_SKIP
+def test_target_auto_attach_blocks_same_ats_popup_and_worker_race(fixture_server):
+    transport_url = fixture_server.replace("/clean", "/continue-native-popup-worker")
+    with PuppeteerSession.start(
+        headless=True,
+        session_id="session-target-auto-attach-race",
+        run_id=4,
+        job_id=123,
+        internal_transport_url=transport_url,
+    ) as session:
+        session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+        observation = session.observe()
+        continuation = next(
+            button
+            for button in observation["buttons"]
+            if button["button_type"] == "submit"
+            and button["target_id"] not in observation["final_submit_target_ids"]
+        )
+        before = session.network_counters()
+        with pytest.raises(BrowserAdapterError):
+            session.click_offline(continuation["target_id"], continuation=True)
+        time.sleep(1.2)
+        counters = session.network_counters()
+        assert counters["terminal_reason"] == "unsafe_network_attempt"
+        assert counters["review_state"] == "closed"
+        assert counters["upstreamConnectAttempts"] == before["upstreamConnectAttempts"]
+        assert counters["upstreamHttpAttempts"] == before["upstreamHttpAttempts"]
+        assert FixtureHandler.popup_worker_upstream_requests == 0
         assert FixtureHandler.attacker_http_requests == 0
         assert FixtureHandler.final_like_requests == 0
 
@@ -2508,7 +2858,7 @@ def test_lever_session_uses_selected_policy_and_keeps_final_submit_manual(fixtur
 
 @pytest.mark.skipif(
     os.environ.get("RUN_PUPPETEER_INTEGRATION") != "1",
-    reason="set RUN_PUPPETEER_INTEGRATION=1 for the normal-parent-exit survival smoke",
+    reason="set RUN_PUPPETEER_INTEGRATION=1 for the commit-before-parent-EOF survival smoke",
 )
 @pytest.mark.skipif(
     os.name != "nt" and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"),
@@ -2520,12 +2870,12 @@ def test_lever_session_uses_selected_policy_and_keeps_final_submit_manual(fixtur
     ids=("both-live", "browser-already-absent"),
 )
 @BROWSER_INTEGRATION_SKIP
-def test_release_survives_normal_helper_exit_and_heartbeat(
+def test_commit_survives_normal_helper_exit_and_heartbeat(
     fixture_server,
     tmp_path,
     browser_exits_before_cleanup,
 ):
-    """A released owner survives normal interpreter shutdown without a guardian."""
+    """A committed owner survives helper EOF before DB finalization."""
     run_dir = tmp_path / "run"
     manifest = run_dir / "review_session.json"
     helper = f"""
@@ -2533,7 +2883,7 @@ import json, sys
 from jobs_assistant.browser_adapter import PuppeteerSession
 
 session = None
-released = False
+committed = False
 try:
     session = PuppeteerSession.start(
         headless=False,
@@ -2543,16 +2893,17 @@ try:
         run_cwd={str(run_dir)!r},
         screenshot_root={str(run_dir / "screenshots")!r},
         session_manifest={str(manifest)!r},
-        internal_transport_url={fixture_server!r},
+        internal_transport_url={fixture_server.replace("/clean", "/dynamic-sensitive")!r},
     )
     session.goto("https://boards.greenhouse.io/fixture/jobs/123?gh_src=human-review")
+    observation = session.observe()
+    assert len(observation["final_submit_target_ids"]) >= 1
     assert session.prepare_handoff()["state"] == "prepared"
     assert session.commit_handoff("normal-exit-token-" + "a" * 32)["state"] == "open_guarded"
-    assert session.release_handoff()["released"] is True
-    released = True
+    committed = True
     print(json.dumps({{"owner": session.owner_identity, "browser": session.browser_identity}}), flush=True)
 finally:
-    if session is not None and not released:
+    if session is not None and not committed:
         session.close(force=True)
 """
     identities: dict | None = None
@@ -2601,7 +2952,7 @@ finally:
             if len(heartbeat_values) >= 2:
                 break
             time.sleep(0.1)
-        assert len(heartbeat_values) >= 2, "released owner did not emit a second heartbeat"
+        assert len(heartbeat_values) >= 2, "committed owner did not emit a second heartbeat"
         if browser_exits_before_cleanup:
             os.killpg(browser["pgid"], signal.SIGKILL)
             deadline = time.monotonic() + 5
@@ -2810,6 +3161,117 @@ finally:
             _validated_emergency_cleanup(identities, manifest)
         raise
 
+
+@pytest.mark.skipif(
+    os.environ.get("RUN_PUPPETEER_HEADED_SMOKE") != "1",
+    reason="set RUN_PUPPETEER_HEADED_SMOKE=1 for the manual headed input-submit smoke",
+)
+@pytest.mark.skipif(
+    os.name != "nt" and sys.platform.startswith("linux") and not os.environ.get("DISPLAY"),
+    reason="headed Chromium requires a Linux display",
+)
+@BROWSER_INTEGRATION_SKIP
+def test_headed_input_submit_handoff_requires_trusted_gesture(fixture_server, tmp_path):
+    """Only a physical click may release an observed input-submit control."""
+    run_dir = tmp_path / "run"
+    manifest = run_dir / "review_session.json"
+    handoff_fixture = fixture_server.replace("/clean", "/human-input-handoff")
+    helper = f"""
+import json, sys
+from jobs_assistant.browser_adapter import PuppeteerSession
+
+session = None
+released = False
+try:
+    session = PuppeteerSession.start(
+        headless=False,
+        session_id="session-headed-input-submit",
+        run_id=74,
+        job_id=174,
+        run_cwd={str(run_dir)!r},
+        screenshot_root={str(run_dir / "screenshots")!r},
+        session_manifest={str(manifest)!r},
+        internal_transport_url={handoff_fixture!r},
+    )
+    session.goto("https://boards.greenhouse.io/fixture/jobs/123")
+    observation = session.observe()
+    target = next(button for button in observation["buttons"] if button.get("element_id") == "human-review-control")
+    assert target["button_type"] == "submit"
+    assert target["value"] == "Review Application"
+    assert target["click_key"]
+    assert session.prepare_handoff()["state"] == "prepared"
+    assert session.commit_handoff("headed-input-submit-token-" + "a" * 32)["state"] == "open_guarded"
+    assert session.release_handoff()["released"] is True
+    released = True
+    print(json.dumps({{"owner": session.owner_identity, "browser": session.browser_identity}}), flush=True)
+finally:
+    if session is not None and not released:
+        session.close(force=True)
+"""
+    identities: dict | None = None
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", helper],
+            cwd=str(Path.cwd()),
+            text=True,
+            capture_output=True,
+            timeout=90,
+            check=False,
+            env={**os.environ, "DEBUG": "puppeteer:*"},
+        )
+        print("INPUT-SUBMIT HELPER STDERR:", result.stderr, file=sys.stderr)
+        assert result.returncode == 0, result.stderr
+        helper_lines = [line for line in result.stdout.splitlines() if line.strip()]
+        assert helper_lines, result.stdout
+        identities = json.loads(helper_lines[-1])
+        owner = identities["owner"]
+        browser = identities["browser"]
+        first_heartbeat = json.loads(manifest.read_text(encoding="utf-8"))["heartbeat"]
+        heartbeat_deadline = time.monotonic() + 16
+        while time.monotonic() < heartbeat_deadline:
+            current = json.loads(manifest.read_text(encoding="utf-8"))
+            if current.get("state") == "open_guarded" and current.get("heartbeat") != first_heartbeat:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("headed input-submit owner did not survive release")
+
+        before_click_logical_count = len(FixtureHandler.logical_urls)
+        print(
+            "\nHEADED INPUT-SUBMIT SMOKE: physically click "
+            "'Review Application', then close that tab. Do not use a script or "
+            "the ambiguous/hidden controls.",
+            flush=True,
+        )
+        close_deadline = time.monotonic() + 120
+        while time.monotonic() < close_deadline:
+            current = json.loads(manifest.read_text(encoding="utf-8"))
+            if current.get("state") == "closed" and current.get("cleanup") is True:
+                break
+            time.sleep(0.1)
+        else:
+            pytest.fail("headed input-submit review was not closed by a human tab close")
+
+        terminal = json.loads(manifest.read_text(encoding="utf-8"))
+        assert terminal["owner_pgid"] == owner["pgid"]
+        review_urls = [
+            url for url in FixtureHandler.logical_urls[before_click_logical_count:]
+            if "gh_src=human-review" in url
+        ]
+        assert review_urls == [
+            "https://boards.greenhouse.io/fixture/jobs/123?gh_src=human-review"
+        ]
+        assert FixtureHandler.attacker_http_requests == 0
+        assert FixtureHandler.final_like_requests == 0
+        assert terminal.get("profile_path")
+        assert not Path(terminal["profile_path"]).exists()
+        for identity in (owner, browser):
+            with pytest.raises(ProcessLookupError):
+                os.killpg(identity["pgid"], 0)
+    except BaseException:
+        if identities is not None:
+            _validated_emergency_cleanup(identities, manifest)
+        raise
 
 @BROWSER_INTEGRATION_SKIP
 def test_headless_session_cannot_prepare_or_survive_release(fixture_server, tmp_path):
@@ -3132,6 +3594,117 @@ def _session_with_response(response: dict) -> PuppeteerSession:
     session._write_frame = lambda payload, timeout: None
     session.read_response = lambda timeout=15.0: response
     return session
+class _FakePipe:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class _FakeProcess:
+    def __init__(self) -> None:
+        self.pid = 8123
+        self.stdin = _FakePipe()
+        self.stdout = _FakePipe()
+        self.stderr = None
+
+    def poll(self) -> None:
+        return None
+
+    def wait(self, timeout: float | None = None) -> int:
+        return 0
+
+
+def _handoff_session_with_response(
+    *,
+    detached: bool = True,
+    identity: dict | None = None,
+) -> PuppeteerSession:
+    session = object.__new__(PuppeteerSession)
+    session.process = _FakeProcess()
+    session._selector = selectors.DefaultSelector()
+    session._stderr_thread = None
+    session._request_lock = threading.Lock()
+    session._write_lock = threading.Lock()
+    session._poisoned = False
+    session._closed = False
+    session._detached = False
+    session._committed_token = None
+    session._committed_response = None
+    session.owner_identity = {"pid": 8123, "pgid": 8123, "birth": "owner"}
+    session.browser_identity = {"pid": 8124, "pgid": 8124, "birth": "browser"}
+    session.session_id = "session"
+    session.run_id = 1
+    session.job_id = 2
+    session.ats_policy = "greenhouse"
+    session._write_frame = lambda payload, timeout: None
+    expected = {
+        "version": 1,
+        "ats_policy": "greenhouse",
+        "run_id": 1,
+        "job_id": 2,
+        "session_id": "session",
+        "owner_identity": session.owner_identity,
+        "browser_identity": session.browser_identity,
+    }
+    data = {
+        "state": "open_guarded",
+        "detached": detached,
+        "identity": identity if identity is not None else expected,
+    }
+    session.read_response = lambda timeout=15.0: {"ok": True, "data": data}
+    return session
+
+
+def test_commit_ack_detaches_adapter_and_release_is_idempotent():
+    session = _handoff_session_with_response()
+    token = "commit-adapter-test-token"
+
+    committed = session.commit_handoff(token)
+
+    assert committed["detached"] is True
+    assert session._detached is True
+    assert session._closed is True
+    assert session.process.stdin.closed is True
+    assert session.process.stdout.closed is True
+    assert session.release_handoff() == {"state": "open_guarded", "released": True}
+    assert session.commit_handoff(token)["detached"] is True
+    with pytest.raises(BrowserAdapterError, match="handoff_state_conflict"):
+        session.commit_handoff("different-adapter-token")
+
+
+@pytest.mark.parametrize("invalid_token", [None, 7, "short", "é" * 16])
+def test_invalid_commit_token_never_detaches_adapter(invalid_token):
+    session = _handoff_session_with_response()
+
+    with pytest.raises(BrowserAdapterError, match="handoff_state_conflict"):
+        session.commit_handoff(invalid_token)
+
+    assert session._detached is False
+    assert session._closed is False
+    assert session.process.stdin.closed is False
+
+
+def test_mismatched_commit_identity_never_detaches_adapter():
+    session = _handoff_session_with_response(
+        identity={
+            "version": 1,
+            "ats_policy": "greenhouse",
+            "run_id": 1,
+            "job_id": 2,
+            "session_id": "session",
+            "owner_identity": {"pid": 8125, "pgid": 8125, "birth": "other-owner"},
+            "browser_identity": {"pid": 8124, "pgid": 8124, "birth": "browser"},
+        },
+    )
+
+    with pytest.raises(BrowserAdapterError, match="browser_identity_mismatch"):
+        session.commit_handoff("commit-adapter-test-token")
+
+    assert session._detached is False
+    assert session._poisoned is True
+    assert session.process.stdin.closed is False
 
 
 def test_request_rejects_malformed_success_envelope_and_poison_session():
@@ -3230,3 +3803,68 @@ def test_runner_request_guard_self_test() -> None:
     )
     assert result.returncode == 0, result.stderr.decode()
     assert _decode_frames(result.stdout) == [{"ok": True, "data": {"passed": 14}}]
+
+
+@BROWSER_INTEGRATION_SKIP
+def test_runner_review_gesture_self_test_binds_trusted_child_frame_submit():
+    result = subprocess.run(
+        [
+            "node",
+            "src/jobs_assistant/puppeteer_runner.js",
+            "--review-gesture-self-test",
+        ],
+        cwd=str(Path.cwd()),
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        result.stderr.decode() + result.stdout.decode()
+    )
+    assert _decode_frames(result.stdout) == [{
+        "ok": True,
+        "data": {
+            "passed": 3,
+            "trusted": True,
+            "child_frame": True,
+            "default_form_action": True,
+            "stale_final_rejected": True,
+            "old_document_static_blocked": True,
+            "final_like_route_bound": True,
+            "proxy_routes_bound": True,
+            "upstream_attempts": 0,
+        },
+    }]
+
+def test_runner_handoff_self_test_covers_commit_detach_and_eof(tmp_path):
+    manifest = tmp_path / "review_session.json"
+    env = os.environ.copy()
+    env["JOBS_ASSISTANT_SESSION_MANIFEST"] = str(manifest)
+    env["JOBS_ASSISTANT_TEST_MANIFEST_WRITE_FAILURE"] = "none"
+    result = subprocess.run(
+        ["node", "src/jobs_assistant/puppeteer_runner.js", "--release-handoff-self-test"],
+        cwd=str(Path.cwd()),
+        env=env,
+        capture_output=True,
+        timeout=10,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr.decode() + result.stdout.decode()
+    assert _decode_frames(result.stdout) == [{
+        "ok": True,
+        "data": {
+            "passed": 4,
+            "committed": True,
+            "detached": True,
+            "eof_survival": True,
+            "precommit_eof_cleanup": True,
+            "recovery_cleanup": True,
+            "browser_exit_cleanup": True,
+            "gesture_installations": 4,
+        },
+    }]
+    terminal = json.loads(manifest.read_text(encoding="utf-8"))
+    assert terminal["state"] == "closed"
+    assert terminal["cleanup"] is True
+    assert terminal["cleanup_trigger"] == "recovery_exact_kill"
+    assert terminal["detached"] is True

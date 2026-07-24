@@ -127,6 +127,7 @@ function selectRoutePolicy(name) {
 }
 const SAFETY_TERMS = new Set((SAFETY_POLICY.terms || []).map(value => String(value).toLowerCase()));
 const SAFETY_COMPACT = new Set((SAFETY_POLICY.compact_aliases || []).map(value => String(value).toLowerCase().replace(/[^a-z0-9]/g, '')));
+const SENSITIVE_FIELD_KINDS = new Set((SAFETY_POLICY.sensitive_field_kinds || []).map(value => String(value).toLowerCase()));
 
 const PACKAGE_SEARCH_PATHS = [
   __dirname,
@@ -145,6 +146,7 @@ try {
 
 let browser = null;
 let page = null;
+let reviewGestureInstalledPage = null;
 let proxy = null;
 const proxySockets = new Set();
 const proxyTunnelExpiries = new Map();
@@ -200,6 +202,11 @@ let testButtonSemanticDriftArmed = false;
 let testAriaDisabledDriftArmed = false;
 let testNavigationRaceMode = null;
 let reviewLedger = new Map();
+let reviewSelfTestCapture = null;
+let observedFinalTargetCount = 0;
+let handoffFinalTargetCount = 0;
+let reviewPermitTail = Promise.resolve();
+let consumedReviewNonce = null;
 let reviewEpoch = null;
 const proxyPermitUrls = new Map();
 let pendingNetwork = 0;
@@ -217,7 +224,10 @@ let browserIdentity = null;
 let closeRequested = false;
 let detachedOwner = false;
 let detachedCloseRequested = false;
+let testManifestWriteFailureConsumed = false;
 let cleanupTrigger = null;
+const AUTO_ATTACH_TARGET_TYPES = new Set(['page', 'worker', 'shared_worker', 'service_worker']);
+let targetLifecycleGuard = null;
 
 const networkCounters = {
   allowed: 0,
@@ -307,7 +317,7 @@ function validateInitialUrl(value) {
     return out.href;
   };
   if (selectedPolicyName === 'lever') {
-    if (!ALLOWED_ATS_HOSTS.has(host) || parsed.search || /[%\\?]/.test(String(value))) throw new Error('invalid_application_url');
+    if (!ALLOWED_ATS_HOSTS.has(host) || parsed.search || /[%\\?#]/.test(String(value))) throw new Error('invalid_application_url');
     const parts = parsed.pathname.split('/');
     if (parts.length !== 3 && parts.length !== 4) throw new Error('invalid_application_url');
     if (parts.length === 4 && parts[3] !== 'apply') throw new Error('invalid_application_url');
@@ -451,7 +461,7 @@ function sameBoardJobUrl(value, identity, { confirmation = false } = {}) {
   if ((isFinalLike(parsed.pathname) && !(confirmation && /\/confirmation$/.test(parsed.pathname)))
       || [...parsed.searchParams.values()].some(isFinalLike)) return false;
   if (identity.mode === 'lever_job') {
-    if (!LEVER_HOSTS.has(parsed.hostname.toLowerCase()) || parsed.search || /[%\\?]/.test(String(value))) return false;
+    if (!LEVER_HOSTS.has(parsed.hostname.toLowerCase()) || parsed.search || /[%\\?#]/.test(String(value))) return false;
     const parts = parsed.pathname.split('/');
     const expected = 4;
     if (parts.length !== expected || parts[0] !== '' || parts[1] !== identity.account || parts[2] !== identity.job
@@ -482,6 +492,69 @@ function validateFormAction(value, method, frameUrl) {
   const identity = documentRouteIdentity || routeIdentityForUrl(frameUrl);
   return sameBoardJobUrl(value, identity) || sameBoardJobUrl(value, identity, { confirmation: true });
 }
+function validateHumanReviewAction(value, method, frameUrl) {
+  if (!value) return false;
+  const parsed = safeUrl(value); const source = safeUrl(frameUrl);
+  const normalizedMethod = String(method || 'GET').toUpperCase();
+  if (!parsed || !source || !['GET', 'POST'].includes(normalizedMethod)
+      || parsed.username || parsed.password || parsed.hash
+      || parsed.protocol !== 'https:' || (parsed.port && parsed.port !== '443')
+      || parsed.origin !== source.origin
+      || !ALLOWED_ATS_HOSTS.has(parsed.hostname.toLowerCase())
+      || Buffer.byteLength(parsed.pathname) > MAX_PATH_BYTES
+      || Buffer.byteLength(parsed.search) > MAX_QUERY_BYTES
+      || /[%\\?]/.test(rawPathFromUrl(value))) return false;
+  const sourceIdentity = routeIdentityForUrl(source.href);
+  const identity = documentRouteIdentity;
+  if (!sourceIdentity || !identity || !sameDocumentRoute(sourceIdentity, identity)
+      || parsed.hostname.toLowerCase() !== identity.host) return false;
+  const parts = parsed.pathname.split('/');
+  if (identity.mode === 'greenhouse_job') {
+    return parts.length === 4 && parts[0] === '' && parts[1] === identity.board
+      && parts[2] === 'jobs' && parts[3] === identity.job
+      && [...parsed.searchParams.keys()].every(key => key === 'gh_src');
+  }
+  if (identity.mode === 'greenhouse_embed') {
+    return parsed.pathname === '/embed/job_app'
+      && parsed.searchParams.get('for') === identity.board
+      && parsed.searchParams.get('token') === identity.token
+      && [...parsed.searchParams.keys()].every(
+        key => ['for', 'token', 'gh_src'].includes(key),
+      );
+  }
+  if (identity.mode === 'lever_job') {
+    return !parsed.search && parts.length === 4 && parts[0] === ''
+      && parts[1] === identity.account && parts[2] === identity.job
+      && parts[3] === 'apply';
+  }
+  return false;
+}
+function validateReviewStaticUrl(value) {
+  const parsed = safeUrl(value);
+  return Boolean(
+    parsed
+      && validateRequestUrl(parsed.href, { staticRequest: true })
+      && (!parsed.search || observedStaticUrls.has(parsed.href)),
+  );
+}
+function validateAuthorizedReviewProxyUrl(value, method, frameUrl) {
+  if (validateHumanReviewAction(value, method, frameUrl)) return true;
+  const epoch = reviewEpoch
+    && reviewEpoch.expires > Date.now()
+    && sameDocumentRoute(reviewEpoch.routeIdentity, documentRouteIdentity)
+    ? reviewEpoch : null;
+  if (!epoch) return false;
+  const normalizedMethod = String(method || 'GET').toUpperCase();
+  if (normalizedMethod === 'GET'
+      && sameBoardJobUrl(value, epoch.routeIdentity, { confirmation: true })) {
+    return true;
+  }
+  return epoch.committed === true
+    && ['GET', 'HEAD'].includes(normalizedMethod)
+    && validateReviewStaticUrl(value);
+}
+
+
 function proxyPermitKey(url, method) { return `${String(method || 'GET').toUpperCase()} ${String(url)}`; }
 function sameOrigin(left, right) {
   const leftUrl = safeUrl(left);
@@ -517,6 +590,16 @@ function revokeContinuationCapability(reason = null) {
   continuationNavigationPermit = null;
   if (reason && !terminalReason) terminalReason = reason;
   freezeProxy();
+}
+function failClosedOnMutationReclassification(classification) {
+  const reason = classification?.overflow ? 'observation_too_large'
+    : classification?.sensitive ? 'sensitive_field' : null;
+  if (!reason) return;
+  reviewPermit = null;
+  reviewLedger = new Map();
+  reviewEpoch = null;
+  revokeContinuationCapability(reason);
+  throw new Error(reason);
 }
 function guardedMutationNetworkError() {
   return ['unsafe_navigation_target', 'observation_too_large'].includes(terminalReason)
@@ -729,9 +812,12 @@ function currentConnectAuthorization(authority, host, localTunnel, localParsed, 
   const logicalAuthority = logicalParsed ? absoluteAuthority(logicalParsed).toLowerCase() : '';
   const permitUrl = reviewPermit && reviewPermit.expires > Date.now() ? safeUrl(reviewPermit.url) : null;
   const permitAuthority = permitUrl ? absoluteAuthority(permitUrl).toLowerCase() : null;
-  const epoch = reviewEpoch && reviewEpoch.expires > Date.now() && sameDocumentRoute(reviewEpoch.routeIdentity, documentRouteIdentity)
+  const activeEpoch = reviewEpoch
+    && reviewEpoch.expires > Date.now()
+    && sameDocumentRoute(reviewEpoch.routeIdentity, documentRouteIdentity)
     ? reviewEpoch : null;
-  const epochExpiresAt = epoch ? epoch.expires : null;
+  const epoch = activeEpoch?.committed === true ? activeEpoch : null;
+  const epochExpiresAt = activeEpoch ? activeEpoch.expires : null;
   const parsedAuthority = parsed ? absoluteAuthority(parsed).toLowerCase() : '';
   const continuation = activeContinuationPermit();
   const continuationUrl = continuation ? safeUrl(continuation.url) : null;
@@ -743,17 +829,28 @@ function currentConnectAuthorization(authority, host, localTunnel, localParsed, 
         || (STATIC_HOSTS.has(host) && normalizedAuthority === parsedAuthority)
       ),
   );
+  const epochRouteAuthorityAllowed = Boolean(
+    activeEpoch
+      && host === activeEpoch.routeIdentity?.host
+      && normalizedAuthority === parsedAuthority,
+  );
   const reviewAllowed = reviewState === 'open_guarded' && !terminalReason && (
     (permitAuthority && normalizedAuthority === permitAuthority)
-    || (epoch && STATIC_HOSTS.has(host) && normalizedAuthority === parsedAuthority)
+    || epochRouteAuthorityAllowed
+    || (epoch && STATIC_HOSTS.has(host) && normalizedAuthority === parsedAuthority
+      && validateReviewStaticUrl(parsed.href))
   );
-  const initialAllowed = !proxyFrozen && !firstApplicantMutation && !terminalReason && (
+  const initialAllowed = reviewState !== 'open_guarded'
+    && !proxyFrozen && !firstApplicantMutation && !terminalReason && (
     localTunnel
     || normalizedAuthority === logicalAuthority
     || (STATIC_HOSTS.has(host) && normalizedAuthority === parsedAuthority)
   );
-  const reviewExpiry = permitAuthority && normalizedAuthority === permitAuthority
-    ? reviewPermit.expires : epochExpiresAt;
+  const reviewExpiry = epochRouteAuthorityAllowed
+    ? activeEpoch.expires
+    : permitAuthority && normalizedAuthority === permitAuthority
+      ? reviewPermit.expires
+      : epochExpiresAt;
   const capabilityExpiry = continuationAllowed ? continuation.expires : (reviewAllowed ? reviewExpiry : null);
   const shapeAllowed = Boolean(parsed && parsed.pathname === '/' && !parsed.search && !parsed.hash && !parsed.username
     && !parsed.password && (!parsed.port || parsed.port === '443')
@@ -829,9 +926,11 @@ async function startProxy() {
         ));
         const refreshedAuthorization = local && localBase
           ? {
-            allowed: Boolean(internalTransportUrl && !proxyFrozen && !firstApplicantMutation && !terminalReason)
+            allowed: Boolean(reviewState !== 'open_guarded'
+              && internalTransportUrl && !proxyFrozen && !firstApplicantMutation && !terminalReason)
               || refreshedContinuationAllowed,
-            initialAllowed: Boolean(internalTransportUrl && !proxyFrozen && !firstApplicantMutation && !terminalReason),
+            initialAllowed: Boolean(reviewState !== 'open_guarded'
+              && internalTransportUrl && !proxyFrozen && !firstApplicantMutation && !terminalReason),
             reviewAllowed: false,
             continuationAllowed: refreshedContinuationAllowed,
             reviewExpiry: null,
@@ -841,9 +940,15 @@ async function startProxy() {
         const routeIdentity = !local ? routeIdentityForUrl(parsed.href) : null;
         const routeUnchanged = local
           ? true
-          : (routeIdentity && documentRouteIdentity
-            ? sameDocumentRoute(routeIdentity, documentRouteIdentity)
-            : STATIC_HOSTS.has(parsed.hostname.toLowerCase()));
+          : (authorized && reviewState === 'open_guarded'
+            ? validateAuthorizedReviewProxyUrl(
+              parsed.href,
+              method,
+              reviewPermit?.sourceFrameUrl,
+            )
+            : (routeIdentity && documentRouteIdentity
+              ? sameDocumentRoute(routeIdentity, documentRouteIdentity)
+              : STATIC_HOSTS.has(parsed.hostname.toLowerCase())));
         const permitUnexpired = refreshedContinuationAllowed
           || (!authorized && refreshedAuthorization.initialAllowed)
           || (
@@ -864,9 +969,11 @@ async function startProxy() {
         ));
         const latestAuthorization = local && localBase
           ? {
-            allowed: Boolean(internalTransportUrl && !proxyFrozen && !firstApplicantMutation && !terminalReason)
+            allowed: Boolean(reviewState !== 'open_guarded'
+              && internalTransportUrl && !proxyFrozen && !firstApplicantMutation && !terminalReason)
               || latestContinuationAllowed,
-            initialAllowed: Boolean(internalTransportUrl && !proxyFrozen && !firstApplicantMutation && !terminalReason),
+            initialAllowed: Boolean(reviewState !== 'open_guarded'
+              && internalTransportUrl && !proxyFrozen && !firstApplicantMutation && !terminalReason),
             reviewAllowed: false,
             continuationAllowed: latestContinuationAllowed,
             reviewExpiry: null,
@@ -876,9 +983,15 @@ async function startProxy() {
         const latestRoute = !local ? routeIdentityForUrl(parsed.href) : null;
         const latestRouteUnchanged = local
           ? true
-          : (latestRoute && documentRouteIdentity
-            ? sameDocumentRoute(latestRoute, documentRouteIdentity)
-            : STATIC_HOSTS.has(parsed.hostname.toLowerCase()));
+          : (authorized && reviewState === 'open_guarded'
+            ? validateAuthorizedReviewProxyUrl(
+              parsed.href,
+              method,
+              reviewPermit?.sourceFrameUrl,
+            )
+            : (latestRoute && documentRouteIdentity
+              ? sameDocumentRoute(latestRoute, documentRouteIdentity)
+              : STATIC_HOSTS.has(parsed.hostname.toLowerCase())));
         const latestPermit = latestContinuationAllowed
           || (!authorized && latestAuthorization.initialAllowed)
           || (
@@ -1105,11 +1218,19 @@ function enforceBudgets() {
   }
 }
 
-function requestTerminalCleanup(trigger, exitCode, reason = null) {
+function requestTerminalCleanup(trigger, exitCode, reason = null, { exit = true } = {}) {
   detachedCloseRequested = true;
   cleanupTrigger = cleanupTrigger || trigger;
   if (reason) revokeContinuationCapability(reason);
-  void close(trigger).then(() => process.exit(exitCode)).catch(() => process.exit(exitCode));
+  const cleanup = close(trigger);
+  if (exit) void cleanup.then(() => process.exit(exitCode)).catch(() => process.exit(exitCode));
+  return cleanup;
+}
+function handleBrowserProcessExit(code, signal, options = {}) {
+  browserExit = { code: Number.isInteger(code) ? code : null, signal: signal || null };
+  if (closeRequested) return null;
+  const reason = detachedOwner ? 'page_not_stable' : 'browser_error';
+  return requestTerminalCleanup('browser_exit', 1, reason, options);
 }
 function installBudgetWatcher() {
   clearInterval(budgetTimer);
@@ -1150,10 +1271,233 @@ function recordUnsafePageNetworkIntent(reason = 'unsafe_network_attempt') {
   revokeContinuationCapability(reason);
   setTimeout(() => { if (!cleanupStarted) void close(); }, 1000).unref?.();
 }
+function targetLifecyclePageTargetId(targetPage) {
+  const target = targetPage?.target?.();
+  return typeof target?._targetId === 'string' && target._targetId
+    ? target._targetId : null;
+}
+
+function targetLifecycleSession(connection, event) {
+  const sessionId = typeof event?.sessionId === 'string' ? event.sessionId : '';
+  if (!sessionId || typeof connection?.session !== 'function') return null;
+  return connection.session(sessionId);
+}
+
+function terminateUnexpectedTarget(guard, targetInfo, event) {
+  const targetId = typeof targetInfo?.targetId === 'string' ? targetInfo.targetId : '';
+  if (!targetId) {
+    recordUnsafePageNetworkIntent('unsafe_network_attempt');
+    return;
+  }
+  if (guard.rejectedTargetIds.has(targetId)) return;
+  guard.rejectedTargetIds.add(targetId);
+  recordUnsafePageNetworkIntent('unsafe_network_attempt');
+
+  if (targetInfo.type === 'page') {
+    // Target.closeTarget is supported for pages and is sent before the
+    // Puppeteer TargetManager sees the attached event.
+    void guard.connection.send('Target.closeTarget', { targetId }).catch(() => {});
+    return;
+  }
+
+  // Chromium does not support Target.closeTarget for worker targets.  The
+  // target is still stopped at the debugger pause, so close its own global
+  // without ever running the untrusted script. Browser cleanup below remains
+  // the last-resort termination if this command is rejected.
+  const child = targetLifecycleSession(guard.connection, event);
+  if (child && !child.detached) {
+    void child.send('Runtime.evaluate', {
+      expression: 'self.close()',
+      returnByValue: false,
+    }).catch(() => {});
+  } else {
+    void guard.connection.send('Target.closeTarget', { targetId }).catch(() => {});
+  }
+}
+
+function handleTargetLifecycleAttached(guard, event) {
+  const targetInfo = event?.targetInfo;
+  const targetId = typeof targetInfo?.targetId === 'string' ? targetInfo.targetId : '';
+  if (!targetInfo || !targetId) {
+    terminateUnexpectedTarget(guard, targetInfo, event);
+    return false;
+  }
+  if (!guard.ownedTargetIds.has(targetId)) {
+    terminateUnexpectedTarget(guard, targetInfo, event);
+    return false;
+  }
+  const ownedPage = targetInfo.type === 'page'
+    && targetId === guard.ownedPageTargetId;
+  const ownedTab = targetInfo.type === 'tab'
+    && guard.ownedTabTargetIds.has(targetId);
+  const ownedBrowser = targetInfo.type === 'browser'
+    && targetId === guard.ownedBrowserTargetId;
+  if (!ownedPage && !ownedTab && !ownedBrowser) {
+    terminateUnexpectedTarget(guard, targetInfo, event);
+    return false;
+  }
+  // Only the already-owned page, or its pre-registered tab wrapper, may be
+  // resumed. Browser targets are not executable and are never resumed here.
+  if ((ownedPage || ownedTab) && event?.waitingForDebugger === true) {
+    const child = targetLifecycleSession(guard.connection, event);
+    void child?.send('Runtime.runIfWaitingForDebugger').catch(() => {});
+  }
+  return true;
+}
+
+function wrapTargetLifecycleSession(guard, session) {
+  if (!session || session === guard.connection || guard.wrappedSessions.has(session)) return;
+  if (typeof session.emit !== 'function') throw new Error('browser_handshake_failed');
+  const hadOwnEmit = Object.prototype.hasOwnProperty.call(session, 'emit');
+  const previousEmit = session.emit;
+  session.emit = function targetLifecycleSessionEmit(eventName, event) {
+    if (!guard.closed && eventName === 'Target.attachedToTarget'
+        && !handleTargetLifecycleAttached(guard, event)) return false;
+    return previousEmit.call(this, eventName, event);
+  };
+  guard.wrappedSessions.set(session, { hadOwnEmit, previousEmit });
+}
+
+function restoreTargetLifecycleSessions(guard) {
+  for (const [session, state] of guard.wrappedSessions) {
+    if (state.hadOwnEmit) session.emit = state.previousEmit;
+    else delete session.emit;
+  }
+  guard.wrappedSessions.clear();
+}
+
+
+async function disableTargetLifecycleAutoAttach(guard) {
+  if (!guard || guard.autoAttachDisabled) return Boolean(guard);
+  try {
+    await guard.connection.send('Target.setAutoAttach', {
+      autoAttach: false,
+      waitForDebuggerOnStart: false,
+      flatten: true,
+      filter: [],
+    });
+    guard.autoAttachDisabled = true;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function teardownTargetLifecycleGuard() {
+  const guard = targetLifecycleGuard;
+  if (!guard) return;
+  await disableTargetLifecycleAutoAttach(guard);
+  guard.closed = true;
+  targetLifecycleGuard = null;
+  guard.connection.off('sessionattached', guard.sessionAttached);
+  restoreTargetLifecycleSessions(guard);
+  if (guard.connectionHadOwnEmit) guard.connection.emit = guard.previousConnectionEmit;
+  else delete guard.connection.emit;
+  await guard.browserSession.detach().catch(() => {});
+}
+
+async function installTargetLifecycleGuard(targetPage) {
+  if (targetLifecycleGuard) throw new Error('browser_handshake_failed');
+  const ownedPageTargetId = targetLifecyclePageTargetId(targetPage);
+  const browserTarget = browser?.target?.();
+  if (!ownedPageTargetId || !browserTarget?.createCDPSession) {
+    throw new Error('browser_handshake_failed');
+  }
+  let browserSession = null;
+  let guard = null;
+  try {
+    browserSession = await browserTarget.createCDPSession();
+    const connection = browserSession?.connection?.();
+    if (!connection || typeof connection.send !== 'function'
+        || typeof connection.on !== 'function' || typeof connection.off !== 'function'
+        || typeof connection.emit !== 'function' || typeof connection.session !== 'function') {
+      throw new Error('browser_handshake_failed');
+    }
+    const targetSnapshot = await connection.send('Target.getTargets');
+    const targetInfos = Array.isArray(targetSnapshot?.targetInfos)
+      ? targetSnapshot.targetInfos : [];
+    const ownedBrowserTargetId = typeof browserTarget._targetId === 'string'
+      ? browserTarget._targetId : null;
+    const tabInfos = targetInfos.filter(
+      info => info?.type === 'tab' && typeof info.targetId === 'string',
+    );
+    if (tabInfos.length !== 1
+        || tabInfos[0].attached !== true
+        || tabInfos[0].url !== targetPage.url()) {
+      throw new Error('browser_handshake_failed');
+    }
+    const ownedTabTargetIds = new Set([tabInfos[0].targetId]);
+    if (!ownedBrowserTargetId || browserTarget.type?.() !== 'browser') {
+      throw new Error('browser_handshake_failed');
+    }
+    const ownedTargetIds = new Set([
+      ownedBrowserTargetId,
+      ...ownedTabTargetIds,
+      ownedPageTargetId,
+    ]);
+    guard = {
+      browserSession,
+      connection,
+      ownedBrowserTargetId,
+      ownedTabTargetIds,
+      ownedTargetIds,
+      ownedPageTargetId,
+      closed: false,
+      autoAttachDisabled: false,
+      rejectedTargetIds: new Set(),
+      wrappedSessions: new Map(),
+      connectionHadOwnEmit: Object.prototype.hasOwnProperty.call(connection, 'emit'),
+      previousConnectionEmit: connection.emit,
+      sessionAttached: null,
+    };
+    targetLifecycleGuard = guard;
+    guard.sessionAttached = session => {
+      wrapTargetLifecycleSession(guard, session);
+      wrapTargetLifecycleSession(guard, session?.parentSession?.());
+    };
+    connection.on('sessionattached', guard.sessionAttached);
+    const ownedSession = targetPage.target?.()._session?.();
+    wrapTargetLifecycleSession(guard, ownedSession);
+    const previousConnectionEmit = connection.emit;
+    connection.emit = function targetLifecycleConnectionEmit(eventName, event) {
+      if (!guard.closed && eventName === 'Target.attachedToTarget'
+          && !handleTargetLifecycleAttached(guard, event)) return false;
+      return previousConnectionEmit.call(this, eventName, event);
+    };
+    await connection.send('Target.setAutoAttach', {
+      autoAttach: true,
+      waitForDebuggerOnStart: true,
+      flatten: true,
+      // Tab targets own their page children. Exclude the tab wrapper so this
+      // allowlist catches pages and every other target type without Chrome's
+      // "tab and page simultaneously" protocol rejection.
+      filter: [{ type: 'tab', exclude: true }, {}],
+    });
+    guard.installed = true;
+  } catch (error) {
+    if (guard) {
+      await disableTargetLifecycleAutoAttach(guard);
+      guard.closed = true;
+      guard.connection.off('sessionattached', guard.sessionAttached);
+      restoreTargetLifecycleSessions(guard);
+      if (guard.connectionHadOwnEmit) guard.connection.emit = guard.previousConnectionEmit;
+      else delete guard.connection.emit;
+      targetLifecycleGuard = null;
+    }
+    await browserSession?.detach?.().catch(() => {});
+    const normalized = new Error('browser_handshake_failed');
+    normalized.cause = error;
+    throw normalized;
+  }
+}
 
 async function installPageNetworkIntentGuard(targetPage) {
   const client = await targetPage.createCDPSession();
   await client.send('Network.enable');
+  await client.send('Network.setBypassServiceWorker', { bypass: true });
+  await client.send('Network.setBlockedURLs', {
+    urls: ['ws://*', 'wss://*'],
+  });
   await client.send('Page.enable');
   const frameTree = await client.send('Page.getFrameTree').catch(() => null);
   let guardedMainFrameId = typeof frameTree?.frameTree?.frame?.id === 'string'
@@ -1237,12 +1581,14 @@ async function installPageNetworkIntentGuard(targetPage) {
     permit.committed = true;
   });
   client.on('Page.windowOpen', () => {
-    if (firstApplicantMutation && reviewState !== 'open_guarded') {
+    if (firstApplicantMutation || reviewState === 'open_guarded') {
       recordUnsafePageNetworkIntent('unsafe_network_attempt');
     }
   });
   client.on('Network.webSocketCreated', () => {
-    if (firstApplicantMutation && reviewState !== 'open_guarded') recordUnsafePageNetworkIntent();
+    if (firstApplicantMutation || reviewState === 'open_guarded') {
+      recordUnsafePageNetworkIntent();
+    }
   });
 }
 
@@ -1289,34 +1635,70 @@ async function launch(command = {}) {
   }
   const browserProcess = browser?.process?.() || null;
   browserProcess?.once('exit', (code, signal) => {
-    browserExit = { code: Number.isInteger(code) ? code : null, signal: signal || null };
-    if (detachedOwner && !closeRequested) {
-      try { manifestWrite('open_guarded', { detached: true, browser_exit: browserExit }); } catch {}
-    }
+    handleBrowserProcessExit(code, signal);
   });
   if (!browserProcess?.pid) throw new Error('browser_process_missing');
   const pages = await browser.pages();
   page = pages[0] || await browser.newPage();
   if (!launchHeadless) await page.bringToFront();
   browser.on('targetcreated', target => {
-    if (target.type() !== 'page') {
-      requestTerminalCleanup('unexpected_target', 1, 'unexpected_target');
-      return;
+    const targetId = typeof target?._targetId === 'string' ? target._targetId : '';
+    const owned = Boolean(
+      targetLifecycleGuard?.ownedTargetIds.has(targetId),
+    );
+    if (owned) return;
+    recordUnsafePageNetworkIntent('unsafe_network_attempt');
+    if (target.type() === 'page') {
+      target.page().then(child => {
+        if (!child || child === page) return;
+        child.close().catch(() => {});
+      }).catch(() => {});
+    } else {
+      const targetSession = target?._session?.();
+      void targetSession?.send('Runtime.evaluate', {
+        expression: 'self.close()',
+        returnByValue: false,
+      }).catch(() => {});
     }
-    if (firstApplicantMutation && reviewState !== 'open_guarded') recordUnsafePageNetworkIntent();
-    target.page().then(child => {
-      if (!child || child === page) return;
-      child.close().catch(() => {});
-    }).catch(() => {});
   });
+  try {
+    await installTargetLifecycleGuard(page);
+  } catch (error) {
+    revokeContinuationCapability('browser_handshake_failed');
+    await close('target_lifecycle_guard').catch(() => {});
+    throw error;
+  }
   browser.on('disconnected', () => {
-    if (!closeRequested) requestTerminalCleanup('browser_disconnected', 1, 'browser_error');
+    if (!closeRequested) requestTerminalCleanup(
+      'browser_disconnected',
+      1,
+      detachedOwner ? 'page_not_stable' : 'browser_error',
+    );
   });
   page.once('close', () => {
-    if (!closeRequested) requestTerminalCleanup('page_close', 0);
+    if (!closeRequested) requestTerminalCleanup(
+      'page_close',
+      0,
+      detachedOwner ? 'page_not_stable' : 'browser_error',
+    );
   });
   page.on('framenavigated', frame => {
-    if (currentGeneration && reviewState !== 'open_guarded') invalidateGeneration('navigation_invalidated');
+    reviewGestureInstalledPage = null;
+    if (reviewState === 'open_guarded'
+        && reviewEpoch
+        && reviewEpoch.frame === frame
+        && reviewEpoch.expires > Date.now()
+        && (
+          safeUrl(frame.url())?.href === reviewEpoch.requestUrl
+          || sameBoardJobUrl(
+            frame.url(),
+            reviewEpoch.routeIdentity,
+            { confirmation: true },
+          )
+        )) {
+      reviewEpoch.committed = true;
+      reviewEpoch.committedUrl = frame.url();
+    }
   });
   await installPageNetworkIntentGuard(page);
   await installRequestGuards(page);
@@ -1417,13 +1799,16 @@ async function installRequestGuards(targetPage) {
       if (!reviewAllowed && reviewEpoch && reviewEpoch.expires > Date.now()) {
         if (navigation) {
           reviewAllowed = method === 'GET' && redirectChain.length > 0 && !redirectExceeded
+            && request.frame?.() === reviewEpoch.frame
             && sameBoardJobUrl(url, reviewEpoch.routeIdentity, { confirmation: /\/confirmation(?:[/?]|$)/.test(parsed?.pathname || '') });
           if (reviewAllowed) reviewEpoch.redirects = Math.max(reviewEpoch.redirects, redirectChain.length);
         } else {
-          reviewAllowed = ['GET', 'HEAD'].includes(method)
+          reviewAllowed = reviewEpoch.committed === true
+            && request.frame?.() === reviewEpoch.frame
+            && ['GET', 'HEAD'].includes(method)
             && STATIC_TYPES.has(type)
             && !redirectExceeded
-            && validateRequestUrl(url, { staticRequest: true })
+            && validateReviewStaticUrl(url)
             && reviewEpoch.staticRequests < MAX_STATIC_REQUESTS;
         }
       }
@@ -1432,6 +1817,20 @@ async function installRequestGuards(targetPage) {
     const reviewNavigationDenied = navigation && reviewState === 'open_guarded'
       && !reviewAllowed && !continuationNavigationAllowed;
     if (navigation && reviewAllowed && currentGeneration) invalidateGeneration('navigation_invalidated');
+    if (reviewSelfTestCapture && reviewAllowed) {
+      reviewSelfTestCapture.resolve({
+        url,
+        method,
+        type,
+        frame: request.frame?.(),
+        navigation,
+      });
+      reviewSelfTestCapture = null;
+      networkCounters.denied += 1;
+      await request.abort('blockedbyclient').catch(() => {});
+      markComplete(request);
+      return;
+    }
     const initialLocal = Boolean(local && internalTransportUrl && validateRequestUrl(url, { local: true }));
     const productionAllowed = type === 'document'
       ? method === 'GET' && !reviewNavigationDenied && documentAllowed && validateRequestUrl(url, { initial: true })
@@ -1445,10 +1844,12 @@ async function installRequestGuards(targetPage) {
       && !reviewNavigationDenied
       && (transportAllowed || productionAllowed || reviewAllowed || continuationAllowed)
       && (type === 'document' || STATIC_TYPES.has(type) || type === 'other');
-    if (firstApplicantMutation && !continuationAllowed && !reviewAllowed) allowed = false;
+    if ((firstApplicantMutation || reviewState === 'open_guarded')
+        && !continuationAllowed && !reviewAllowed) allowed = false;
     if (!allowed) {
       networkCounters.denied += 1;
-      if (firstApplicantMutation && !continuationAllowed && !reviewAllowed && !terminalReason) {
+      if ((firstApplicantMutation || reviewState === 'open_guarded')
+          && !continuationAllowed && !reviewAllowed && !terminalReason) {
         recordUnsafePageNetworkIntent('unsafe_network_attempt');
         request.abort('blockedbyclient').catch(() => {});
       } else request.abort('blockedbyclient').catch(() => {});
@@ -1464,7 +1865,9 @@ async function installRequestGuards(targetPage) {
         markComplete(request);
         return;
       }
-      if (reviewEpoch) reviewEpoch.staticRequests = staticRequests;
+      if (reviewEpoch && reviewAllowed && reviewEpoch.committed === true) {
+        reviewEpoch.staticRequests += 1;
+      }
       if (STATIC_TYPES.has(type) && !firstApplicantMutation && parsed && observedStaticUrls.size < MAX_STATIC_REQUESTS) {
         observedStaticUrls.add(parsed.href);
       }
@@ -1472,7 +1875,9 @@ async function installRequestGuards(targetPage) {
     if (reviewState === 'open_guarded' && reviewAllowed && parsed) authorizeProxyRequest(url, method);
     // The local fixture is a capability substitution, but it still passed all
     if (internalTransportUrl && safeUrl(internalTransportUrl)?.protocol === 'http:' && (initialLocal || productionAllowed || continuationAllowed)
-        && ['GET', 'HEAD'].includes(method) && (!firstApplicantMutation || reviewAllowed || continuationAllowed)) {
+        && ['GET', 'HEAD'].includes(method)
+        && (!(firstApplicantMutation || reviewState === 'open_guarded')
+          || reviewAllowed || continuationAllowed)) {
       try {
         const internal = await fetchInternalDocument(url, method);
         staticBytes += internal.body.length;
@@ -1608,7 +2013,7 @@ function descriptorClassification(info) {
   if (aggregate > Number(SAFETY_POLICY.caps?.max_descriptor_aggregate_bytes || 8192)) return { overflow: true, sensitive: true };
   if (options.length > Number(SAFETY_POLICY.caps?.max_options || 200)) return { overflow: true, sensitive: true };
   let optionBytes = 0;
-  let sensitive = false;
+  let sensitive = SENSITIVE_FIELD_KINDS.has(String(info?.kind || '').toLowerCase());
   for (const option of options) {
     const value = String(option?.value ?? '');
     const label = String(option?.label ?? '');
@@ -1635,6 +2040,52 @@ function actionIdentityKey(frameUrl, info) {
   const selectedTuple = info.kind === 'select' && info.multiple ? JSON.stringify({ value: info.value || [], indexes: selectedIndexes }) : '';
   const scalarSelected = info.kind === 'select' && !info.multiple ? JSON.stringify({ value: String(info.value || ''), indexes: selectedIndexes }) : '';
   return hash([stable, selectedTuple, scalarSelected].join('\u001f')).slice(0, 24);
+}
+const TARGET_STATE_SCALAR_KEYS = Object.freeze([
+  'kind', 'tag', 'name', 'label', 'groupId', 'optionValue', 'selector',
+  'formIdentity', 'formToken', 'required', 'visible', 'enabled', 'readonly',
+  'isField', 'isButton', 'isNativeOfflineButton', 'isNativeContinuationButton',
+  'isAnchor', 'isFile', 'isCustomElement', 'multiple', 'optionsAmbiguous',
+  'willValidate', 'valid', 'buttonValue', 'buttonType', 'text', 'target',
+  'download', 'hrefUrl', 'hrefAttribute', 'formActionUrl', 'effectiveMethod',
+  'getFormRouteSafe', 'documentOrigin', 'finalLike', 'minLength', 'maxLength',
+  'pattern', 'minValue', 'maxValue', 'step',
+]);
+const TARGET_OPTION_STATE_KEYS = Object.freeze([
+  'value', 'label', 'enabled', 'nativeSelected', 'nativeLabel', 'nativeText',
+]);
+
+function sameObservedValue(left, right) {
+  if (Array.isArray(left) || Array.isArray(right)) return arraysEqual(left, right);
+  return Object.is(left, right);
+}
+function observedOptionsMatch(observed, live) {
+  const left = Array.isArray(observed?.options) ? observed.options : null;
+  const right = Array.isArray(live?.options) ? live.options : null;
+  if (!left || !right || left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index += 1) {
+    const before = left[index]; const current = right[index];
+    for (const key of TARGET_OPTION_STATE_KEYS) {
+      if (!Object.is(before?.[key], current?.[key])) return false;
+    }
+  }
+  return true;
+}
+function observedTargetStateMatches(observed, live) {
+  if (!observed || !live) return false;
+  for (const key of TARGET_STATE_SCALAR_KEYS) {
+    if (!Object.is(observed[key], live[key])) return false;
+  }
+  if (!Array.isArray(observed.descriptors) || !arraysEqual(observed.descriptors, live.descriptors)) return false;
+  if (!sameObservedValue(observed.value, live.value)
+      || !Object.is(observed.checked, live.checked)
+      || !arraysEqual(observed.validityFlags, live.validityFlags)
+      || !arraysEqual(observed.accept, live.accept)) return false;
+  if (!observedOptionsMatch(observed, live)) return false;
+  if (observed.isFile
+      && (!Object.is(observed.fileCount, live.fileCount)
+        || !arraysEqual(observed.fileBasenames, live.fileBasenames))) return false;
+  return true;
 }
 function reviewClickKey(frameUrl, info) {
   const origin = safeUrl(frameUrl)?.origin || frameUrl;
@@ -1752,7 +2203,13 @@ function atomicGuardedProgressAction(el, params) {
     .map(value => String(value).trim()).filter(Boolean);
   const descriptorBytes = descriptors.reduce((total, value) => total + value.length, 0);
   if (descriptors.length > 256 || descriptorBytes > 32768) return 'observation_too_large';
-  const target = attr('target');
+  const target = anchor
+    ? attr('target')
+    : form
+      ? (hasAttribute.call(el, 'formtarget')
+        ? attr('formtarget')
+        : getAttribute.call(form, 'target'))
+      : attr('target');
   const download = Boolean(hasAttribute.call(el, 'download'));
   const hrefAttribute = anchor ? attr('href') : null;
   let hrefUrl = null;
@@ -1764,7 +2221,14 @@ function atomicGuardedProgressAction(el, params) {
     : null;
   const formIndex = form ? Array.from(el.ownerDocument.forms || []).indexOf(form) : -1;
   const formIdentity = form
-    ? [form.id || '', form.getAttribute('name') || '', formActionUrl || '', effectiveMethod || '', formIndex].join('\u001f')
+    ? [
+      form.id || '',
+      getAttribute.call(form, 'name') || '',
+      formActionUrl || '',
+      effectiveMethod || '',
+      target || '',
+      formIndex,
+    ].join('\u001f')
     : null;
   const formRegistry = globalThis.__JOBS_ASSISTANT_FORM_REGISTRY__
     || (globalThis.__JOBS_ASSISTANT_FORM_REGISTRY__ = { tokens: new WeakMap(), next: 1 });
@@ -1861,29 +2325,124 @@ function atomicGuardedProgressAction(el, params) {
   return null;
 }
 async function consumeRealmReviewPermit(request) {
-  if (!page || request.frame() !== page.mainFrame() || !request.isNavigationRequest()) return false;
-  let permit = null;
-  try { permit = await page.mainFrame().isolatedRealm().evaluate(() => globalThis.__JOBS_ASSISTANT_REVIEW_PERMIT__ || null); }
-  catch { return false; }
-  if (!permit || permit.trusted !== true || permit.detail === 0 || permit.expires < Date.now()) return false;
-  const key = hash([String(permit.origin || ''), String(permit.kind || ''), String(permit.identity || ''), String(permit.text || '').replace(/\s+/g, ' ').trim()].join('\u001f')).slice(0, 24);
-  const ledger = reviewLedger.get(key);
-  if (!ledger || ledger.frameId !== 'frame-0' || ledger.href !== (permit.href || null)
-      || ledger.action !== (permit.action || null) || ledger.method !== String(permit.method || 'GET').toUpperCase()) return false;
-  const requestMethod = String(request.method() || 'GET').toUpperCase();
-  const expected = ledger.action || ledger.href;
-  const expectedUrl = safeUrl(expected); const requestUrl = safeUrl(request.url());
-  if (requestMethod !== ledger.method || !expectedUrl || !requestUrl
-      || requestUrl.href !== expectedUrl.href
-      || isFinalLike(requestUrl.pathname) || [...requestUrl.searchParams.values()].some(isFinalLike)
-      || !validateFormAction(expected, requestMethod, page.url())) return false;
-  // The permit is a one-use capability for this exact document URL, including
-  // query and method. Proxy authorization below is separately consumed once.
-  reviewPermit = { url: requestUrl.href, method: requestMethod, expires: Date.now() + 1000, proxyConsumed: false };
-  reviewEpoch = { routeIdentity: documentRouteIdentity, expires: Date.now() + 10000, redirects: 0, staticRequests: 0 };
-  authorizeProxyRequest(request.url(), requestMethod);
-  try { await page.mainFrame().isolatedRealm().evaluate(() => { globalThis.__JOBS_ASSISTANT_REVIEW_PERMIT__ = null; }); } catch {}
-  return true;
+  let release;
+  const prior = reviewPermitTail;
+  reviewPermitTail = new Promise(resolve => { release = resolve; });
+  await prior;
+  try {
+    if (!page
+        || typeof request.isNavigationRequest !== 'function'
+        || !request.isNavigationRequest()) return false;
+    const requestFrame = request.frame?.();
+    if (!requestFrame || !page.frames().includes(requestFrame)) return false;
+    let permit = null;
+    try {
+      permit = await requestFrame.isolatedRealm().evaluate(
+        () => globalThis.__JOBS_ASSISTANT_REVIEW_PERMIT__ || null,
+      );
+    } catch {
+      return false;
+    }
+    if (!permit || permit.trusted !== true || permit.detail === 0
+        || permit.expires < Date.now()
+        || typeof permit.nonce !== 'string'
+        || !/^[0-9a-f-]{36}$/.test(permit.nonce)
+        || permit.nonce === consumedReviewNonce) return false;
+    const key = hash([
+      String(permit.origin || ''),
+      String(permit.kind || ''),
+      String(permit.identity || ''),
+      String(permit.text || '').replace(/\s+/g, ' ').trim(),
+    ].join('\u001f')).slice(0, 24);
+    const ledger = reviewLedger.get(key);
+    const currentChain = frameAncestry(requestFrame);
+    const observedChain = Array.isArray(ledger?.frameChain) ? ledger.frameChain : [];
+    const ancestryMatches = currentChain.length === observedChain.length
+      && currentChain.every(
+        (item, index) => item.frame === observedChain[index].frame
+          && item.url === observedChain[index].url,
+      );
+    if (!ledger || ledger.final !== true || ledger.frame !== requestFrame
+        || ledger.generation !== currentGeneration
+        || permit.generation !== currentGeneration
+        || !ancestryMatches
+        || ledger.href !== (permit.href || null)
+        || ledger.action !== (permit.baseAction || null)
+        || ledger.formToken !== (permit.formToken || null)
+        || ledger.method !== String(permit.method || 'GET').toUpperCase()
+        || !sameDocumentRoute(ledger.routeIdentity, documentRouteIdentity)) return false;
+    const requestMethod = String(request.method() || 'GET').toUpperCase();
+    const expected = permit.action || permit.href;
+    const expectedUrl = safeUrl(expected); const requestUrl = safeUrl(request.url());
+    const routeBoundGetForm = Boolean(
+      expectedUrl
+        && requestUrl
+        &&
+      ledger.formToken
+        && requestMethod === 'GET'
+        && requestUrl.origin === expectedUrl.origin
+        && requestUrl.pathname === expectedUrl.pathname,
+    );
+    if (requestMethod !== ledger.method || !expectedUrl || !requestUrl
+        || (
+          requestUrl.href !== expectedUrl.href
+          && !routeBoundGetForm
+        )
+        || !validateHumanReviewAction(ledger.action, requestMethod, ledger.frameUrl)
+        || !validateHumanReviewAction(requestUrl.href, requestMethod, ledger.frameUrl)) return false;
+    let atomicallyConsumed = false;
+    try {
+      atomicallyConsumed = await requestFrame.isolatedRealm().evaluate(
+        candidate => {
+          const live = globalThis.__JOBS_ASSISTANT_REVIEW_PERMIT__;
+          if (!live || live.nonce !== candidate.nonce
+              || live.action !== candidate.action
+              || live.method !== candidate.method
+              || live.generation !== candidate.generation) return false;
+          globalThis.__JOBS_ASSISTANT_REVIEW_PERMIT__ = null;
+          return true;
+        },
+        {
+          nonce: permit.nonce,
+          action: permit.action,
+          method: permit.method,
+          generation: permit.generation,
+        },
+      );
+    } catch {
+      return false;
+    }
+    if (!atomicallyConsumed) return false;
+    consumedReviewNonce = permit.nonce;
+    // This is a one-use capability for one exact browser request, including
+    // method and query. Proxy authorization below is separately consumed once.
+    reviewPermit = {
+      url: requestUrl.href,
+      method: requestMethod,
+      sourceFrameUrl: ledger.frameUrl,
+      expires: Date.now() + 1000,
+      proxyConsumed: false,
+    };
+    reviewEpoch = {
+      routeIdentity: documentRouteIdentity,
+      requestUrl: requestUrl.href,
+      frame: requestFrame,
+      committed: false,
+      committedUrl: null,
+      expires: Date.now() + 10000,
+      redirects: 0,
+      staticRequests: 0,
+    };
+    authorizeProxyRequest(request.url(), requestMethod);
+    try {
+      await requestFrame.isolatedRealm().evaluate(
+        () => { globalThis.__JOBS_ASSISTANT_REVIEW_PERMIT__ = null; },
+      );
+    } catch {}
+    return true;
+  } finally {
+    release();
+  }
 }
 
 async function safeElementInfo(handle) {
@@ -1980,7 +2539,7 @@ async function safeElementInfo(handle) {
         scalarValue = String(rawSelectValue ?? '');
       }
     } else {
-      scalarValue = String(el.value ?? '');
+      scalarValue = String(nativeValue ?? '');
     }
     const buttonValue = (button || input) && ['submit', 'button', 'reset', 'image'].includes(type)
       ? String(nativeValue ?? '') : '';
@@ -2019,18 +2578,88 @@ async function safeElementInfo(handle) {
     const optionsAmbiguous = select && allOptionValues.length !== new Set(allOptionValues).size;
     const label = String(el.getAttribute('aria-label') || labels.join(' ').replace(/\s+/g, ' ').trim() || el.getAttribute('placeholder') || el.getAttribute('name') || el.id || '').slice(0, 2048);
     const name = el.getAttribute('name') || el.id || null;
-    const action = form ? (el.hasAttribute('formaction') ? el.formAction : form.action) : null;
-    const method = form ? String(el.hasAttribute('formmethod') ? el.formMethod : form.method || 'get').toLowerCase() : null;
+    const nativeAttribute = attributeName => typeof nativeGetAttribute === 'function'
+      ? nativeGetAttribute.call(el, attributeName) : null;
+    const nativeFormAttribute = attributeName => form && typeof nativeGetAttribute === 'function'
+      ? nativeGetAttribute.call(form, attributeName) : null;
+    const hasOwnFormAction = form && typeof nativeHasAttribute === 'function'
+      ? nativeHasAttribute.call(el, 'formaction') : false;
+    const hasOwnFormMethod = form && typeof nativeHasAttribute === 'function'
+      ? nativeHasAttribute.call(el, 'formmethod') : false;
+    const hasOwnFormTarget = form && typeof nativeHasAttribute === 'function'
+      ? nativeHasAttribute.call(el, 'formtarget') : false;
+    const action = form ? (hasOwnFormAction ? el.formAction : form.action) : null;
+    const method = form
+      ? String(hasOwnFormMethod ? el.formMethod : form.method || 'get').toLowerCase()
+      : null;
+    const getFormRouteSafe = (() => {
+      if (!form || method !== 'get'
+          || typeof nativeGetAttribute !== 'function'
+          || typeof nativeMatches !== 'function') return false;
+      try {
+        if (new URL(String(action || ''), el.ownerDocument.location.href).pathname
+            === '/embed/job_app') {
+          return false;
+        }
+      } catch {
+        return false;
+      }
+      const elementsGetter = Object.getOwnPropertyDescriptor(
+        HTMLFormElement.prototype,
+        'elements',
+      )?.get;
+      if (typeof elementsGetter !== 'function') return false;
+      try {
+        let ghSourceControls = 0;
+        for (const control of Array.from(elementsGetter.call(form) || [])) {
+          if (nativeMatches.call(control, ':disabled')) continue;
+          const controlTag = String(control.localName || '').toLowerCase();
+          const controlType = controlTag === 'button'
+            ? String(nativeGetAttribute.call(control, 'type') || 'submit').toLowerCase()
+            : controlTag === 'input'
+              ? String(nativeGetAttribute.call(control, 'type') || 'text').toLowerCase()
+              : controlTag;
+          const controlName = nativeGetAttribute.call(control, 'name') || '';
+          if (nativeGetAttribute.call(control, 'dirname') !== null) return false;
+          if (control === el) {
+            if (controlName || (controlTag === 'input' && controlType === 'image')) {
+              return false;
+            }
+            continue;
+          }
+          if (controlTag === 'button'
+              || (controlTag === 'input'
+                && ['submit', 'button', 'reset', 'image'].includes(controlType))) {
+            continue;
+          }
+          if (controlTag === 'input' && controlType === 'file') return false;
+          if (!controlName) continue;
+          if (controlTag === 'input'
+              && controlType === 'hidden'
+              && controlName === 'gh_src'
+              && ++ghSourceControls === 1) {
+            continue;
+          }
+          return false;
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+    const targetAttribute = anchor
+      ? nativeAttribute('target')
+      : form
+        ? (hasOwnFormTarget ? nativeAttribute('formtarget') : nativeFormAttribute('target'))
+        : nativeAttribute('target');
     const formIndex = form ? Array.from(el.ownerDocument.forms || []).indexOf(form) : -1;
-    const formIdentity = form ? [form.id || '', form.getAttribute('name') || '', action || '', method || '', formIndex].join('\u001f') : null;
+    const formIdentity = form ? [form.id || '', form.getAttribute('name') || '', action || '', method || '', targetAttribute || '', formIndex].join('\u001f') : null;
     const formRegistry = globalThis.__JOBS_ASSISTANT_FORM_REGISTRY__ || (globalThis.__JOBS_ASSISTANT_FORM_REGISTRY__ = { tokens: new WeakMap(), next: 1 });
     const formToken = form ? (() => {
       let token = formRegistry.tokens.get(form);
       if (!token) { token = `form-${formRegistry.next++}`; formRegistry.tokens.set(form, token); }
       return token;
     })() : null;
-    const nativeAttribute = name => typeof nativeGetAttribute === 'function' ? nativeGetAttribute.call(el, name) : null;
-    const targetAttribute = nativeAttribute('target');
     const hrefAttribute = anchor ? nativeAttribute('href') : null;
     const hrefUrl = anchor && typeof nativeAnchorHref === 'function' ? String(nativeAnchorHref.call(el) || '') : null;
     const downloadAttribute = anchor && typeof nativeHasAttribute === 'function' ? Boolean(nativeHasAttribute.call(el, 'download')) : false;
@@ -2075,9 +2704,9 @@ async function safeElementInfo(handle) {
       prototypePoisoned: valueAccessPoisoned || checkedAccessPoisoned || selectAccessPoisoned || !effectiveDisabledState.known || !accessibilityState.known,
       kind: textarea ? 'textarea' : select ? 'select' : type, name, label, groupId, formIdentity, formToken, optionValue: input && ['checkbox', 'radio'].includes(type) ? String(nativeValue || '') : null, descriptors, selector: el.id ? `#${CSS.escape(el.id)}` : name ? `${tag}[name="${String(name).replaceAll('"', '\\"')}"]` : tag,
       required: select ? nativeSelectRequired : Boolean(el.required || el.getAttribute('aria-required') === 'true'), visible: Boolean(accessibilityState.known && !accessibilityState.hidden && rect.width && rect.height && (!style || (style.visibility !== 'hidden' && style.display !== 'none'))), enabled: Boolean(effectiveDisabledState.known && accessibilityState.known && !effectiveDisabledState.disabled && !accessibilityState.disabled), readonly: Boolean(el.readOnly),
-      value: scalarValue, multiple: select ? nativeMultiple : false, optionsAmbiguous, buttonValue, willValidate: Boolean(el.willValidate), valid: Boolean(el.validity ? el.validity.valid : true),
+      value: scalarValue, checked: input && ['checkbox', 'radio'].includes(type) ? Boolean(nativeChecked) : null, multiple: select ? nativeMultiple : false, optionsAmbiguous, buttonValue, willValidate: Boolean(el.willValidate), valid: Boolean(el.validity ? el.validity.valid : true),
       validityFlags: el.validity ? ['valueMissing', 'typeMismatch', 'patternMismatch', 'tooLong', 'tooShort', 'rangeUnderflow', 'rangeOverflow', 'stepMismatch', 'badInput', 'customError'].filter(flag => Boolean(el.validity[flag])) : [],
-      formActionUrl: action, effectiveMethod: method, documentOrigin: el.ownerDocument?.location?.origin || null, text: text.slice(0, 2048), buttonType: input ? type : (button ? type : (anchor ? 'anchor' : null)), target: targetAttribute, download: downloadAttribute, hrefUrl, hrefAttribute, finalLike,
+      formActionUrl: action, effectiveMethod: method, getFormRouteSafe, documentOrigin: el.ownerDocument?.location?.origin || null, text: text.slice(0, 2048), buttonType: input ? type : (button ? type : (anchor ? 'anchor' : null)), target: targetAttribute, download: downloadAttribute, hrefUrl, hrefAttribute, finalLike,
       fileCount: input && type === 'file' && el.files ? el.files.length : 0, fileBasenames: input && type === 'file' && el.files ? Array.from(el.files).map(file => file.name) : [], accept: input && type === 'file' ? String(el.accept || '').split(',').map(value => value.trim()).filter(Boolean) : [],
       minLength: Number.isInteger(el.minLength) && el.minLength >= 0 ? el.minLength : null, maxLength: Number.isInteger(el.maxLength) && el.maxLength >= 0 ? el.maxLength : null, pattern: el.pattern || null, minValue: el.min || null, maxValue: el.max || null, step: el.step || null, options,
     };
@@ -2179,6 +2808,8 @@ function invalidateGeneration(reason = 'stale_generation') {
   const stale = handleCache;
   handleCache = new Map();
   reviewLedger = new Map();
+  observedFinalTargetCount = 0;
+  handoffFinalTargetCount = 0;
   for (const entry of stale.values()) void entry.handle.dispose().catch(() => {});
 }
 
@@ -2264,8 +2895,8 @@ async function scanVisibleBlockers(frame) {
       const classify = text => {
         const value = String(text || '').toLowerCase();
         if (/\b(?:captcha|recaptcha|hcaptcha)\b|i['’]?m\s+not\s+a\s+robot/.test(value)) add('captcha', text);
-        else if (/\b(?:authentication|required\s+to\s+log\s+in|sign\s+in|log\s+in|session\s+expired)\b/.test(value)) add('authentication_required', text);
-        else if (/\b(?:assessment|coding\s+challenge|skills?\s+test|test\s+invitation)\b/.test(value)) add('assessment_required', text);
+        else if (/\b(?:authentication|required\s+to\s+(?:log[-\s]+in|login)|sign[-\s]+in|signin|log[-\s]+in|login|session\s+expired|create(?:ing)?(?:\s+an?)?\s+account|account[-\s]+(?:creation|verification)|verify(?:\s+your)?\s+account|one[-\s]+time\s+password|otp|mfa|two[-\s]+factor(?:\s+authentication)?|multi[-\s]+factor(?:\s+authentication)?|passcode|password(?:\s+(?:entry|field|required))?|verification[-\s]+code|email[-\s]+verification|verify[-\s]+(?:your[-\s]+)?email)\b/.test(value)) add('authentication_required', text);
+        else if (/\b(?:assessment(?:s)?|coding[-\s]+(?:challenge|assessment)|personality[-\s]+assessment(?:s)?|aptitude[-\s]+assessment(?:s)?|cognitive[-\s]+assessment(?:s)?|behavioral[-\s]+assessment(?:s)?|behavioural[-\s]+assessment(?:s)?|work[-\s]?style[-\s]+assessment(?:s)?|skills?[-\s]+test|test[-\s]+invitation)\b/.test(value)) add('assessment_required', text);
       };
       classify(String(root.innerText || '').slice(0, 8192));
       const errorNodes = document.querySelectorAll('[role="alert"], [aria-live="assertive"], [aria-invalid="true"], .error, .errors, .field-error, .validation-error, [data-error]');
@@ -2290,6 +2921,8 @@ async function observe() {
   for (const entry of handleCache.values()) await entry.handle.dispose().catch(() => {});
   handleCache = new Map();
   reviewLedger = new Map();
+  observedFinalTargetCount = 0;
+  handoffFinalTargetCount = 0;
   observationGeneration += 1; currentGeneration = `obs-${observationGeneration}`; generationConsumed = false;
   generationBlocked = false;
   generationBlocker = null;
@@ -2362,7 +2995,10 @@ async function observe() {
         const targetId = `${currentGeneration}:${frameId}:button-${buttonIndex++}`;
         info.clickKey = clickKey; info.identity = identity; info.collisionCount = seen.get(identity) || 0;
         handleCache.set(targetId, { handle, info, frame, frameUrl: frame.url(), frameChain: ancestry, generation: currentGeneration, kind: 'button' });
-        if (info.finalLike) observation.final_submit_target_ids.push(targetId);
+        if (info.finalLike) {
+          observation.final_submit_target_ids.push(targetId);
+          observedFinalTargetCount += 1;
+        }
       }
     }
   }
@@ -2380,15 +3016,53 @@ async function observe() {
       const button = toObservedButton(targetId, targetId.split(':')[1] || '', entry.frameUrl, entry.info, entry.info.clickKey, Boolean(entry.info.sensitive));
       button.collision_count = count;
       observation.buttons.push(button);
-      if (count === 1 && entry.info.clickKey && (entry.info.isAnchor || entry.info.tag === 'button')
-          && validateFormAction(entry.info.formActionUrl || entry.info.hrefUrl, String(entry.info.effectiveMethod || 'get').toUpperCase(), entry.frameUrl)) {
+      const buttonType = String(entry.info.buttonType || '').toLowerCase();
+      const nativeFormSubmit = (
+        entry.info.tag === 'button' && buttonType === 'submit'
+      ) || (
+        entry.info.tag === 'input' && ['submit', 'image'].includes(buttonType)
+      );
+      const nativeAnchor = Boolean(
+        entry.info.isAnchor
+          && entry.info.hrefUrl
+          && !entry.info.download
+      );
+      const effectiveTarget = String(entry.info.target || '').trim().toLowerCase();
+      const actionUrl = nativeAnchor
+        ? entry.info.hrefUrl
+        : nativeFormSubmit
+          ? entry.info.formActionUrl
+          : null;
+      const method = nativeAnchor
+        ? 'GET'
+        : String(entry.info.effectiveMethod || '').toUpperCase();
+      const handoffCapable = count === 1 && entry.info.clickKey
+        && entry.info.visible && entry.info.enabled
+        && (!effectiveTarget || effectiveTarget === '_self')
+        && actionUrl
+        && (
+          nativeAnchor
+          || method === 'POST'
+          || (method === 'GET' && entry.info.getFormRouteSafe)
+        )
+        && validateHumanReviewAction(actionUrl, method, entry.frameUrl);
+      if (handoffCapable) {
         reviewLedger.set(entry.info.clickKey, {
           frameId: targetId.split(':')[1],
+          frame: entry.frame,
+          frameUrl: entry.frameUrl,
+          frameChain: entry.frameChain,
+          generation: currentGeneration,
           href: entry.info.hrefUrl,
-          action: entry.info.formActionUrl || entry.info.hrefUrl,
-          method: String(entry.info.effectiveMethod || 'get').toUpperCase(),
+          action: actionUrl,
+          method,
+          formToken: entry.info.formToken,
           routeIdentity: documentRouteIdentity,
+          final: Boolean(entry.info.finalLike),
         });
+        if (entry.info.finalLike) {
+          handoffFinalTargetCount += 1;
+        }
       }
     }
   }
@@ -2437,6 +3111,7 @@ async function consumeTarget(command) {
   const identityMatches = isButton
     ? reviewClickKey(entry.frame.url(), live || {}) === entry.info.clickKey
     : actionIdentityKey(entry.frame.url(), live || {}) === entry.info.actionIdentity;
+  const targetStateMatches = observedTargetStateMatches(entry.info, live);
   const continuationAnchor = command.continuation === true && isButton && live?.isAnchor
     && entry.frame === page.mainFrame()
     && !live.finalLike && !live.formActionUrl && !live.effectiveMethod
@@ -2454,6 +3129,7 @@ async function consumeTarget(command) {
   const forbiddenButton = isButton && (live?.finalLike || (live?.isAnchor && !continuationAnchor) || entry.info.finalLike || (entry.info.isAnchor && !continuationAnchor));
   if (!frameTrusted || !live || live.kind !== entry.info.kind
       || !identityMatches
+      || !targetStateMatches
       || !metadataMatches
       || live.formIdentity !== entry.info.formIdentity
       || live.formToken !== entry.info.formToken
@@ -2518,7 +3194,6 @@ async function nativeCandidateValid(handle, value) {
   }, value).catch(() => false);
 }
 function beginMutation() {
-  lastNetworkActivity = Date.now();
   if (!firstApplicantMutation) {
     firstApplicantMutation = true;
     freezeProxy();
@@ -2562,7 +3237,14 @@ async function action(command) {
   try {
     let selectCanonical = undefined;
     const beforeNetworkSequence = networkRequestSequence;
-    if (live.isButton) return await buttonAction(selected, live, command, frame, frameChain);
+    if (live.isButton) {
+      try {
+        return await buttonAction(selected, live, command, frame, frameChain);
+      } catch (error) {
+        if (terminalReason) throw new Error(guardedMutationNetworkError());
+        throw error;
+      }
+    }
     const forceAriaDisabledDrift = testAriaDisabledDriftArmed;
     testAriaDisabledDriftArmed = false;
     if (command.action === 'fill') {
@@ -2911,6 +3593,7 @@ async function action(command) {
       }
     }
     const afterClassification = after ? descriptorClassification(after) : { overflow: true, sensitive: true };
+    failClosedOnMutationReclassification(afterClassification);
     const stableSelect = command.action === 'select' && after && !after.prototypePoisoned
       && !after.optionsAmbiguous && !afterClassification.overflow && !afterClassification.sensitive
       && after.visible && after.enabled && !after.readonly
@@ -3236,6 +3919,14 @@ function manifestWrite(state, extra = {}) {
   const manifest = process.env.JOBS_ASSISTANT_SESSION_MANIFEST;
   if (!manifest) return;
   if (!startupIdentity) throw new Error('startup_identity_required');
+  const failureMode = process.env.JOBS_ASSISTANT_TEST_MANIFEST_WRITE_FAILURE;
+  if (!testManifestWriteFailureConsumed
+      && (failureMode === 'commit' || failureMode === 'release')
+      && state === 'open_guarded'
+      && extra.handoff_phase === failureMode) {
+    testManifestWriteFailureConsumed = true;
+    throw new Error('manifest_write_failed');
+  }
   const dir = path.dirname(manifest);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const temp = `${manifest}.${process.pid}.${crypto.randomBytes(8).toString('hex')}.tmp`;
@@ -3258,11 +3949,18 @@ function manifestWrite(state, extra = {}) {
     profile_path: userDataDir,
     spawn_attempted: true,
     heartbeat: new Date().toISOString(),
-    ...Object.fromEntries(Object.entries(extra).filter(([key]) => !['version', 'ats_policy', 'run_id', 'job_id', 'session_id', 'owner_identity', 'browser_identity', 'owner_pid', 'owner_pgid', 'owner_birth', 'browser_pid', 'browser_pgid', 'browser_birth', 'commit_token', 'commit_token_sha256', 'state', 'spawn_attempted'].includes(key))),
+    ...Object.fromEntries(Object.entries(extra).filter(([key]) => !['version', 'ats_policy', 'run_id', 'job_id', 'session_id', 'owner_identity', 'browser_identity', 'owner_pid', 'owner_pgid', 'owner_birth', 'browser_pid', 'browser_pgid', 'browser_birth', 'commit_token', 'commit_token_sha256', 'state', 'spawn_attempted', 'handoff_phase'].includes(key))),
   };
   let fd = null;
   let dirFd = null;
   let renamed = false;
+  let directorySyncError = null;
+  const postRenameFailureMode = !testManifestWriteFailureConsumed
+    && state === 'open_guarded'
+    && extra.handoff_phase === 'commit'
+    && ['post_rename_dir_open', 'post_rename_dir_fsync'].includes(failureMode)
+    ? failureMode : null;
+  if (postRenameFailureMode) testManifestWriteFailureConsumed = true;
   try {
     fd = fs.openSync(temp, 'wx', 0o600);
     fs.writeFileSync(fd, JSON.stringify(data));
@@ -3272,8 +3970,36 @@ function manifestWrite(state, extra = {}) {
     fd = null;
     fs.renameSync(temp, manifest);
     renamed = true;
-    dirFd = fs.openSync(dir, 'r');
-    fs.fsyncSync(dirFd);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        if (postRenameFailureMode === 'post_rename_dir_open') {
+          throw new Error('manifest_directory_open_failed');
+        }
+        dirFd = fs.openSync(dir, 'r');
+        if (postRenameFailureMode === 'post_rename_dir_fsync') {
+          throw new Error('manifest_directory_fsync_failed');
+        }
+        fs.fsyncSync(dirFd);
+        directorySyncError = null;
+        break;
+      } catch (error) {
+        directorySyncError = error;
+        if (dirFd !== null) {
+          try { fs.closeSync(dirFd); } catch {}
+          dirFd = null;
+        }
+      }
+    }
+    if (directorySyncError) {
+      if (state === 'open_guarded' && extra.handoff_phase === 'commit') {
+        const error = new Error('manifest_post_rename_failed');
+        error.manifestRenamed = true;
+        error.manifestPhase = 'renamed';
+        error.cause = directorySyncError;
+        throw error;
+      }
+      throw directorySyncError;
+    }
   } finally {
     if (fd !== null) fs.closeSync(fd);
     if (dirFd !== null) fs.closeSync(dirFd);
@@ -3286,6 +4012,24 @@ function handoffRuntimeEligible() {
   return Boolean(browser && page && !page.isClosed() && !terminalReason);
 }
 
+function detachOwnerTransport() {
+  process.stdout.on('error', () => {});
+  process.stderr.on('error', () => {});
+  process.stdin.on('error', () => {});
+  process.stdin.removeAllListeners('data');
+  process.stdin.removeAllListeners('end');
+  process.stdin.pause();
+}
+
+function startDetachedHeartbeat() {
+  clearInterval(heartbeatTimer);
+  heartbeatTimer = setInterval(() => {
+    if (reviewState === 'open_guarded') {
+      try { manifestWrite('open_guarded', { detached: true }); } catch { /* recovery owns cleanup */ }
+    }
+  }, 5000);
+}
+
 async function prepareHandoff(command) {
   if (launchHeadless) { await close(); throw new Error('headless_handoff_forbidden'); }
   if (!startupIdentity || !browserIdentity) throw new Error('startup_identity_required');
@@ -3295,49 +4039,203 @@ async function prepareHandoff(command) {
 }
 async function commitHandoff(command) {
   if (!startupIdentity || !browserIdentity) throw new Error('startup_identity_required');
-  if (reviewState === 'open_guarded' && reviewToken === command.commit_token) {
-    if (!handoffRuntimeEligible()) throw new Error('handoff_not_eligible');
-    return { state: reviewState, idempotent: true, identity: startupIdentity };
+  const token = command.commit_token;
+  if (typeof token !== 'string' || token.length < 16 || token.length > 256 || /[^\x00-\x7f]/.test(token)) {
+    throw new Error('handoff_state_conflict');
   }
-  if (reviewState !== 'prepared' || typeof command.commit_token !== 'string' || command.commit_token.length < 16) throw new Error('handoff_state_conflict');
+  if (reviewState === 'open_guarded' && reviewToken === token) {
+    beginMutation();
+    if (!handoffRuntimeEligible()) throw new Error('handoff_not_eligible');
+    if (!detachedOwner) {
+      manifestWrite('open_guarded', { detached: true, handoff_phase: 'commit' });
+      detachedOwner = true;
+      detachOwnerTransport();
+      startDetachedHeartbeat();
+    }
+    return { state: reviewState, idempotent: true, detached: true, identity: startupIdentity };
+  }
+  if (reviewState !== 'prepared') throw new Error('handoff_state_conflict');
   if (!handoffRuntimeEligible()) throw new Error('handoff_not_eligible');
   await installReviewGesture();
+  beginMutation();
   if (!handoffRuntimeEligible()) {
     reviewToken = null;
     reviewState = 'closed';
     throw new Error('handoff_not_eligible');
   }
-  reviewToken = command.commit_token;
-  reviewState = 'open_guarded';
-  manifestWrite('open_guarded');
-  heartbeatTimer = setInterval(() => { if (reviewState === 'open_guarded') { try { manifestWrite('open_guarded', { detached: detachedOwner }); } catch { /* owner will observe failure */ } } }, 5000);
-  return { state: reviewState, identity: startupIdentity };
+  const priorReviewState = reviewState;
+  const priorReviewToken = reviewToken;
+  const priorDetachedOwner = detachedOwner;
+  try {
+    reviewToken = token;
+    reviewState = 'open_guarded';
+    // The atomic, fsynced manifest write is the durable ownership
+    // linearization point. Detach the command transport before ACKing it.
+    manifestWrite('open_guarded', { detached: true, handoff_phase: 'commit' });
+    detachedOwner = true;
+    detachOwnerTransport();
+    startDetachedHeartbeat();
+    return { state: reviewState, detached: true, identity: startupIdentity };
+  } catch (error) {
+    clearInterval(heartbeatTimer); heartbeatTimer = null;
+    if (error?.manifestRenamed === true) {
+      detachedOwner = true;
+      detachOwnerTransport();
+      startDetachedHeartbeat();
+      return { state: reviewState, detached: true, identity: startupIdentity, manifest_phase: error.manifestPhase };
+    }
+    reviewToken = priorReviewToken;
+    reviewState = priorReviewState;
+    detachedOwner = priorDetachedOwner;
+    throw error;
+  }
 }
 async function installReviewGesture() {
-  if (!page || page.isClosed()) return;
-  const realm = page.mainFrame().isolatedRealm();
-  await realm.evaluate(() => {
-    document.addEventListener('click', event => {
-      if (!event.isTrusted || event.detail === 0) return;
-      const target = event.target;
-      if (!(target instanceof Element)) return;
-      const anchor = target.closest('a');
-      const button = target.closest('button, input[type="submit"], input[type="button"], input[type="reset"]');
-      if (!anchor && !button) return;
-      const element = anchor || button;
-      const form = button?.form || null;
-      const href = anchor?.href || null;
-      const action = button ? (button.formAction || form?.action || null) : href;
-      const method = button ? String(button.formMethod || form?.method || 'get').toUpperCase() : 'GET';
-      const ownText = String(element.innerText || element.textContent || '').replace(/\s+/g, ' ').trim();
-      const identity = element.id || element.getAttribute('name') || '';
-      if (anchor && (element.target && element.target !== '_self' || element.hasAttribute('download'))) return;
-      globalThis.__JOBS_ASSISTANT_REVIEW_PERMIT__ = {
-        href, action, method, origin: location.origin, kind: anchor ? 'a' : 'button',
-        identity, text: ownText, detail: event.detail, trusted: true, expires: Date.now() + 1000,
-      };
-    }, true);
-  });
+  if (!page || page.isClosed()) throw new Error('handoff_not_eligible');
+  let validFinalTargetCount = 0;
+  const frames = new Set();
+  for (const ledger of reviewLedger.values()) {
+    if (ledger.generation !== currentGeneration
+        || !ledger.frame
+        || !page.frames().includes(ledger.frame)
+        || !(await trustedFrame(ledger.frame))) continue;
+    const currentChain = frameAncestry(ledger.frame);
+    const observedChain = Array.isArray(ledger.frameChain) ? ledger.frameChain : [];
+    if (currentChain.length !== observedChain.length
+        || !currentChain.every(
+          (item, index) => item.frame === observedChain[index].frame
+            && item.url === observedChain[index].url,
+        )) continue;
+    if (ledger.final === true) validFinalTargetCount += 1;
+    frames.add(ledger.frame);
+  }
+  if (observedFinalTargetCount < 1
+      || handoffFinalTargetCount !== observedFinalTargetCount
+      || validFinalTargetCount !== observedFinalTargetCount) {
+    throw new Error('handoff_not_eligible');
+  }
+  if (!frames.size) throw new Error('handoff_not_eligible');
+  consumedReviewNonce = null;
+  for (const frame of frames) {
+    const realm = frame.isolatedRealm();
+    await realm.evaluate(generation => {
+      globalThis.__JOBS_ASSISTANT_REVIEW_GESTURE_GENERATION__ = generation;
+      if (globalThis.__JOBS_ASSISTANT_REVIEW_GESTURE_INSTALLED__ === true) return;
+      const closest = Object.getOwnPropertyDescriptor(Element.prototype, 'closest')?.value;
+      const getAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'getAttribute')?.value;
+      const hasAttribute = Object.getOwnPropertyDescriptor(Element.prototype, 'hasAttribute')?.value;
+      const anchorHref = Object.getOwnPropertyDescriptor(HTMLAnchorElement.prototype, 'href')?.get;
+      const inputValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.get;
+      const buttonForm = Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'form')?.get;
+      const inputForm = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'form')?.get;
+      const buttonFormAction = Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'formAction')?.get;
+      const inputFormAction = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'formAction')?.get;
+      const buttonFormMethod = Object.getOwnPropertyDescriptor(HTMLButtonElement.prototype, 'formMethod')?.get;
+      const inputFormMethod = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'formMethod')?.get;
+      const formAction = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'action')?.get;
+      const formMethod = Object.getOwnPropertyDescriptor(HTMLFormElement.prototype, 'method')?.get;
+      if (![closest, getAttribute, hasAttribute, anchorHref, formAction, formMethod]
+        .every(value => typeof value === 'function')) return;
+      document.addEventListener('click', event => {
+        if (!event.isTrusted || event.detail === 0) return;
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        const anchor = closest.call(target, 'a');
+        const button = closest.call(target, 'button, input[type="submit"], input[type="image"]');
+        if (!anchor && !button) return;
+        const element = anchor || button;
+        const tag = String(element.localName || '').toLowerCase();
+        const input = tag === 'input';
+        const buttonTag = tag === 'button';
+        const type = input
+          ? String(getAttribute.call(element, 'type') || 'text').toLowerCase()
+          : buttonTag
+            ? String(getAttribute.call(element, 'type') || 'submit').toLowerCase()
+            : 'anchor';
+        if (button && !(
+          (buttonTag && type === 'submit')
+          || (input && ['submit', 'image'].includes(type))
+        )) return;
+        const formGetter = buttonTag ? buttonForm : input ? inputForm : null;
+        const form = button && typeof formGetter === 'function'
+          ? formGetter.call(button) : null;
+        if (button && !form) return;
+        const href = anchor ? String(anchorHref.call(anchor) || '') : null;
+        const hasOwnAction = Boolean(
+          button && hasAttribute.call(button, 'formaction'),
+        );
+        const hasOwnMethod = Boolean(
+          button && hasAttribute.call(button, 'formmethod'),
+        );
+        const hasOwnTarget = Boolean(
+          button && hasAttribute.call(button, 'formtarget'),
+        );
+        const ownActionGetter = buttonTag ? buttonFormAction : inputFormAction;
+        const ownMethodGetter = buttonTag ? buttonFormMethod : inputFormMethod;
+        if (button && (
+          typeof ownActionGetter !== 'function'
+          || typeof ownMethodGetter !== 'function'
+        )) return;
+        const baseAction = button
+          ? String(
+            hasOwnAction
+              ? ownActionGetter.call(button)
+              : formAction.call(form),
+          )
+          : href;
+        const method = button
+          ? String(
+            hasOwnMethod
+              ? ownMethodGetter.call(button)
+              : formMethod.call(form) || 'get',
+          ).toUpperCase()
+          : 'GET';
+        const effectiveTarget = anchor
+          ? String(getAttribute.call(anchor, 'target') || '').trim().toLowerCase()
+          : String(
+            hasOwnTarget
+              ? getAttribute.call(button, 'formtarget')
+              : getAttribute.call(form, 'target') || '',
+          ).trim().toLowerCase();
+        if ((effectiveTarget && effectiveTarget !== '_self')
+            || (anchor && hasAttribute.call(anchor, 'download'))
+            || !baseAction
+            || (button && !['GET', 'POST'].includes(method))
+            || (anchor && method !== 'GET')) return;
+        const action = baseAction;
+        const ownText = String(
+          element.innerText || element.textContent || '',
+        ).replace(/\s+/g, ' ').trim();
+        const identity = getAttribute.call(element, 'id')
+          || getAttribute.call(element, 'name') || '';
+        const buttonValue = input && typeof inputValue === 'function'
+          ? String(inputValue.call(button) ?? '').replace(/\s+/g, ' ').trim()
+          : '';
+        const permitText = input ? buttonValue : ownText;
+        const registry = globalThis.__JOBS_ASSISTANT_FORM_REGISTRY__;
+        const formToken = form && registry?.tokens instanceof WeakMap
+          ? registry.tokens.get(form) || null : null;
+        globalThis.__JOBS_ASSISTANT_REVIEW_PERMIT__ = {
+          href,
+          baseAction,
+          action,
+          method,
+          formToken,
+          generation: globalThis.__JOBS_ASSISTANT_REVIEW_GESTURE_GENERATION__,
+          nonce: crypto.randomUUID(),
+          origin: location.origin,
+          kind: anchor ? 'a' : 'button',
+          identity,
+          text: permitText,
+          detail: event.detail,
+          trusted: true,
+          expires: Date.now() + 1000,
+        };
+      }, true);
+      globalThis.__JOBS_ASSISTANT_REVIEW_GESTURE_INSTALLED__ = true;
+    }, currentGeneration);
+  }
+  reviewGestureInstalledPage = page;
 }
 function groupPresent(identity) {
   if (!identity || !Number.isSafeInteger(identity.pgid) || identity.pgid <= 0) return true;
@@ -3389,16 +4287,10 @@ function removeStagedInputSafely(root, candidate) {
 async function releaseHandoff() {
   if (reviewState !== 'open_guarded') throw new Error('handoff_state_conflict');
   if (!handoffRuntimeEligible()) throw new Error('handoff_not_eligible');
-  // The owner is now independent of its command transport.  Stop consuming
-  // the parent's pipe before it can reach EOF; an EOF/SIGTERM from a
-  // short-lived helper must not be interpreted as a browser close.
-  detachedOwner = true;
-  process.stdout.on('error', () => {});
-  process.stderr.on('error', () => {});
-  process.stdin.removeAllListeners('data');
-  process.stdin.removeAllListeners('end');
-  heartbeatTimer?.ref?.();
-  manifestWrite('open_guarded', { detached: true });
+  if (!detachedOwner) throw new Error('handoff_state_conflict');
+  // Commit already persisted detached ownership and removed the command
+  // listeners. Release is verification-only and must never be the first
+  // detach point or a cleanup trigger.
   return { state: reviewState, released: true };
 }
 async function close(trigger = 'unknown') {
@@ -3409,13 +4301,14 @@ async function close(trigger = 'unknown') {
   clearInterval(budgetTimer); budgetTimer = null;
   cleanupPromise = (async () => {
     closeRequested = true;
+    freezeProxy();
     clearInterval(heartbeatTimer); heartbeatTimer = null;
     reviewPermit = null; reviewLedger = new Map(); reviewEpoch = null; proxyPermitUrls.clear();
     continuationNavigationPermit = null; observedStaticUrls.clear();
     const browserProcess = browser?.process?.() || null;
-    freezeProxy();
     if (browser) await browser.close().catch(() => {});
     browser = null; page = null;
+    await teardownTargetLifecycleGuard();
     const browserGone = !browserIdentity || await waitGroupAbsent(browserIdentity, 5000);
     if (browserProcess?.pid && !browserGone) {
       terminalReason = terminalReason || 'browser_error';
@@ -3509,7 +4402,25 @@ function parseFrames() {
   }
 }
 function enqueue(command) {
-  commandQueue = commandQueue.then(async () => { try { const data = await handle(command); await send(data); if (command.action === 'close') process.exit(0); } catch (error) { await fail(error, command.action); } });
+  commandQueue = commandQueue.then(async () => {
+    try {
+      const data = await handle(command);
+      await send(data);
+      if (command.action === 'close') process.exit(0);
+    } catch (error) {
+      await fail(error, command.action);
+    }
+  });
+}
+async function handleInputEnd() {
+  await commandQueue;
+  if (reviewState === 'open_guarded' && detachedOwner) return { detached: true };
+  if (reviewState === 'open_guarded') {
+    terminalReason = terminalReason || 'page_not_stable';
+    detachedCloseRequested = true;
+  }
+  await close('stdin_eof');
+  return { detached: false };
 }
 
 async function runSmoke() {
@@ -3531,6 +4442,13 @@ async function runSmoke() {
   process.chdir(smokeRunRoot);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   try {
+    selectRoutePolicy('lever');
+    for (const suffix of ['?', '#']) {
+      let rejected = false;
+      try { validateInitialUrl(`https://jobs.lever.co/acme/123e4567-e89b-12d3-a456-426614174000${suffix}`); } catch { rejected = true; }
+      if (!rejected) throw new Error('smoke_lever_empty_delimiter_allowed');
+    }
+    selectRoutePolicy('greenhouse');
     await preflight();
     await launch({ headless: true });
     internalTransportUrl = `http://127.0.0.1:${server.address().port}/fixture`;
@@ -3701,6 +4619,420 @@ async function runRequestGuardSelfTest() {
   if (vectors.some(([actual, expected]) => actual !== expected)) throw new Error('request_guard_self_test_failed');
   return { passed: vectors.length + 10 };
 }
+async function runReleaseHandoffSelfTest() {
+  const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jobs-assistant-release-self-test-'));
+  const suppliedManifest = Boolean(process.env.JOBS_ASSISTANT_SESSION_MANIFEST);
+  const manifest = process.env.JOBS_ASSISTANT_SESSION_MANIFEST || path.join(testRoot, 'review_session.json');
+  const priorManifest = process.env.JOBS_ASSISTANT_SESSION_MANIFEST;
+  const priorFailureMode = process.env.JOBS_ASSISTANT_TEST_MANIFEST_WRITE_FAILURE;
+  let browserClosed = false;
+  let gestureInstallCalls = 0;
+  let gestureInstalledInTest = false;
+  process.env.JOBS_ASSISTANT_SESSION_MANIFEST = manifest;
+  process.env.JOBS_ASSISTANT_TEST_MANIFEST_WRITE_FAILURE = 'none';
+  testManifestWriteFailureConsumed = false;
+  const setupScenario = (name, state, token, detached) => {
+    browserClosed = false;
+    const frameUrl = 'https://boards.greenhouse.io/fixture/jobs/123';
+    const testFrame = {
+      url: () => frameUrl,
+      parentFrame: () => null,
+      isolatedRealm: () => ({
+        evaluate: async () => {
+          gestureInstallCalls += 1;
+          if (gestureInstalledInTest) return;
+          gestureInstalledInTest = true;
+        },
+      }),
+    };
+    browser = { close: async () => { browserClosed = true; } };
+    page = {
+      isClosed: () => false,
+      frames: () => [testFrame],
+      mainFrame: () => testFrame,
+    };
+    documentRouteIdentity = routeIdentityForUrl(frameUrl);
+    currentGeneration = `self-test-${name}`;
+    observedFinalTargetCount = 1;
+    handoffFinalTargetCount = 1;
+    reviewLedger = new Map([['final', {
+      generation: currentGeneration,
+      frame: testFrame,
+      frameChain: [{ frame: testFrame, url: frameUrl }],
+      final: true,
+    }]]);
+    browserIdentity = { pid: 999999, pgid: 999999, birth: `${name}-browser` };
+    startupIdentity = {
+      version: 1,
+      ats_policy: 'greenhouse',
+      run_id: 1,
+      job_id: 1,
+      session_id: `${name}-self-test`,
+      owner_identity: { pid: process.pid, pgid: process.pid, birth: `${name}-owner` },
+      browser_identity: browserIdentity,
+    };
+    userDataDir = path.join(testRoot, `${name}-profile`);
+    ownerRoot = path.join(testRoot, `${name}-owner-root`);
+    fs.mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
+    fs.mkdirSync(ownerRoot, { recursive: true, mode: 0o700 });
+    launchHeadless = false;
+    reviewState = state;
+    reviewToken = token;
+    terminalReason = null;
+    detachedOwner = detached;
+    detachedCloseRequested = false;
+    closeRequested = false;
+    cleanupStarted = false;
+    cleanupPromise = null;
+    cleanupTrigger = null;
+    heartbeatTimer = null;
+    browserExit = null;
+    reviewGestureInstalledPage = null;
+    testManifestWriteFailureConsumed = false;
+    if (state === 'prepared') manifestWrite('prepared');
+    else manifestWrite('open_guarded', { detached: detached });
+  };
+  try {
+    setupScenario('commit', 'prepared', null, false);
+    const validToken = 'commit-self-test-token-aaaaaaaa';
+    for (const invalidToken of [null, 7, 'short', 'é'.repeat(16)]) {
+      let rejected = false;
+      try { await commitHandoff({ commit_token: invalidToken }); }
+      catch (error) { rejected = error?.message === 'handoff_state_conflict'; }
+      if (!rejected || reviewState !== 'prepared' || reviewToken !== null || detachedOwner || browserClosed) {
+        throw new Error('commit_token_self_test_failed');
+      }
+    }
+    reviewState = 'open_guarded';
+    reviewToken = validToken;
+    manifestWrite('open_guarded', { detached: false });
+    let mismatched = false;
+    try { await commitHandoff({ commit_token: 'mismatched-token-aaaaaaaa' }); }
+    catch (error) { mismatched = error?.message === 'handoff_state_conflict'; }
+    if (!mismatched || !reviewState || detachedOwner || browserClosed) {
+      throw new Error('commit_token_self_test_failed');
+    }
+    reviewState = 'prepared';
+    reviewToken = null;
+    manifestWrite('prepared');
+    process.env.JOBS_ASSISTANT_TEST_MANIFEST_WRITE_FAILURE = 'commit';
+    testManifestWriteFailureConsumed = false;
+    let commitError = null;
+    try { await commitHandoff({ commit_token: validToken }); }
+    catch (error) { commitError = error?.message || null; }
+    if (commitError !== 'manifest_write_failed'
+        || reviewState !== 'prepared'
+        || reviewToken !== null
+        || detachedOwner
+        || browserClosed) {
+      throw new Error('commit_handoff_self_test_failed');
+    }
+    const postRenameModes = ['post_rename_dir_open', 'post_rename_dir_fsync'];
+    for (const mode of postRenameModes) {
+      process.env.JOBS_ASSISTANT_TEST_MANIFEST_WRITE_FAILURE = mode;
+      testManifestWriteFailureConsumed = false;
+      setupScenario(`commit-${mode}`, 'prepared', null, false);
+      const postRenameCommit = await commitHandoff({ commit_token: validToken });
+      const postRenameManifest = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+      if (postRenameCommit.state !== 'open_guarded'
+          || postRenameCommit.detached !== true
+          || postRenameCommit.manifest_phase !== 'renamed'
+          || reviewState !== 'open_guarded'
+          || !detachedOwner
+          || browserClosed
+          || postRenameManifest.state !== 'open_guarded'
+          || postRenameManifest.detached !== true
+          || postRenameManifest.commit_token_sha256 !== hash(validToken)) {
+        throw new Error('post_rename_commit_self_test_failed');
+      }
+      const postRenameReleased = await releaseHandoff();
+      const postRenameEof = await handleInputEnd();
+      if (postRenameReleased.state !== 'open_guarded'
+          || postRenameReleased.released !== true
+          || !postRenameEof.detached
+          || reviewState !== 'open_guarded'
+          || !detachedOwner
+          || !heartbeatTimer
+          || browserClosed) {
+        throw new Error('post_rename_liveness_self_test_failed');
+      }
+      detachedCloseRequested = true;
+      await close(`post_rename_${mode}`);
+      const postRenameClosed = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+      if (postRenameClosed.state !== 'closed'
+          || postRenameClosed.cleanup !== true
+          || postRenameClosed.detached !== true) {
+        throw new Error('post_rename_cleanup_self_test_failed');
+      }
+    }
+    process.env.JOBS_ASSISTANT_TEST_MANIFEST_WRITE_FAILURE = 'none';
+    testManifestWriteFailureConsumed = false;
+    // A failed durable commit consumed the prior observed generation. Model a
+    // fresh observed run rather than reusing its stale handoff capability.
+    setupScenario('commit-retry', 'prepared', null, false);
+    const committed = await commitHandoff({ commit_token: validToken });
+    const committedManifest = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+    if (committed.state !== 'open_guarded'
+        || committed.detached !== true
+        || committed.idempotent === true
+        || gestureInstallCalls !== 4
+        || !detachedOwner
+        || committedManifest.state !== 'open_guarded'
+        || committedManifest.detached !== true
+        || committedManifest.commit_token_sha256 !== hash(validToken)) {
+      throw new Error('commit_handoff_self_test_failed');
+    }
+    const released = await releaseHandoff();
+    if (released.state !== 'open_guarded' || released.released !== true || !detachedOwner || browserClosed) {
+      throw new Error('release_handoff_self_test_failed');
+    }
+    const eofResult = await handleInputEnd();
+    const eofWindow = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+    if (!eofResult.detached
+        || browserClosed
+        || eofWindow.state !== 'open_guarded'
+        || eofWindow.detached !== true) {
+      throw new Error('commit_eof_survival_self_test_failed');
+    }
+    detachedCloseRequested = true;
+    await close('recovery_exact_kill');
+    const recovered = JSON.parse(fs.readFileSync(manifest, 'utf8'));
+    if (!browserClosed
+        || recovered.state !== 'closed'
+        || recovered.cleanup !== true
+        || recovered.detached !== true
+        || recovered.cleanup_trigger !== 'recovery_exact_kill') {
+      throw new Error('recovery_cleanup_self_test_failed');
+    }
+
+    const browserExitManifest = path.join(testRoot, 'browser-exit.json');
+    process.env.JOBS_ASSISTANT_SESSION_MANIFEST = browserExitManifest;
+    setupScenario('browser-exit', 'open_guarded', 'browser-exit-self-test-token-aaaaaaaa', true);
+    await handleBrowserProcessExit(137, 'SIGKILL', { exit: false });
+    const browserExitTerminal = JSON.parse(fs.readFileSync(browserExitManifest, 'utf8'));
+    if (!browserClosed
+        || browserExitTerminal.state !== 'closed'
+        || browserExitTerminal.cleanup !== true
+        || browserExitTerminal.detached !== true
+        || browserExitTerminal.terminal_reason !== 'page_not_stable'
+        || browserExitTerminal.cleanup_trigger !== 'browser_exit'
+        || browserExitTerminal.browser_exit?.code !== 137
+        || browserExitTerminal.browser_exit?.signal !== 'SIGKILL') {
+      throw new Error('browser_exit_self_test_failed');
+    }
+
+    const eofManifest = path.join(testRoot, 'eof-window.json');
+    process.env.JOBS_ASSISTANT_SESSION_MANIFEST = eofManifest;
+    setupScenario('eof', 'prepared', null, false);
+    const precommitEof = await handleInputEnd();
+    const eofTerminal = JSON.parse(fs.readFileSync(eofManifest, 'utf8'));
+    if (browserClosed === false
+        || precommitEof.detached
+        || eofTerminal.state !== 'closed'
+        || eofTerminal.cleanup !== true
+        || eofTerminal.detached !== false
+        || eofTerminal.terminal_reason !== null
+        || eofTerminal.cleanup_trigger !== 'stdin_eof') {
+      throw new Error('precommit_eof_self_test_failed');
+    }
+    return {
+      passed: 4,
+      committed: true,
+      detached: true,
+      eof_survival: true,
+      precommit_eof_cleanup: true,
+      recovery_cleanup: true,
+      browser_exit_cleanup: true,
+      gesture_installations: gestureInstallCalls,
+    };
+  } finally {
+    detachedCloseRequested = true;
+    try { await close('release_self_test'); } catch {}
+    if (priorManifest === undefined) delete process.env.JOBS_ASSISTANT_SESSION_MANIFEST;
+    else process.env.JOBS_ASSISTANT_SESSION_MANIFEST = priorManifest;
+    if (priorFailureMode === undefined) delete process.env.JOBS_ASSISTANT_TEST_MANIFEST_WRITE_FAILURE;
+    else process.env.JOBS_ASSISTANT_TEST_MANIFEST_WRITE_FAILURE = priorFailureMode;
+    if (!suppliedManifest) fs.rmSync(testRoot, { recursive: true, force: true });
+  }
+}
+
+async function runReviewGestureSelfTest() {
+  const token = crypto.randomBytes(16).toString('hex');
+  const priorToken = process.env.JOBS_ASSISTANT_INTERNAL_TRANSPORT_TOKEN;
+  process.env.JOBS_ASSISTANT_INTERNAL_TRANSPORT_TOKEN = token;
+  const testRoot = fs.mkdtempSync(
+    path.join(os.tmpdir(), 'jobs-assistant-review-gesture-'),
+  );
+  const originalCwd = process.cwd();
+  process.chdir(testRoot);
+  const logicalMain = 'https://boards.greenhouse.io/fixture/jobs/123';
+  const logicalChild = `${logicalMain}?gh_src=child`;
+  const logicalSubmit = logicalChild;
+  let fixtureRequests = 0;
+  const server = http.createServer((req, res) => {
+    fixtureRequests += 1;
+    let logical = '';
+    const encoded = req.headers['x-jobs-assistant-logical-url'];
+    try {
+      logical = encoded
+        ? Buffer.from(String(encoded), 'base64url').toString('utf8')
+        : '';
+    } catch {}
+    res.setHeader('content-type', 'text/html');
+    if (logical === logicalChild) {
+      res.end(`<!doctype html><form method="post">
+        <button id="child-final" type="submit">Submit Application</button>
+      </form><script>
+        document.getElementById('child-final').addEventListener('click', () => {
+          queueMicrotask(() => {
+            const image = new Image();
+            image.src = 'https://boards-cdn.greenhouse.io/assets/review.png?candidate=SECRET';
+          });
+        });
+      </script>`);
+      return;
+    }
+    res.end(`<!doctype html>
+      <a id="main-continue" href="${logicalMain}?gh_src=continue">Continue</a>
+      <iframe id="trusted-child" src="${logicalChild}"></iframe>`);
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  try {
+    await preflight();
+    await launch({ headless: true });
+    await goto({
+      url: logicalMain,
+      internal_url: `http://127.0.0.1:${server.address().port}/fixture`,
+      internal_token: token,
+    });
+    if (!validateHumanReviewAction(logicalSubmit, 'POST', logicalChild)
+        || validateHumanReviewAction(
+          'https://boards.greenhouse.io/applications/submit',
+          'POST',
+          logicalChild,
+        )
+        || validateHumanReviewAction(
+          'https://boards.greenhouse.io/fixture/jobs/124?gh_src=submit',
+          'POST',
+          logicalChild,
+        )) {
+      throw new Error('review_gesture_self_test_failed');
+    }
+    const staleObserved = await observe();
+    if (staleObserved.final_submit_target_ids.length !== 1
+        || !staleObserved.buttons.some(item => item.element_id === 'main-continue')) {
+      throw new Error('review_gesture_self_test_failed');
+    }
+    const frameElement = await page.$('#trusted-child');
+    if (!frameElement) throw new Error('review_gesture_self_test_failed');
+    await frameElement.evaluate(element => element.remove());
+    await frameElement.dispose();
+    for (let attempt = 0; attempt < 20
+      && page.frames().some(frame => frame.url() === logicalChild); attempt += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    reviewState = 'open_guarded';
+    let staleFinalRejected = false;
+    try {
+      await installReviewGesture();
+    } catch (error) {
+      staleFinalRejected = error instanceof Error
+        && error.message === 'handoff_not_eligible';
+    }
+    reviewState = 'closed';
+    if (!staleFinalRejected) throw new Error('review_gesture_self_test_failed');
+    await goto({
+      url: logicalMain,
+      internal_url: `http://127.0.0.1:${server.address().port}/fixture`,
+      internal_token: token,
+    });
+    const observed = await observe();
+    const target = observed.buttons.find(
+      item => item.element_id === 'child-final',
+    );
+    if (!target
+        || target.frame_id === 'frame-0'
+        || target.effective_action_url !== logicalSubmit
+        || target.effective_method !== 'post'
+        || !observed.final_submit_target_ids.includes(target.target_id)) {
+      throw new Error('review_gesture_self_test_failed');
+    }
+    const child = page.frames().find(frame => frame.url() === logicalChild);
+    if (!child) throw new Error('review_gesture_self_test_failed');
+    reviewState = 'open_guarded';
+    await installReviewGesture();
+    const upstreamBefore = networkCounters.upstreamHttpAttempts;
+    const fixtureRequestsBefore = fixtureRequests;
+    const deniedBefore = networkCounters.denied;
+    const captured = new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error('review_gesture_self_test_failed')),
+        5000,
+      );
+      reviewSelfTestCapture = {
+        resolve(value) {
+          clearTimeout(timer);
+          resolve(value);
+        },
+      };
+    });
+    const click = child.click('#child-final').catch(() => {});
+    const request = await captured;
+    const proxyRoutesBound = Boolean(
+      reviewEpoch
+        && validateAuthorizedReviewProxyUrl(logicalSubmit, 'POST', logicalChild)
+        && validateAuthorizedReviewProxyUrl(
+          `${logicalMain}/confirmation`,
+          'GET',
+          logicalChild,
+        )
+        && !validateAuthorizedReviewProxyUrl(
+          'https://boards.greenhouse.io/fixture/jobs/124/confirmation',
+          'GET',
+          logicalChild,
+        ),
+    );
+    if (!proxyRoutesBound) throw new Error('review_gesture_self_test_failed');
+    await click;
+    await new Promise(resolve => setTimeout(resolve, 100));
+    if (request.url !== logicalSubmit
+        || request.method !== 'POST'
+        || request.type !== 'document'
+        || request.navigation !== true
+        || request.frame !== child
+        || !consumedReviewNonce
+        || currentGeneration !== null
+        || networkCounters.upstreamHttpAttempts !== upstreamBefore
+        || fixtureRequests !== fixtureRequestsBefore
+        || networkCounters.denied <= deniedBefore
+        || terminalReason !== 'unsafe_network_attempt') {
+      throw new Error('review_gesture_self_test_failed');
+    }
+    return {
+      passed: 3,
+      trusted: true,
+      child_frame: true,
+      default_form_action: true,
+      stale_final_rejected: true,
+      old_document_static_blocked: true,
+      final_like_route_bound: true,
+      proxy_routes_bound: true,
+      upstream_attempts: 0,
+    };
+  } finally {
+    reviewSelfTestCapture = null;
+    reviewState = 'closed';
+    await close('review_gesture_self_test').catch(() => {});
+    await new Promise(resolve => server.close(resolve));
+    if (priorToken === undefined) {
+      delete process.env.JOBS_ASSISTANT_INTERNAL_TRANSPORT_TOKEN;
+    } else {
+      process.env.JOBS_ASSISTANT_INTERNAL_TRANSPORT_TOKEN = priorToken;
+    }
+    process.chdir(originalCwd);
+    fs.rmSync(testRoot, { recursive: true, force: true });
+  }
+}
 
 async function runSelectNativeSelfTest() {
   await preflight();
@@ -3748,6 +5080,8 @@ async function runSelectNativeSelfTest() {
   }
 }
 if (process.argv.includes('--error-code-self-test')) runErrorCodeSelfTest().then(send).then(() => process.exit(0)).catch(async error => { await fail(error, 'protocol'); process.exit(1); });
+else if (process.argv.includes('--release-handoff-self-test')) Promise.resolve(runReleaseHandoffSelfTest()).then(send).then(() => process.exit(0)).catch(async error => { await fail(error, 'protocol'); process.exit(1); });
+else if (process.argv.includes('--review-gesture-self-test')) Promise.resolve(runReviewGestureSelfTest()).then(send).then(() => process.exit(0)).catch(async error => { await fail(error, 'protocol'); process.exit(1); });
 else if (process.argv.includes('--select-native-self-test')) runSelectNativeSelfTest().then(send).then(() => process.exit(0)).catch(async error => { await fail(error, 'protocol'); process.exit(1); });
 else if (process.argv.includes('--request-guard-self-test')) Promise.resolve(runRequestGuardSelfTest()).then(send).then(() => process.exit(0)).catch(async error => { await fail(error, 'protocol'); process.exit(1); });
 else if (process.argv.includes('--preflight')) preflight().then(send).then(() => process.exit(0)).catch(async error => { await fail(error, 'preflight'); process.exit(1); });
@@ -3756,14 +5090,9 @@ else {
   void writeFrame({ ok: true, data: { ready: true, protocol: 'length-prefixed-json-v1', owner_pid: process.pid, identity: process.env.JOBS_ASSISTANT_HANDSHAKE || null } });
   process.stdin.on('data', chunk => { try { inputBuffer = Buffer.concat([inputBuffer, chunk]); if (inputBuffer.length > MAX_IN_FRAME + 32) throw new Error('input_frame_too_large'); parseFrames(); } catch (error) { void fail(error, 'protocol').finally(() => process.exit(1)); } });
   process.stdin.on('end', () => {
-    commandQueue.then(async () => {
-      if (reviewState === 'open_guarded') {
-        manifestWrite('open_guarded', { detached: true });
-        return;
-      }
-      await close();
-      process.exit(0);
-    });
+    handleInputEnd().then(result => {
+      if (!result.detached) process.exit(0);
+    }).catch(() => process.exit(1));
   });
 }
 function handleOwnerSignal() {

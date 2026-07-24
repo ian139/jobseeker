@@ -51,6 +51,8 @@ autofill-review complete | retry
       attach/reconnect path.
 - [x] Keep container execution headless, non-root, UID/GID mapped, and bound
       to existing `data` (read/write) and `resume` (read-only) directories.
+Container verification covers only packaging, non-root/UID/GID and bind mounts, headless Chromium, CLI help, and OMP-process startup/teardown.
+It does not run a browser-backed coordinator: `application-rpc` is headed-only (`run.start` requires `headed: true`), and current Compose provides no `DISPLAY`.
 
 ## Hard boundary
 
@@ -193,22 +195,77 @@ every future adapter and preference feature.
 ## Open gaps and blockers
 
 - [ ] Physical headed review-window survival remains a manual host gate requiring a benign human click and tab/window close. It is intentionally excluded by exact test name from `npm run puppeteer-verify`; no code path automates the physical action.
+- [ ] Physical headed handoff survival and trusted-gesture activation remain manual host gates requiring a benign human click and tab/window close. Both exact tests are excluded from `npm run puppeteer-verify`; no code path automates either physical action.
 
 - [ ] Live third-party ATS DOM/service-worker changes and real LLM streaming
       remain environment-dependent compatibility gates. Deterministic fixtures
       cover the safety contracts and fail closed, but provider compatibility
       still requires benign credentialed live checks.
 
-## Reference-only history
+## Requested future policy changes (not active)
 
-The older minimized applier snapshot is retained for historical comparison:
+The requested future direction is to expand the workflow beyond its current
+safety scope. These entries record desired policy and design work only:
+`AGENTS.md` and the existing deterministic gates remain authoritative until a
+separate safety-policy decision is made and the resulting behavior is
+implemented, adversarially tested, and approved.
 
-```text
-archive/minimized-20260706/applier/
-```
+- [ ] Allow arbitrary browser scripting and unsupported ATS sites. The intended
+      outcome is to handle sites without dedicated Greenhouse or Lever adapters
+      and to permit a broader browser action surface. This requires a separate
+      policy decision and a generalized route, observation, action, and
+      execution contract covering sandboxing, deterministic pre-mutation
+      authorization, stale-state rejection, provenance, evidence, and the
+      no-submit invariant. The current guarded executor cannot be bypassed.
 
-It is not a runnable package snapshot and is not the active workflow. New
-changes belong in the current guarded adapter path, not in that archive.
+- [ ] Allow credential, MFA, CAPTCHA, assessment, and protected-class
+      workflows. The intended outcome is to continue applications that
+      encounter these steps instead of always stopping. This requires a
+      separate policy decision plus explicit consent, secret-handling,
+      sensitive-data, source-of-truth, human-oversight, and audit contracts,
+      followed by dedicated implementation and adversarial tests. Until then,
+      these remain manual stop points; this entry does not authorize credential
+      exposure, challenge bypass, inferred protected-class answers, or
+      automated assessment completion.
+
+## Historical source
+
+Historical source snapshots are preserved in git history and are not part of the active working tree. New changes belong in the current guarded adapter path.
+
+## Persistent OMP RPC draft workflow
+
+Goal: prepare supported Greenhouse and Lever application drafts for human
+review through one persistent OMP run. The guarded adapter remains the sole
+browser-mutation authority and final submission is never automated.
+
+Measurement: focused protocol/workflow/ownership tests, maintained browser
+fixtures, native OMP launch evidence, private artifact manifests, CLI smoke,
+and container checks. Target: at least 90% of maintained supported fixtures
+reach their expected safe terminal state, with every mutation observation-
+bound and evidenced.
+Container checks in this workflow cover packaging, CLI help, and OMP-process lifecycle only; they do not start a browser-backed `application-rpc` workflow. The coordinator remains headed-only, and current Compose provides no `DISPLAY`.
+
+- [x] 1. Define the persistent OMP run protocol.
+- [x] 2. Expose the existing workflow through the RPC boundary.
+- [x] 3. Enforce exclusive browser-session ownership.
+- [x] 4. Define structured immutable observation tools.
+- [x] 5. Define the high-level guarded browser tools.
+- [x] 6. Preserve ATS route, frame, and network restrictions.
+- [x] 7. Use the canonical candidate-profile contract.
+- [x] 8. Restrict resume selection and upload.
+- [x] 9. Separate deterministic resolution from model assistance.
+- [x] 10. Define stable manual-intervention categories.
+- [x] 11. Implement the one-action control loop.
+- [x] 12. Persist a complete private run workspace.
+- [x] 13. Extend durable application-run state.
+- [x] 14. Stream and replay redacted progress events.
+- [x] 15. Implement verified review-ready browser handoff.
+- [x] 16. Record human-reported outcomes separately.
+- [x] 17. Smoke-test supported application runs.
+- [x] 18. Run repository and container verification.
+      The full Docker Compose lifecycle and container smoke now pass; the
+      remaining physical trusted-gesture and live-provider gates stay open.
+The container portion is packaging/CLI/OMP-process smoke only; it does not exercise a browser-backed `application-rpc` run.
 
 ## Verification
 
@@ -223,5 +280,5 @@ sh scripts/container-smoke.sh
 
 Run the complete Python suite with
 `uv run --frozen --extra dev python -m pytest` when changing executable code.
-Headed survival remains a manual host check: use a physical benign click and
-close the review tab/window.
+Headed handoff survival and trusted-gesture activation remain manual host checks:
+use a physical benign click and close the review tab/window.

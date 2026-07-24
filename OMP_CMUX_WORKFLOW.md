@@ -4,7 +4,7 @@ Use this workflow for every OMP coordinator and workflowz subagent in this repos
 
 ## Active product boundary
 
-The active workflow includes backlog ingestion and the rebuilt guarded Greenhouse+Lever draft loop in `src/jobs_assistant/`. Archived applier implementations are reference-only. Extend the active typed contracts and Puppeteer browser-adapter boundary; do not revive archived runners or add another browser-control path. Greenhouse was first and remains supported; Lever is the active second adapter, constrained to exact direct `jobs.lever.co`/`jobs.eu.lever.co` company/canonical-lowercase-UUID routes (optional `/apply`, no query or fragment). Automation stops after durable review evidence and before every final submission; both adapters use the same route, network, safe-action, artifact, and no-submit gates.
+The active workflow includes backlog ingestion and the rebuilt guarded Greenhouse+Lever draft loop in `src/jobs_assistant/`. Historical applier implementations are not part of the working tree. Extend the active typed contracts and Puppeteer browser-adapter boundary; do not revive historical runners or add another browser-control path. Greenhouse was first and remains supported; Lever is the active second adapter, constrained to exact direct `jobs.lever.co`/`jobs.eu.lever.co` company/canonical-lowercase-UUID routes (optional `/apply`, no query or fragment). Automation stops after durable review evidence and before every final submission; both adapters use the same route, network, safe-action, artifact, and no-submit gates.
 
 ## Always-on rules
 

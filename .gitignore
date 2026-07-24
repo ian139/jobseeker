@@ -11,4 +11,5 @@ dist/
 .DS_Store
 omp-session-*.html
 /scraper/
-/old/
+/rpc/
+/.cli-focused/

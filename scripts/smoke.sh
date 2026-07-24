@@ -8,7 +8,8 @@ WORK_ROOT="$ROOT/work"
 DATA_ROOT="$WORK_ROOT/data"
 RESUME_ROOT="$WORK_ROOT/resume"
 DIST_ROOT="$ROOT/dist"
-mkdir -p "$DATA_ROOT" "$RESUME_ROOT" "$DIST_ROOT"
+PACKAGE_ROOT="$ROOT/package"
+mkdir -p "$DATA_ROOT" "$RESUME_ROOT" "$DIST_ROOT" "$PACKAGE_ROOT"
 chmod 700 "$DATA_ROOT" "$RESUME_ROOT"
 cleanup() {
   rm -rf "$ROOT"
@@ -52,7 +53,12 @@ output.write_bytes(payload)
 PY
 chmod 600 "$RESUME_ROOT/Main_Resume.pdf"
 
-uv build --wheel --out-dir "$DIST_ROOT" >/dev/null
+cp "$REPO_ROOT/pyproject.toml" "$PACKAGE_ROOT/"
+cp -R "$REPO_ROOT/src" "$PACKAGE_ROOT/src"
+(
+  cd "$PACKAGE_ROOT"
+  uv build --wheel --out-dir "$DIST_ROOT" >/dev/null
+)
 set -- "$DIST_ROOT"/*.whl
 WHEEL=$1
 

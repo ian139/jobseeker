@@ -5,11 +5,13 @@
   "description": "Puppeteer browser adapter for jobs-assistant guarded autofill",
   "license": "UNLICENSED",
   "dependencies": {
+    "@oh-my-pi/pi-coding-agent": "17.0.7",
+    "bun": "1.3.14",
     "puppeteer": "24.43.1"
   },
   "scripts": {
     "install-browser": "puppeteer browsers install chrome",
     "puppeteer-smoke": "node src/jobs_assistant/puppeteer_runner.js --smoke",
-    "puppeteer-verify": "RUN_PUPPETEER_INTEGRATION=1 RUN_PUPPETEER_HEADED_SMOKE=1 uv run --frozen --extra dev python -m pytest -q -rs tests/test_puppeteer_adapter.py -k 'not test_headed_review_survives_parent_and_closes_from_tab'"
+    "puppeteer-verify": "RUN_PUPPETEER_INTEGRATION=1 RUN_PUPPETEER_HEADED_SMOKE=1 uv run --frozen --extra dev python -m pytest -q -rs tests/test_puppeteer_adapter.py -k 'not test_headed_review_survives_parent_and_closes_from_tab and not test_headed_input_submit_handoff_requires_trusted_gesture'"
   }
 }

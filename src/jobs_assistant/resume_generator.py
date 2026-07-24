@@ -1050,10 +1050,6 @@ def _resolve_graduation_with_rule(
     return education[0].graduation.default, None
 
 
-def _resolve_graduation(education: tuple[_EducationEntry, ...], title: str, description: str) -> str:
-    return _resolve_graduation_with_rule(education, title, description)[0]
-
-
 def _date_key(value: str) -> tuple[int, int, str]:
     months = {name.casefold(): index for index, name in enumerate(("January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"), 1)}
     match = re.search(r"\b(" + "|".join(months) + r")\s+(\d{4})\b", value, re.IGNORECASE)
@@ -1742,10 +1738,6 @@ def _inspect_pdf_bytes(pdf_bytes: bytes) -> tuple[int, str]:
     return pages, "\n".join(text_parts)
 
 
-def _inspect_pdf(pdf_path: Path) -> tuple[int, str]:
-    return _inspect_pdf_bytes(_snapshot_regular(pdf_path, _MAX_RESUME_PDF_BYTES, "generated PDF"))
-
-
 def _validate_pdf_bytes(pdf_bytes: bytes) -> int:
     pages, text = _inspect_pdf_bytes(pdf_bytes)
     if pages != 1:
@@ -1753,10 +1745,6 @@ def _validate_pdf_bytes(pdf_bytes: bytes) -> int:
     if not text.strip():
         raise RuntimeError("generated PDF has no extractable text")
     return pages
-
-
-def _validate_pdf(pdf_path: Path) -> int:
-    return _validate_pdf_bytes(_snapshot_regular(pdf_path, _MAX_RESUME_PDF_BYTES, "generated PDF"))
 
 
 def _replace_plan_selection(plan: ResumePlan, profile: ResumeProfile, selection: _Selection) -> ResumePlan:

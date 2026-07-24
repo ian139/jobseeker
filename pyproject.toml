@@ -16,7 +16,6 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
-live = []
 
 [project.scripts]
 jobs-assistant = "jobs_assistant.cli:main"

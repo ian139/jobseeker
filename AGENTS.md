@@ -64,13 +64,13 @@ Hard rules:
 - Validation artifacts (`observation.json`, `plan.json`, `actions.json`, `filled_state.json`, `job_description.txt` when available, screenshots, fixtures, logs, user annotations) MUST be persisted per run so Greenhouse and Lever handling and preferences improve over time; never discard evidence that could inform future safety decisions.
 - Treat destructive database cleanup as requiring a clear user instruction.
 
-These rules apply to current and future applier work even though archived implementations remain reference-only.
+These rules govern the active implementation; historical implementations are preserved in git history only.
 
 
 ## Applicant/profile reference
 
 
-- Resume file: `archive/old-applier/data/Main_Resume.pdf`
+- Resume file: `resume/Main_Resume.pdf`
 - LinkedIn: `https://www.linkedin.com/in/ianrapko`
 - Personal site: `https://immemorized.com`
 - Profile JSON examples may live under `scraper/data/` or `data/`.
@@ -79,7 +79,6 @@ These rules apply to current and future applier work even though archived implem
 
 Do not touch casually:
 
-- `archive/` code and data.
 - Runtime SQLite data under `data/` or `scraper/data/` unless explicitly instructed.
 - Applicant profile/resume data except through documented profile workflows.
 
@@ -111,13 +110,7 @@ Resume command ownership:
 - Its default artifacts live under `data/generated-resumes-generator/`, kept
   separate from the main application's `data/generated-resumes/` contract.
 
-Archived applier source:
-
-- `archive/minimized-20260706/applier/`: removed first-principles active applier implementation; reference only and not a runnable package snapshot.
-- `archive/old-scraper/`: older scraper/application pipeline reference.
-- `archive/old-applier/`: older monolithic applier/reference applicant data.
-
-Archived code belongs under `archive/`. Do not import archived modules from active code.
+Historical applier source was removed from the working tree; use git history for reference.
 
 ## Development rules
 

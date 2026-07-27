@@ -1,0 +1,21 @@
+{
+  "source": {
+    "package": "playwright",
+    "name": "playwright-cli",
+    "version": "1.60.0",
+    "path": "scraper/.venv/lib/python3.13/site-packages/playwright/driver/package/lib/tools/cli-client/skill"
+  },
+  "files": {
+    "SKILL.md": "75143af12b0201983322b9ddfca7aaee32d4ee8e03189f8d2a23aba1d6295c23",
+    "references/element-attributes.md": "bf19aa4671e0a50a0fefa9c790f39124e803060eefe395042b723c29fcb7faa2",
+    "references/playwright-tests.md": "c5b0719fef2cfdff50bd744051b2f9afc119775db4b48e9b2882c1cf3886797c",
+    "references/request-mocking.md": "54e801c9663fc2b6d68ceb058cb1c360724c2499f42acc7852a68e83e5b5f37c",
+    "references/running-code.md": "d95c539a5990b71d02d8bdf1d9414df16191eb6cff95b0063820518b7a13dcb2",
+    "references/session-management.md": "cd3e261b8763bf952f1e371b876cb78d054379afec85482f9250633e1b7e6c44",
+    "references/spec-driven-testing.md": "48cfac3c178c24c75c19f0c59bab8ee05fd50c110b9916446992ffd4b17a7d1e",
+    "references/storage-state.md": "1122778c9b13b44bddebb4476a7f99d918afd31757be8b4fade3cb09c3d48c99",
+    "references/test-generation.md": "2a9c4d94effa31b05cf367dfa8bbace8874a3bc9799987ad2b03269af224d299",
+    "references/tracing.md": "792e0ac7705e56ac48df84c0f5400221ce86107897c671590a64a4ea6a82508e",
+    "references/video-recording.md": "0cea7708999aa663701917615889a84cbc05200718bb161de9a5366a826c2b4d"
+  }
+}

@@ -3,31 +3,23 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "jobs-assistant"
+name = "jobs-new-resume"
 version = "0.1.0"
-description = "Minimal local job backlog ingestion and safe autofill assistant"
 requires-python = ">=3.11"
 dependencies = [
-    "httpx>=0.27",
-    "pypdf>=4.0",
+  "httpx>=0.27",
+  "pypdf>=4.0",
 ]
 
 [project.optional-dependencies]
-dev = [
-    "pytest>=8.0",
-]
+dev = ["pytest>=8.0"]
 
-[project.scripts]
-jobs-assistant = "jobs_assistant.cli:main"
-job-scrape = "jobs_assistant.cli:job_scrape_main"
-resume-generate = "jobs_assistant.resume_generator_command:main"
+[tool.setuptools]
+package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-
-[tool.setuptools.package-data]
-jobs_assistant = ["puppeteer_runner.js", "safety_policy.json"]
+include = ["resume_generation", "resume_generation.*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-pythonpath = ["src"]
+testpaths = ["tests/resume_generation"]

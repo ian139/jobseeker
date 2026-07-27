@@ -1,270 +1,91 @@
-# Agent Operating Notes
+# Repository Guidelines
 
-## Product direction
+## Project Overview
 
-The active app is a local job scraping/backlog ingestion assistant with a guarded Greenhouse+Lever draft workflow.
+This repository implements the Phase 1 application contracts and the completed Phase 2 per-job resume generator proof. The remaining Phase 1 headed live-submission exit gate is explicitly deferred and must not be marked complete; Phase 3 backlog automation has not started. Follow `TODO.md` for the current authorized scope.
 
-Set-in-stone active features:
+`TODO.md` is the scope and safety authority. `PROJECT_HANDOFF.md` is historical evidence only; verify its paths and claims against the active tree.
 
-- scraper/backlog ingestion into SQLite;
-- filtering and quality gates for source jobs;
-- profile-shaped search/filter ideas;
-- TheirStack preview/paid-fetch concepts and helpers, including the `job-scrape` entrypoint;
-- optional normalized JSON/API feed import for fixtures and backfills.
-
-The rebuilt applier is active for direct Greenhouse and Lever application URLs. It claims queued backlog jobs, combines the explicit applicant profile, configured resume, and optional job description, resolves supported safe fields, persists complete per-run evidence, and leaves an independently owned headed window ready for human review and manual submission. It never performs final submission.
-
-Do not build on archived observer/resolver/executor/runner code. Extend the active `src/jobs_assistant/` contracts through OMP `workflowz`, focused tests, deterministic safety gates, and ATS adapters. Greenhouse was the first adapter; Lever is the active second adapter. Both remain behind the same route, network, safe-action, private-artifact, and no-submit gates.
-
-## Current active workflow
+## Architecture & Data Flow
 
 ```text
-TheirStack / feed / scraper output
-  ↓
-Normalize source job
-  ↓
-Filtering and quality gates
-  ↓
-SQLite jobs backlog
-  ↓
-Sync/run metadata
+run contract + private profile/memory + resume
+  -> policy-free DOM observer
+  -> OMP answer resolution and browser action
+  -> immutable ledger + observation diff + retention check
+  -> completion audit + private evidence
+  -> OMP agent review and automated submission
 ```
 
-Guarded Greenhouse+Lever draft workflow:
+- `src/phase1/contract.mjs` and `profile.mjs` validate fixed run settings, secure local inputs, applicant data, and append-only verified answer memory.
+- `src/phase1/observer.js` is a self-contained page-context IIFE. It inventories controls, frames, blockers, values, validation, and final-action candidates; it must not choose answers or perform actions.
+- `src/phase1/ledger.mjs` owns stable field identity, exact answer-source precedence, observation chains/diffs, deliberate grouped states, action references, and retention checks.
+`src/phase1/audit.mjs` requires every active field to be deliberate, valid, retained, and current while rejecting unknown controls, blockers, stale refs, and incomplete submissions.
+`src/phase1/evidence.mjs` publishes bounded, owner-private JSON/JSONL artifacts, file identities, an action journal, and a submission completion report.
+OMP performs browser actions. Final submission is automated by OMP after the completeness audit passes.
 
-```text
-SQLite queued job
-  ↓
-Open exact public ATS application URL
-  ↓
-Observe DOM/frames
-  ↓
-Resolve safe answers from profile/resume/job context
-  ↓
-Execute guarded non-final actions
-  ↓
-Persist review evidence
-  ↓
-Stop before final submit
+## Key Directories
+
+| Path | Purpose |
+| --- | --- |
+| `src/phase1/` | Active Phase 1 contracts, observer, ledger, audit, and evidence implementation. |
+| `tests/` | Active Node contract, ledger/audit, and evidence regression tests. |
+| `private/` | Git-ignored, owner-private run inputs and evidence. Never expose or commit its contents. |
+| `skills/playwright-cli/` | Retained Playwright CLI 1.60.0 guidance and SHA-256 provenance. |
+| `Archive/` | Reference-only resume-generation code and applicant evidence; not the active Phase 1 runtime. |
+
+## Development Commands
+
+```sh
+npm test
+node --test tests/ledger-audit.test.mjs
+node --test tests/contract-profile.test.mjs
+node --test tests/evidence.test.mjs
+node --check src/phase1/observer.js
 ```
 
-The second workflow is active for direct Greenhouse and Lever routes. Lever is constrained to the exact `jobs.lever.co`/`jobs.eu.lever.co` company plus canonical lowercase UUID route (optional `/apply`), with no query, fragment, credentials, percent-encoding, or path escape. Unsupported ATS routes and unsafe or ambiguous cases remain manual/blocked.
+There is no build step, linter, formatter, coverage threshold, Playwright test config, Docker workflow, or CI pipeline. Do not invent commands from historical documents.
 
-## Safety policy
+## Code Conventions & Common Patterns
 
-Hard rules:
+- **Modules and naming:** Use ESM and two-space indentation. Files use `.mjs`, except the injected observer IIFE in `observer.js`. Prefer `camelCase` functions/values, `PascalCase` error/store classes, and `UPPER_SNAKE_CASE` fixed schemas and limits.
+- **Validation:** Reject unknown keys and malformed, oversized, non-canonical, symlinked, or permission-unsafe inputs with stable error codes. Keep fixed run values (`headed`, `playwright_dom_v1`, `omp_browser`, `omp_agent`) fail-closed.
+- **State:** Return cloned, recursively frozen ledger/audit values. Preserve stable IDs, observation chains, and current refs; never mutate caller-owned state.
+- **Privacy:** Store raw applicant values only under `private/`. Public evidence structures use SHA-256 value digests, field IDs, sources, and outcomes—not profile values.
+- **Browser boundary:** Observation code may read DOM/ARIA state only. OMP resolves answers and performs each interaction. Never add JavaScript form mutation, submit calls, CAPTCHA bypasses, or answer policy to the observer.
+- **OMP browser mechanics:** Use the OMP `browser` tool (`xd://browser`) on the same visible cmux surface as the primary action driver. Re-ground with a fresh observer result and browser snapshot before acting. Text entry is `tab.fill(selector, exactText)`—the answer is the second positional argument, and `--value` or any other option token must never be prefixed to it. Inline `"aria-ref=eNN"` selectors are supported for `tab.fill` and `tab.click`; native `tab.select` and `tab.uploadFile` require a uniquely verified exact CSS selector derived from observed control attributes. These helpers are browser actions, not page-JavaScript mutation. Use pinned Playwright CLI mechanics only when the browser helper cannot operate the exact control.
+- **OMP computer-use fallback:** After both OMP browser and the documented pinned-CLI mechanic cannot operate a native browser/OS interaction, use the `computer` tool on the same visible cmux application surface, especially for a still-open upload chooser. Re-ground from a fresh DOM/snapshot and fresh desktop screenshot before every desktop action; retain cmux browser observation and evidence as the source of truth. Never use desktop input to bypass authentication, CAPTCHA, access controls, or the final-submit boundary (gated by prepareSubmission audit).
+- **Application autonomy:** Infer and execute routine application decisions from the backlog, run contract, profile, resume, job context, and current page without requesting per-job or per-action permission. This includes selecting the next eligible job, opening a clearly identified application-entry control such as Apply/Easy Apply/Apply on company website, choosing non-final navigation, resolving aliases, formatting supported answers, handling optional fields, and retrying recoverable validation failures.
+- **Submission recovery:** A rejected or non-accepted final action does not establish that a job is closed or ineligible. Keep its browser surface and run active, re-observe the page, diagnose the actual validation or required-field cause, resolve and retain it, then rerun the preparation loop. Only explicit live evidence that the posting is unavailable may produce a closed outcome.
+- **Answer precedence:** `memory -> profile -> resume -> agent_inference -> user`. When memory/profile lack an exact alias, agent inference may generate a non-sensitive answer from resume facts plus job-description context. Every inferred answer requires a rationale digest and verified resume/job-description evidence digests and is marked separately in private ledger/evidence. Never infer identity, authorization, protected-class, salary/compensation, date, credential, or other sensitive personal, legal, financial, or medical facts. Ask only when a truthful answer cannot be derived or a third-party authentication/CAPTCHA/access-control interaction is required. Every application answer the user provides in the main session must be saved in owner-private answer memory, with its exact question/site alias when available, for reuse and future reference. Persist the verified answer before resuming the same browser session.
+- **Filesystem safety:** Preserve regular-file/no-symlink checks, owner-only modes, bounded reads, canonical JSON, atomic no-replace publication, descriptor identity checks, and submission finalization.
+- **Async:** Secure contract/profile I/O and the evidence factory are async at integration boundaries; the evidence store and ledger are deliberately synchronous and serialized.
 
-- Every browser mutation or action (fill, click, select, upload, keypress, navigation, or script-triggered event) MUST pass a deterministic allow/deny gate against the current observed page/frame snapshot before execution. Hidden DOM assumptions, stale selectors, and LLM judgment at execution time are prohibited.
-- LLM output MUST be schema-validated and safety-validated, then pass the same deterministic gate before it can influence any browser action. Raw model output MUST never drive a fill, click, navigation, upload, or other mutation.
-- Never click, keypress, navigate, or script-trigger any final-submit, application-submit, mass-apply, bulk-submit, or equivalent terminal application action. Submit-like controls are stop points, not automation targets.
-- Upload only the configured resume file unless the user explicitly changes policy.
-- The applier loop MUST always stop after persisting review evidence and before any final submission. A completed run may leave a draft/application ready for human review and manual submission only; it must not submit, queue submission, schedule submission, or expose a helper that can submit multiple applications.
-- Sensitive, legal, protected-class, financial, authentication, CAPTCHA, and assessment questions MUST never be inferred or automated; they are manual stop points.
-- Inference is permitted only for safe, non-sensitive, noncanonical fields when the relevant source of truth is explicit and deterministic; it MUST NOT replace source-of-truth data or resolve ambiguity.
-- Validation artifacts (`observation.json`, `plan.json`, `actions.json`, `filled_state.json`, `job_description.txt` when available, screenshots, fixtures, logs, user annotations) MUST be persisted per run so Greenhouse and Lever handling and preferences improve over time; never discard evidence that could inform future safety decisions.
-- Treat destructive database cleanup as requiring a clear user instruction.
+## Important Files
 
-These rules govern the active implementation; historical implementations are preserved in git history only.
+| File | Why it matters |
+| --- | --- |
+| `TODO.md` | Authoritative phase contract, live exit gates, and submission boundary. |
+| `package.json` | Node `>=22`, dependency-free ESM package, and the active test command. |
+| `src/phase1/contract.mjs` | Fixed run schema, secure file loading, answer memory, and source precedence. |
+| `src/phase1/profile.mjs` | Exact applicant-profile schema and alias lookups. |
+| `src/phase1/observer.js` | Page-context normalized DOM observer. |
+| `src/phase1/ledger.mjs` | Observation, diff, resolution, action, and retention contracts. |
+| `src/phase1/audit.mjs` | Final completeness and submission audit. |
+| `src/phase1/evidence.mjs` | Private evidence store and completion finalizer. |
+| `tests/*.test.mjs` | Observable regression contracts for active Phase 1 behavior. |
+| `skills/playwright-cli/SOURCE.json` | Retained Playwright bundle version and recorded hashes. |
 
+## Runtime/Tooling Preferences
 
-## Applicant/profile reference
+- Use Node.js 22 or newer and npm. Do not run this package under Bun; production behavior is verified with Node.
+- The package has no runtime dependencies. Do not install Puppeteer/Playwright into this package merely to drive the live browser; the retained skill guides observation, while the OMP `browser` tool on the cmux surface owns ordinary actions, pinned CLI is control-specific fallback, and `computer` is native-UI fallback.
+- Keep browser profiles, screenshots, resumes, answer memory, and evidence under owner-private, git-ignored paths.
+- The secure file implementation assumes POSIX ownership, modes, descriptor flags, and directory `fsync` behavior.
 
+## Testing & QA
 
-- Resume file: `resume/Main_Resume.pdf`
-- LinkedIn: `https://www.linkedin.com/in/ianrapko`
-- Personal site: `https://immemorized.com`
-- Profile JSON examples may live under `scraper/data/` or `data/`.
-
-## Protected files and data
-
-Do not touch casually:
-
-- Runtime SQLite data under `data/` or `scraper/data/` unless explicitly instructed.
-- Applicant profile/resume data except through documented profile workflows.
-
-## Active code layout
-
-Active source:
-
-- `src/jobs_assistant/contracts.py`: ingestion/domain dataclasses.
-- `src/jobs_assistant/db.py`: jobs/sync SQLite schema and helpers.
-- `src/jobs_assistant/backlog.py`: queue upsert, dedupe, backlog counts.
-- `src/jobs_assistant/theirstack.py`: TheirStack payload/client/sync helpers.
-- `src/jobs_assistant/job_source.py`: JSON/API feed normalization and import.
-- `src/jobs_assistant/application.py`: guarded browser-adapter/LLM-assisted autofill primitives and run persistence.
-- `src/jobs_assistant/cli.py`: minimal CLI entrypoints, including `jobs-assistant` and `job-scrape`.
-- `tests/`: focused scraper/ingestion/backlog/TheirStack/CLI/autofill tests.
-- `scripts/smoke.sh`: repository smoke check script.
-
-Resume command ownership:
-
-- Top-level `resume-generate` uses
-  `src/jobs_assistant/resume_generator.py` and
-  `resume/generator/{profile.json,Resume.tex,SKILL.md}`; this is the canonical
-  standalone resume generator.
-- `jobs-assistant resume-generate` remains the preserved main-application
-  service with an incompatible API and artifact contract. Do not overlay the
-  two `resume.py` implementations; integrate through a deliberate adapter
-  later.
-
-- Its default artifacts live under `data/generated-resumes-generator/`, kept
-  separate from the main application's `data/generated-resumes/` contract.
-
-Historical applier source was removed from the working tree; use git history for reference.
-
-## Development rules
-
-- Keep business logic as pure functions over typed data where possible.
-- Keep side effects at boundaries: CLI, HTTP, SQLite, filesystem.
-- Add tests for every new filtering, ingestion, dedupe, profile, or TheirStack branch.
-- Prefer boring schemas and explicit JSON/SQLite contracts.
-- Do not add a second convention beside an existing one.
-- Use the named OMP model roles as the source of truth: `DEFAULT` is the primary Terra xhigh orchestrator and `SLOW` is the alternate Sol minimal orchestrator mode. Sol xhigh is reserved exclusively for independent `ADVISOR` review. `SMOL` is Luna medium and `TASK` is Luna xhigh; global `task-high` supplies a Luna-high implementation lane. Terra supplies the middle `PLAN`, `VISION`, and `DESIGNER` specialist lanes; `COMMIT` and `TINY` are Luna medium.
-
-## Model aliases
-
-| Model | Role alias | Reasoning |
-|---|---|---|
-| `openai-codex/gpt-5.6-terra` | `DEFAULT` | xhigh |
-| `openai-codex/gpt-5.6-sol` | `ADVISOR` | xhigh |
-| `openai-codex/gpt-5.6-sol` | `SLOW` | minimal |
-| `openai-codex/gpt-5.6-terra` | `VISION` | medium |
-| `openai-codex/gpt-5.6-terra` | `PLAN` | medium |
-| `openai-codex/gpt-5.6-terra` | `DESIGNER` | high |
-| `openai-codex/gpt-5.6-luna` | `SMOL` | medium |
-| `openai-codex/gpt-5.6-luna` | `TASK` | xhigh |
-| `openai-codex/gpt-5.6-luna` | `task-high` | high |
-| `openai-codex/gpt-5.6-luna` | `COMMIT` | medium |
-| `openai-codex/gpt-5.6-luna` | `TINY` | medium |
-
-## Metrics-first goals and minimal tooling
-
-Every substantial task should name:
-
-- goal;
-- metric;
-- target threshold or invariant;
-- measurement source;
-- stop condition.
-
-When Prometheus/Grafana are not wired for the touched path, use focused tests, CLI output, fixture counts, SQLite queries, or markdown checklists as temporary metrics.
-
-## OMP workflowz orchestration
-
-Use OMP workflowz for non-trivial implementation work. The coordinator decomposes the approved plan into explicit subagent tasks and dispatches them through OMP's in-session orchestration/task runtime; do not introduce a second repository-specific terminal or worktree orchestration layer.
-
-Every implementation, test, review, or documentation assignment must be tracked in the OMP workflow with explicit ownership and dependencies. Dispatch independent file slices in parallel and serialize only established API/schema dependencies.
-
-Orchestration subtasks must include:
-
-- exact target files/symbols;
-- non-goals and forbidden files;
-- acceptance criteria;
-- focused verification command;
-- owner/subagent role;
-- report contract.
-
-Role/model mapping for this project:
-
-- Coordinator / integration owner: `DEFAULT` (`openai-codex/gpt-5.6-terra`, xhigh) or alternate `SLOW` (`openai-codex/gpt-5.6-sol`, minimal), or the current orchestrator session.
-- Implementation and tester workers: `TASK` (`openai-codex/gpt-5.6-luna`, xhigh), `SMOL` (`openai-codex/gpt-5.6-luna`, medium), or global `task-high` (`openai-codex/gpt-5.6-luna`, high) for bounded high-reasoning work.
-- Higher-thinking delegated planning or specialist work: Terra-backed `PLAN`, `VISION`, or `DESIGNER`.
-- Safety/review worker: `ADVISOR` (`openai-codex/gpt-5.6-sol`, xhigh); Sol xhigh is advisor-only.
-- Low-risk docs/status summarizer: `COMMIT` (`openai-codex/gpt-5.6-luna`, medium).
-
-Worker completion contract:
-
-- Each worker returns one final report for its assigned task.
-- The report lists modified files, focused tests run, results, blockers, and remaining risks.
-- Workers raise blocking questions through the OMP task channel instead of opening local interactive prompts.
-- Workers do not send group lifecycle messages or redefine shared contracts without coordinator approval.
-
-Delegate by need:
-
-- Tester: high-signal tests and edge cases.
-- reviewer: safety, quality, security, and scope review.
-- task worker: implementation on explicit files.
-- designer: UI/design work only.
-- librarian: external API/library research.
-
-The parent worktree is the integration authority. Compare worker reports/diffs, integrate only useful patches, reject unrelated edits, and verify in the parent.
-
-Future applier revival must be decomposed through orchestration into at least:
-
-1. source/backlog contract;
-2. page observer contract;
-3. resolver JSON contract;
-4. executor safety contract;
-5. persistence/output contract;
-6. safety review and adversarial tests.
-
-
-The orchestrated applier loop runs over durable artifacts, not a one-shot browser script:
-
-```text
-discover -> observe -> resolve -> execute guarded non-final actions -> persist evidence -> human review/manual submission
-```
-
-Practice rules:
-
-- Use the Puppeteer browser-adapter boundary for page observation and guarded field actions; workers must not invent ad hoc browser-control paths outside observer/executor contracts. The current local install commands for the Puppeteer-backed path are `npm install` and `npm run install-browser`.
-- Greenhouse was the first adapter; Lever is the active second adapter. Keep ATS-specific selectors, field normalization, and quirks behind the ATS adapter protocol so future ATS support can be added without changing resolver or safety contracts. Both active adapters use the same route, network, safe-action, private-artifact, and no-submit gates.
-- Persist observed page fixtures/snapshots, resolver JSON, planned actions, rejected actions, filled-state evidence, `job_description.txt` when available, screenshots when available, and user preference annotations. These artifacts feed future adapter improvements and fixture tests; they are not permission to relax safety gates.
-
-No worker may add final-submit behavior until a separate submit policy exists and is tested.
-## Verification
-
-From a clean checkout with the committed `uv.lock`:
-
-```bash
-uv lock --check
-uv run --frozen --extra dev python -m pytest
-uv run --frozen jobs-assistant --help
-```
-
-Container verification:
-
-```bash
-docker compose build
-docker compose up -d
-docker compose ps
-docker compose down
-```
-
-Never claim verification unless the command was actually run.
-
-## Containerization contract
-
-Everything should be able to run in containers by default. Host execution is a developer convenience, not the only verified path.
-
-For every CLI entrypoint or service boundary added or changed, ensure:
-
-- dependencies are declared in project files;
-- required environment variables have examples or safe defaults;
-- tests run from a clean checkout;
-- Docker/compose wiring is updated when runtime behavior changes.
-
-## Review policy
-
-Prefer executable evidence over subjective review.
-
-Useful findings cite:
-
-- failing tests;
-- missing tests;
-- broken contracts;
-- unclear ownership boundaries;
-- containerization gaps;
-- safety-sensitive logic;
-- diffs outside scope.
-
-## Verification contract for completed tasks
-
-Final reports must include:
-
-1. Summary of behavior changed.
-2. Files changed.
-3. Tests/checks run.
-4. Container commands actually run or skipped reason.
-5. Known risks or skipped checks.
-6. Suggested next patch, if any.
+- `npm test` runs the active `node:test` suite. Add tests only for observable contracts and plausible regressions; keep fixtures deterministic and private-data free.
+- For observer or browser behavior, a headed live smoke run is required. Record chained observations/diffs, action refs, the field ledger, retry/validation recovery, uploaded-resume identity, final screenshot/audit, and submission evidence.
+- A passing unit suite does not replace the live exit gate. Leave the browser open on the final review boundary and activate the final Submit control only after prepareSubmission authorizes it.
+- Keep test output free of applicant values, resume text, screenshots, authentication state, and raw job payloads.

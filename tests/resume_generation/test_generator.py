@@ -489,6 +489,18 @@ def test_requirement_terms_strip_edge_slashes_and_dashes_before_stop_words(tmp_p
     assert "rust" in lowered
     assert "zig" in lowered
 
+def test_requirement_terms_ignore_generic_projects_word() -> None:
+    job = _job(
+        description=(
+            "You will work on application projects for global expansion.\n"
+            "Required Experience:\n"
+            "- Java\n"
+        ),
+    )
+    terms = {term.casefold() for term in resume_module._requirement_terms(job.title, job.description)}
+    assert "projects" not in terms
+    assert "java" in terms
+
 def test_generation_fills_skills_before_lower_priority_content(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

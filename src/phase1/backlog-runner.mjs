@@ -948,6 +948,61 @@ export async function resumeNeedsUserRun(database, runId, options = {}) {
   if (result === null) fail('E_RUN_NOT_NEEDS_USER');
   return result;
 }
+/** Skip an active needs_user run without fabricating a user answer. */
+export async function skipNeedsUserRun(database, runId, options = {}) {
+  const allowed = new Set(['ownerId', 'browserSessionId', 'now', 'reason']);
+  assertExactKeys(options, allowed, 'E_SKIP_OPTIONS');
+  const id = requirePositiveInteger(runId, 'E_RUN_ID');
+  const ownerId = normalizeOwner(options.ownerId, 'E_OWNER_ID');
+  const browserSessionId = normalizeOwner(options.browserSessionId, 'E_BROWSER_SESSION_ID');
+  const now = normalizeTimestamp(options.now, 'E_SKIP_TIMESTAMP');
+  const reason = normalizeReasonCode(options.reason, 'captcha_unsolved');
+  const db = databasePath(database);
+  const rows = parseRows(await runSqlite(db, `
+PRAGMA foreign_keys = ON;
+BEGIN IMMEDIATE;
+CREATE TEMP TABLE _backlog_skip_result (run_id INTEGER PRIMARY KEY);
+UPDATE application_runs
+SET status = 'skipped',
+    active = 0,
+    reason_code = ${sqlLiteral(reason)},
+    finished_at = ${sqlLiteral(now)},
+    blocker_alias = NULL,
+    lease_expires_at = NULL,
+    last_progress_at = ${sqlLiteral(now)}
+WHERE id = ${sqlLiteral(id)}
+  AND owner_id = ${sqlLiteral(ownerId)}
+  AND browser_session_id = ${sqlLiteral(browserSessionId)}
+  AND active = 1
+  AND status = 'needs_user'
+  AND EXISTS (
+    SELECT 1
+    FROM application_jobs
+    WHERE application_jobs.id = application_runs.job_id
+      AND application_jobs.status = 'needs_user'
+  );
+INSERT INTO _backlog_skip_result (run_id)
+SELECT id FROM application_runs
+WHERE id = ${sqlLiteral(id)} AND changes() = 1;
+UPDATE application_jobs
+SET status = 'skipped',
+    status_reason = ${sqlLiteral(reason)},
+    completed_at = ${sqlLiteral(now)}
+WHERE id = (
+  SELECT job_id FROM application_runs AS r
+  JOIN _backlog_skip_result AS s ON s.run_id = r.id
+)
+  AND status = 'needs_user';
+SELECT ${RUN_SELECT_COLUMNS}
+FROM application_runs AS r
+JOIN application_jobs AS j ON j.id = r.job_id
+JOIN _backlog_skip_result AS s ON s.run_id = r.id;
+COMMIT;
+`), 'E_SKIP_RESULT');
+  const result = normalizeRunRows(rows, 'E_SKIP_RESULT');
+  if (result === null) fail('E_RUN_NOT_NEEDS_USER');
+  return result;
+}
 async function ensurePrivateRoot(root) {
   let status;
   try {

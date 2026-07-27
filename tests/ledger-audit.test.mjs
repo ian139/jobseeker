@@ -621,6 +621,49 @@ test('allows only UI-backed optional and sensitive deliberate choices', () => {
   assert.equal(fieldById(result.ledger, 'sensitive-field').sensitive, true);
   assert.equal(auditCompletion(result.ledger, current).passed, true);
 });
+ 
+test('retains user-evidenced blanks for optional empty controls', () => {
+  const current = observation('obs-1', [
+    control('optional-empty-text', {
+      kind: 'input',
+      tag: 'input',
+      type: 'text',
+      role: 'textbox',
+      required: false,
+      value: null,
+      value_present: false,
+      options: [],
+    }),
+    control('optional-empty-file', {
+      kind: 'input',
+      tag: 'input',
+      type: 'file',
+      role: 'textbox',
+      required: false,
+      value: null,
+      value_present: false,
+      file: { accept: [], count: 0, names: [] },
+      options: [],
+    }),
+    finalCandidate(),
+  ]);
+  let ledger = createLedger(current);
+  for (const fieldId of ['optional-empty-text', 'optional-empty-file']) {
+    ledger = recordResolution(ledger, {
+      field_id: fieldId,
+      observation_id: 'obs-1',
+      ref: `ref-${fieldId}`,
+      source: 'user',
+      value_digest: null,
+      semantic_choice: 'blank',
+    });
+  }
+  const result = verifyRetention(ledger, current);
+  assert.equal(result.ok, true);
+  assert.equal(fieldById(result.ledger, 'optional-empty-text').retained, true);
+  assert.equal(fieldById(result.ledger, 'optional-empty-file').retained, true);
+  assert.equal(auditCompletion(result.ledger, current).passed, true);
+});
 
 test('blocks completion on observation blockers and unknown visible candidates', () => {
   const unknown = control('unknown-action', {

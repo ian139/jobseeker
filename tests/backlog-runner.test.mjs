@@ -18,6 +18,7 @@ import {
   preflightBacklogRun,
   recoverActiveRun,
   resumeNeedsUserRun,
+  skipNeedsUserRun,
 } from '../src/phase1/backlog-runner.mjs';
 
 const SQLITE = 'sqlite3';
@@ -658,6 +659,48 @@ test('resumeNeedsUserRun resumes the same row only after the persisted blocker a
     assert.deepEqual(await readRows(value.database, `SELECT blocker_alias FROM application_runs WHERE id = ${claimed.runId}`), [
       { blocker_alias: null },
     ]);
+  } finally {
+    await removeFixture(value);
+  }
+});
+
+test('skipNeedsUserRun atomically releases a needs_user CAPTCHA run', async () => {
+  const value = await fixture([{ id: 81 }]);
+  try {
+    const claimed = await claimNextQueuedJob(value.database, claimOptions(value));
+    await createWorkspace(value, claimed);
+    await pauseRunForUser(value.database, claimed.runId, {
+      ownerId: claimed.ownerId,
+      browserSessionId: claimed.browserSessionId,
+      now: '2026-07-26T00:00:10.000Z',
+      reason: 'captcha_required',
+      questionAlias: 'layup_captcha',
+    });
+    const skipped = await skipNeedsUserRun(value.database, claimed.runId, {
+      ownerId: claimed.ownerId,
+      browserSessionId: claimed.browserSessionId,
+      now: '2026-07-26T00:00:20.000Z',
+      reason: 'captcha_unsolved',
+    });
+    assert.equal(skipped.status, 'skipped');
+    assert.equal(skipped.active, false);
+    assert.equal(skipped.leaseExpiresAt, null);
+    assert.deepEqual(await readRows(value.database, `
+      SELECT r.status, r.active, r.blocker_alias, r.lease_expires_at, j.status AS job_status
+      FROM application_runs AS r JOIN application_jobs AS j ON j.id = r.job_id
+    `), [{
+      status: 'skipped',
+      active: 0,
+      blocker_alias: null,
+      lease_expires_at: null,
+      job_status: 'skipped',
+    }]);
+    await assert.rejects(() => skipNeedsUserRun(value.database, claimed.runId, {
+      ownerId: 'wrong-owner',
+      browserSessionId: claimed.browserSessionId,
+      now: '2026-07-26T00:00:30.000Z',
+      reason: 'captcha_unsolved',
+    }));
   } finally {
     await removeFixture(value);
   }

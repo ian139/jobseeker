@@ -2,7 +2,7 @@
 
 This is the execution roadmap for the fresh implementation. `PROJECT_HANDOFF.md` is design history and evidence; this file defines the new build order and acceptance gates.
 
-**Current phase:** Phase 2 generator proof complete. The user explicitly deferred the remaining Phase 1 live-submission proof and removed it as a prerequisite for Phase 2. Do not mark the deferred Phase 1 gate complete. Phase 3 has not started because the current request is generator-only.
+**Current phase:** Phase 3 backlog processing is active by explicit user authorization. Phase 2 generator proof and the durable Phase 3 lifecycle repair are complete, as verified by the lifecycle work record and current SQLite state. The remaining Phase 1 headed live-submission checklist entries stay evidence-gated and are not marked complete by this authorization. Process exactly one active job at a time through the persistent OMP session and do not mark unchecked live gates complete without direct evidence.
 
 ## How an OMP agent must use this file
 
@@ -10,7 +10,7 @@ This is the execution roadmap for the fresh implementation. `PROJECT_HANDOFF.md`
 2. Turn every unchecked item in that phase into an execution plan. Do not reinterpret the phase into a smaller scaffold.
 3. Work through the phase end to end. A fixture, unit test, mocked browser, or CLI success is not a substitute for the phase's live proof.
 4. Keep OMP as the operator and reasoning loop. Deterministic libraries may expose narrow tools, but a custom CLI, daemon, RPC coordinator, or policy engine must not become the product loop.
-5. Do not begin the next phase until every exit-gate item for the current phase has been directly observed, except where this roadmap explicitly records a user-authorized deferred gate.
+5. Do not declare a phase complete until every exit-gate item for that phase has been directly observed, except where this roadmap explicitly records a user-authorized deferral or activation. The explicit Phase 3 activation permits supervised backlog operation while unchecked live gates remain completion evidence to obtain.
 6. Preserve private applicant data locally. Do not place profile values, resume claims, field answers, or application screenshots in public logs or summaries.
 
 ## Product end state
@@ -38,7 +38,7 @@ The system prepares complete applications and performs final submission after th
 - **Final submission is automated by OMP after `prepareSubmission` authorizes it.** OMP identifies the final control, runs the completeness audit via `prepareSubmission`, durably begins the attempt with `beginFinalSubmit`, clicks the returned ref, and records the observed outcome with `completeFinalSubmit`. This is programmatic audit authorization and requires no human approval.
 - **Direct browser operation replaces the old guarded applier.** Do not reactivate the archived Puppeteer/Python protocol, route allowlist, sensitive-field blocker, safety-policy stack, application RPC service, detached-browser recovery system, or handoff-on-uncertainty behavior. Reuse lessons, not that implementation.
 - **Playwright observes; OMP acts.** The Playwright navigation skill and DOM observer describe the current page and verify retained state. The OMP `browser` tool on the same cmux surface is the primary action driver for clicking application-entry controls, filling, selecting, uploading, scrolling, and non-final navigation. Pinned Playwright CLI is control-specific fallback; `computer` is last-resort native browser/OS fallback when available. Re-observe after every meaningful mutation.
-- **Do not bypass third-party controls.** The request is to remove restrictions imposed by the old local code, not to evade a site's authentication, CAPTCHA, anti-bot mechanism, assessment integrity, or access controls. If one appears, request only the narrow user interaction needed, keep the run active, then resume.
+- **Solve CAPTCHAs automatically.** Detect and complete CAPTCHA challenges using OMP browser or computer-use tools. Re-ground with a fresh observer result and browser snapshot before and after each CAPTCHA interaction. CAPTCHA alone must never trigger user escalation, a `needs_user` outcome, or a blocked run. Record the CAPTCHA detection, resolution method, and outcome in the private ledger.
 - **Live evidence must match the claim.** Browser success requires a real headed browser run on the selected application. Resume success requires a real compiled and inspected PDF. Pipeline success requires the persistent OMP loop to consume a real SQLite row.
 
 ## Assets to retain
@@ -178,7 +178,7 @@ Do not build a database, event-sourcing layer, custom browser protocol, or distr
 - generalized Greenhouse/Lever adapters or broad cross-site compatibility;
 - an application CLI as the primary operator;
 - a persistent daemon, RPC service, or browser subprocess protocol;
-- bypassing CAPTCHA, authentication, assessment, anti-bot, or access controls.
+- circumventing authentication, assessment, anti-bot, or access controls (completing presented CAPTCHA challenges through normal browser/computer interaction is required, not circumvention).
 
 ## Live exit gate
 
@@ -287,6 +287,8 @@ Phase 2 is complete only when a real generation demonstrates all of these:
 Ingest normalized jobs from a selectable source into SQLite, keep a persistent OMP agent watching the backlog, atomically take one queued job at a time through the proven Phase 1 application workflow, and then insert the proven Phase 2 resume generator before browser filling so each application receives its verified job-specific resume.
 
 Phase 3 has two ordered integration steps. Step A connects sourcing/backlog to Phase 1 with the existing resume. Step B adds Phase 2 resume generation. Do not combine both steps before Step A works.
+
+**Active operating authority:** A persistent supervised OMP session may inspect, recover, claim, prepare, audit, and submit backlog applications one at a time. It must use the durable owner/lease lifecycle, job-specific preflight and resume binding, canonical Phase 1 evidence, and automated submission boundary. No separate per-job or per-action permission is required. Missing non-inferable facts and third-party access controls remain the only user-interaction boundaries.
 
 ## Source decision
 
@@ -399,7 +401,7 @@ If no work exists, the OMP session waits and checks again using a configured int
 
 ## Explicitly out of scope
 
-- bypassing source fees, site access controls, CAPTCHA, or assessments;
+- bypassing source fees, site access controls, or assessments;
 - reviving the old RPC/OMP coordinator or custom browser protocol;
 - multiple authoritative resume generators;
 - broad concurrency before sequential recovery works;
@@ -422,4 +424,4 @@ Phase 3 is complete only when the persistent supervised system demonstrates all 
 
 ## OMP kickoff prompt
 
-> Read `PROJECT_HANDOFF.md` and `TODO.md` Phase 3. Begin only after the live exit gates for Phases 1 and 2 pass. Implement Phase 3 in order: first connect one real source and a minimal SQLite backlog to the unchanged Phase 1 worker using the existing resume; prove that path; then insert the canonical Phase 2 generator and prove the uploaded PDF identity. Keep a persistent OMP agent as the runtime loop inside a supervised cmux workspace. Use deterministic code only as narrow source, database, resume, and DOM-observation tools. Start with one active job, persist atomic claims and concise progress, never classify an incomplete/error run as ready for review, and perform final submission only after `prepareSubmission` authorizes it. Finish with a live source-to-SQLite-to-resume-to-browser-to-submission run, restart recovery evidence, and an OMP loop that returns to the backlog afterward.
+> Read `PROJECT_HANDOFF.md`, this active Phase 3 contract, both completed lifecycle work records, and the application/resume skills. Operate the SQLite backlog through one persistent supervised OMP session with `max_active_jobs = 1`. On startup or restart, recover the existing durable run before considering a claim. Before claiming a queued job, inspect that exact candidate, obtain its truthful job description, generate and validate its job-specific canonical resume, and run preflight with matching paths and hashes. Then claim atomically, create or recover its private workspace, complete every reachable field through the one-field observe–act–reobserve loop, and perform final submission only through `prepareSubmission -> beginFinalSubmit -> browser click -> fresh observation -> completeFinalSubmit -> finalizeRun`. Persist `completed` only from canonical evidence, clear the active lease, and return to backlog inspection. Never bulk-claim, reuse another job's inputs, bypass access controls, or treat an incomplete/error run as completed.

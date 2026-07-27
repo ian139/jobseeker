@@ -990,7 +990,7 @@ _REQUIREMENT_PATTERN = re.compile(
 )
 _REQUIREMENT_TOKEN_RE = re.compile(r"(?:\.[A-Za-z][A-Za-z0-9]*|[A-Za-z][A-Za-z0-9+#./-]{2,})")
 _STOP_TERMS = {
-    "and", "the", "with", "for", "from", "this", "that", "have", "has", "are", "will", "your", "our", "you", "we", "they", "their", "into", "using", "use", "work", "working", "years", "year", "team", "teams", "strong", "required", "requirements", "preferred", "experience", "knowledge", "ability", "skills", "skill", "familiar", "including", "looking", "develop", "developing", "build", "building", "role", "position", "candidate", "about", "through", "plus", "like", "such", "other", "must", "want", "need", "job", "company", "engineer", "engineering", "developer", "software", "intern", "internship", "co-op", "coop",
+    "and", "the", "with", "for", "from", "this", "that", "have", "has", "are", "will", "your", "our", "you", "we", "they", "their", "into", "using", "use", "work", "working", "years", "year", "team", "teams", "strong", "required", "requirements", "preferred", "experience", "knowledge", "ability", "skills", "skill", "familiar", "including", "looking", "develop", "developing", "build", "building", "role", "position", "candidate", "about", "through", "plus", "like", "such", "other", "must", "want", "need", "job", "company", "engineer", "engineering", "developer", "software", "intern", "internship", "co-op", "coop", "projects",
 }
 
 

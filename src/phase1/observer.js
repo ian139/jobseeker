@@ -264,7 +264,13 @@
     let semantic = null;
     let current = parentElement(element);
     for (let depth = 0; current && depth < 64; depth += 1) {
-      if (hasClassToken(current, "file-upload")) return current;
+      if (hasClassToken(current, "file-upload")
+          || hasClassToken(current, "ashby-application-form-autofill-input-root")
+          || (current.querySelector && current.querySelector(':scope > input[type="file"]')
+            && (current.querySelector('[title="Delete file"]')
+              || current.querySelector('button')?.textContent?.trim() === "Replace"))) {
+        return current;
+      }
       if (identified === null &&
           (testIdFor(current) || attr(current, "id") || attr(current, "name"))) {
         identified = current;
@@ -399,6 +405,32 @@
     if (tag === "button" || tag === "a") {
       const content = elementText(element);
       if (content) return content;
+    }
+    const questionAncestor = ancestor(element, (candidate) => {
+      const tag = candidate.tagName ? candidate.tagName.toLowerCase() : "";
+      if (tag === "html" || tag === "body" || tag === "form") return false;
+      const role = rawRole(candidate);
+      if (role === "group" || role === "radiogroup" || tag === "fieldset") return true;
+      try {
+        const controls = candidate.querySelectorAll("input, select, textarea, [role='combobox'], [role='textbox']");
+        return controls.length === 1;
+      } catch (_) {
+        return false;
+      }
+    });
+    if (questionAncestor) {
+      try {
+        const candidates = Array.from(questionAncestor.querySelectorAll("p, span, label, h1, h2, h3, h4, h5, h6, legend"));
+        for (const candidate of candidates) {
+          if (ancestor(candidate, (parent) => parent === element)) continue;
+          const candidateText = elementText(candidate);
+          if (candidateText && !/^(?:Select|Select\.\.\.|\*)$/i.test(candidateText.trim())) {
+            return text(candidateText);
+          }
+        }
+      } catch (_) {
+        // Fall through
+      }
     }
     const legend = ancestor(element, (candidate) => candidate.tagName && candidate.tagName.toLowerCase() === "fieldset");
     if (legend) {
@@ -729,6 +761,14 @@
       if (error && String(error.message).includes("file_limit")) throw error;
       count = 0;
     }
+    if (count === 0) {
+      const container = uploadContainerFor(element);
+      const rendered = container ? uploadedFileForContainer(container) : null;
+      if (rendered && rendered.count > 0) {
+        count = rendered.count;
+        names.push(...rendered.names);
+      }
+    }
     return { accept, count, names };
   }
 
@@ -916,16 +956,20 @@
     return "group-" + sha256(key).slice(0, 24);
   }
 
+
   function insideForm(element) {
     return Boolean(ancestor(element, (candidate) => candidate.tagName && candidate.tagName.toLowerCase() === "form"));
   }
-
   function candidateFor(element, info, label, verifiedChoice = false) {
-    const normalized = (label || "").toLowerCase().replace(/\s+/g, " ").trim();
+    const normalized = (label || attr(element, "title") || "").toLowerCase().replace(/\s+/g, " ").trim();
     const finalPattern = /\b(submit|send application|complete application|finish application|finali[sz]e|confirm and apply|submit application)\b/i;
     const navigationPattern = /\b(apply|start application|begin application|continue|next|proceed|review|go to application|begin|get started)\b/i;
-    const helperPattern = /^(?:toggle flyout|attach|dropbox|google drive|enter manually|add another|remove file|clear selections)$/i;
+    const helperPattern = /^(?:toggle flyout|attach|dropbox|google drive|enter manually|add another|remove file|clear selections|remove file|upload file|delete file|replace)$/i;
     const submitType = info.type === "submit" || info.type === "image";
+    if (info.type === "file"
+        && ancestor(element, (candidate) => hasClassToken(candidate, "ashby-application-form-autofill-input-root"))) {
+      return { class: "non_final_navigation", reason: "optional browser autofill uploader helper" };
+    }
     if (finalPattern.test(normalized)) {
       return { class: "final_candidate", reason: "visible control has a final-submission label or submit type" };
     }
@@ -963,8 +1007,32 @@
     parts.push("choice", optionIdentity, "group", choiceContextFor(element));
   }
 
+  function fileIdentityElement(element, identityElement) {
+    const candidates = [element, identityElement];
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      const tag = candidate.tagName && candidate.tagName.toLowerCase();
+      if (tag === "input" && text(attr(candidate, "type"), MAX_LOCATOR_CHARS).toLowerCase() === "file"
+          && (testIdFor(candidate) || attr(candidate, "id") || attr(candidate, "name") || attr(candidate, "aria-labelledby"))) {
+        return candidate;
+      }
+      const children = candidate.children;
+      if (!children) continue;
+      for (const child of children) {
+        const childTag = child && child.tagName && child.tagName.toLowerCase();
+        if (childTag === "input" && text(attr(child, "type"), MAX_LOCATOR_CHARS).toLowerCase() === "file"
+            && (testIdFor(child) || attr(child, "id") || attr(child, "name") || attr(child, "aria-labelledby"))) {
+          return child;
+        }
+      }
+    }
+    return null;
+  }
+
   function stableIdFor(element, info, frameId, label, name, identityElement = null, identityLabel = null) {
-    const source = info.type === "file" ? (identityElement || uploadContainerFor(element) || element) : (identityElement || element);
+    const source = info.type === "file"
+      ? (fileIdentityElement(element, identityElement) || identityElement || uploadContainerFor(element) || element)
+      : (identityElement || element);
     const testId = testIdFor(source);
     const id = attr(source, "id");
     const sourceName = text(attr(source, "name"), MAX_LOCATOR_CHARS);
@@ -1055,7 +1123,8 @@
     };
   }
   function uploadedFileForContainer(container) {
-    const filenameElement = descendantWithClass(container, "file-upload__filename");
+    const filenameElement = descendantWithClass(container, "file-upload__filename")
+      || (container.querySelector && container.querySelector('[title="Delete file"]')?.parentElement?.querySelector("span"));
     const filename = text(elementText(filenameElement), MAX_FILE_NAME_CHARS);
     const name = filename ? filename.split(/[\\/]/).pop() : null;
     return { accept: [], count: name ? 1 : 0, names: name ? [name] : [] };
@@ -1217,7 +1286,12 @@
       controls.push(control);
     }
     for (const container of elements) {
-      if (!hasClassToken(container, "file-upload") || !isVisible(container)) continue;
+      if (!(hasClassToken(container, "file-upload")
+          || hasClassToken(container, "ashby-application-form-autofill-input-root")
+          || (container.querySelector && container.querySelector(':scope > input[type="file"]')
+            && (container.querySelector('[title="Delete file"]')
+              || container.querySelector('button')?.textContent?.trim() === "Replace")))
+          || !isVisible(container)) continue;
       const file = uploadedFileForContainer(container);
       if (file.count === 0) continue;
       const info = { kind: "input", tag: "input", type: "file", role: "textbox", native: false };

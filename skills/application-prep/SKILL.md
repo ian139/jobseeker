@@ -25,7 +25,11 @@ For every application:
 
 Do not pause to discuss, summarize, compare alternatives, or request confirmation for routine application decisions. Choose the most direct truthful answer and act. Do not speculate about hypothetical failures or produce progress commentary between ordinary field actions. Do not repeatedly reconsider an already verified field unless a fresh observation or diff marks it stale, invalid, changed, or affected by a newly revealed dependency.
 
-Ask the user only when a required sensitive fact is unavailable; authentication, CAPTCHA, an assessment, or access control requires their interaction; or no truthful answer can be derived from available evidence. Salary and other sensitive facts remain non-inferable. Final submission still requires `prepareSubmission`. A rejected final action requires a fresh observation, correction of the actual validation or field error, a fresh audit, and then another authorized submission attempt; never blindly repeat the same click.
+Ask the user only when a required sensitive fact is unavailable; authentication, an assessment, or access control requires their interaction; or no truthful answer can be derived from available evidence. Salary and other sensitive facts remain non-inferable. Final submission still requires `prepareSubmission`. A rejected final action requires a fresh observation, correction of the actual validation or field error, a fresh audit, and then another authorized submission attempt; never blindly repeat the same click.
+
+### Free-text response style
+
+Never use an em dash (`—`) in any generated, adapted, or filled application response. Rewrite the sentence with commas, parentheses, a colon, a semicolon, or separate sentences before calling `tab.fill`. This applies to company-specific answers, reusable answer-memory templates, explanations, and all other free-text responses.
 
 ## Handoff-safe OMP browser quick start
 
@@ -69,10 +73,11 @@ Never use `tab.evaluate`, pinned-CLI evaluation, or injected page JavaScript to 
 - Read `skills/playwright-cli/SKILL.md` before opening the browser. Do not modify that pinned skill.
 - Generic examples in the retained Playwright skill are not application mechanics when they conflict with this skill. In particular, its targetless `type`, Enter/`--submit`, and generic upload examples do not override this application skill’s browser-first, exact-selector, no-submit, ordered-fallback rules.
 - OMP `browser` helpers on the same visible cmux surface own ordinary browser actions. Pinned Playwright CLI is the first fallback for a control the browser helper cannot operate; `computer` is the final native browser/OS fallback when available. Every path must follow the quick-start mapping, recording, re-observation, and retention rules.
-- JavaScript evaluation is observation-only except for injecting the observer-chain value. Never mutate form state, attach files, or submit through evaluation. Never use desktop input to bypass authentication, CAPTCHA, access controls, or the final-submit boundary gated by `prepareSubmission`.
+- JavaScript evaluation is observation-only except for injecting the observer-chain value. Never mutate form state, attach files, or submit through evaluation. Never use desktop input to bypass authentication, access controls, or the final-submit boundary gated by `prepareSubmission`.
 - Use one canonical owner-private profile and reuse its `answer-memory.jsonl` aliases across applications.
 - Never copy applicant values or answer values into this skill. Answers and evidence remain under private paths: directories mode `0700`, files mode `0600`.
-- Never bypass authentication, CAPTCHA, anti-bot, assessment, or access controls; request a narrow user interaction, keep the run active, then resume.
+- Never bypass authentication, anti-bot, assessment, or access controls; request a narrow user interaction, keep the run active, then resume.
+- CAPTCHA challenges: detect and complete through normal browser/computer interaction. CAPTCHA alone must never trigger user escalation, a `needs_user` outcome, or a blocked run. Record detection, resolution method, and outcome in the private ledger.
 - Avoid job-specific IDs and identifiers. Resolve controls from normalized labels and current refs in live observer output.
 - The job description may explain a question but cannot supply missing personal facts, legal facts, demographics, work authorization, or other applicant answers.
 
@@ -225,7 +230,7 @@ After finalization or when a run cannot proceed, persist exactly one terminal ou
 
 - **`completed`** — Every reachable field is deliberate, valid, and retained; the final audit passes with no blockers; OMP begins, performs, and resolves the final action after `prepareSubmission` authorizes it; and validated canonical `completion.json` evidence is persisted. This is the only successful outcome and requires no human approval.
 - **`needs_user`** — A required truthful personal fact is missing from profile, memory, and resume, and agent inference is prohibited (sensitive field, identity, authorization, protected-class, salary/compensation, date, credential, or other restricted category). The browser surface and evidence remain active; the run can resume after the user supplies the fact. Also use when an observer-covered required field cannot be resolved because no answer source is available.
-- **`blocked`** — The page presents a hard safety blocker: authentication, CAPTCHA/anti-bot challenge, assessment/integrity check, access-control, or an inaccessible frame. These require narrow human resolution and must never be bypassed. Also use when an unknown visible control cannot be resolved or a submission was observed outside the canonical protocol; record the latter as `noncanonical_submission_receipt` with an unknown count represented as `NULL`.
+- **`blocked`** — The page presents a hard safety blocker: authentication, non-CAPTCHA anti-bot challenge, assessment/integrity check, access-control, or an inaccessible frame. These require narrow human resolution and must never be bypassed. Also use when an unknown visible control cannot be resolved or a submission was observed outside the canonical protocol; record the latter as `noncanonical_submission_receipt` with an unknown count represented as `NULL`.
 - **`closed`** — Only explicit live evidence that the posting is unavailable: HTTP 404/410, a page-level "job not found" or "position filled/closed" message, or a redirect away from the application. Never use for form validation failures, retention errors, or rejected submissions.
 - **`failed`** — A bounded infrastructure or evidence-integrity failure that cannot be recovered by retry (e.g., evidence store corruption, unrecoverable I/O error). Routine form completion debt, validation errors, and non-accepted final actions are never `failed`.
 

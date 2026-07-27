@@ -243,7 +243,8 @@ function sessionHandle(state) {
 
 export async function startRun(runPath, options = {}) {
   const input = dataSnapshot(options, 'options');
-  assertExactKeys(input, new Set(['startedAt', 'resume', 'agentInference']), 'options');
+  assertExactKeys(input, new Set(['startedAt', 'resume', 'agentInference', 'resumeExisting']), 'options');
+  const resumeExisting = input.resumeExisting === true;
   const startedAt = input.startedAt ?? new Date().toISOString();
   if (typeof startedAt !== 'string' || !Number.isFinite(Date.parse(startedAt))) {
     throw new TypeError('options.startedAt must be an ISO date string');
@@ -279,20 +280,46 @@ export async function startRun(runPath, options = {}) {
     loop_contract: 'one-field-observe-act-reobserve',
     started_at: new Date(startedAt).toISOString(),
   };
-  const evidence = await createEvidenceStore(run.run_artifact_dir, runMetadata, {
+  const evidence = await createEvidenceStore(run.run_artifact_dir, resumeExisting ? undefined : runMetadata, {
     maxInputBytes: MAX_RESUME_BYTES,
     maxJsonBytes: MAX_RESUME_BYTES * 2,
   });
+  const existingLedgerName = resumeExisting
+    ? evidence.store.listArtifacts()
+      .filter((name) => /^ledger-\d+\.json$/.test(name))
+      .sort()
+      .at(-1)
+    : undefined;
+  const existingLedger = existingLedgerName === undefined
+    ? null
+    : evidence.store.readArtifact(existingLedgerName);
+  const existingObservationName = existingLedger === null
+    ? undefined
+    : evidence.store.listArtifacts()
+      .filter((name) => /^observation-\d+\.json$/.test(name))
+      .find((name) => evidence.store.readArtifact(name).observation_id === existingLedger.latest_observation_id);
+  const existingObservation = existingObservationName === undefined
+    ? null
+    : evidence.store.readArtifact(existingObservationName);
+  if (resumeExisting && (existingObservation === null || existingLedger === null)) {
+    throw new TypeError('resume evidence is incomplete');
+  }
+  const persistedMetadata = resumeExisting ? evidence.store.readArtifact('run.json') : runMetadata;
+  if (resumeExisting
+    && (persistedMetadata.run_contract_sha256 !== runIdentity.sha256
+      || persistedMetadata.resume_upload_sha256 !== resumeIdentity.sha256)) {
+    throw new TypeError('resume evidence identity mismatch');
+  }
   const state = {
     run: frozenClone(run),
     profile: profile === null ? null : frozenClone(profile),
     memory: frozenClone(memory),
     resume,
     agentInference,
-    runMetadata: frozenClone(runMetadata),
+    runMetadata: frozenClone(persistedMetadata),
     evidence,
-    ledger: null,
-    observation: null,
+    ledger: existingLedger === null ? null : frozenClone(existingLedger),
+    observation: existingObservation === null ? null : frozenClone(existingObservation),
     retentionProofs: Object.freeze({}),
     finalized: false,
     faulted: false,

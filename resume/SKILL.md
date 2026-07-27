@@ -58,6 +58,7 @@ invalidates generation or creates a new cache identity.
 ## Output invariants
 
 - Preserve the supplied LaTeX template's structure and style markers.
+- Never use an em dash (`—`) anywhere in generated resume text. Rewrite with commas, parentheses, a colon, a semicolon, or separate sentences.
 - Produce editable LaTeX and exactly one page of extractable PDF text.
 - Publish only the five private artifacts: `resume.tex`, `resume.pdf`,
   `optimization.json`, `job_description.txt`, and `manifest.json`.

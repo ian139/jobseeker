@@ -1507,6 +1507,11 @@ function blankStateIsSupported(field, control) {
   const uncheckedChoice = /checkbox|radio|switch/.test(controlKinds) &&
     control.checked === false && control.value_present === false;
   if (uncheckedChoice) return true;
+  const emptyOptional = field.semantic_choice === 'blank' &&
+    control.required === false &&
+    control.value_present === false &&
+    (!control.file || control.file.count === 0);
+  if (emptyOptional) return true;
   return control.options.some((option) => optionSupportsSemanticChoice(option, field.semantic_choice));
 }
 

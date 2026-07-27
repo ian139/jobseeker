@@ -353,3 +353,56 @@ test('observes opacity-zero native checkboxes and radios with visible labels', (
   assert.ok(checkboxes.every((c) => c.candidate.class === 'field'));
   assert.ok(radios.every((c) => c.candidate.class === 'field'));
 });
+test('preserves a file field stable ID across uploaded-container replacement', () => {
+  const document = new Document();
+  const html = document.createElement('html');
+  html._connected = true;
+  const body = document.createElement('body');
+  const form = document.createElement('form');
+  const submit = document.createElement('button', document, 'Submit Application', { type: 'submit' });
+  const initialContainer = document.createElement('div', document, '', { class: 'file-upload' });
+  const initialLabel = document.createElement('label', document, 'Resume', { for: 'resume' });
+  const initialInput = document.createElement('input', document, '', { type: 'file', id: 'resume' });
+  initialContainer.append(initialLabel, initialInput);
+  form.append(initialContainer, submit);
+  body.append(form);
+  html.append(body);
+  document.documentElement = html;
+
+  const markConnected = (element) => {
+    element._connected = true;
+    for (const child of element.children) markConnected(child);
+  };
+  markConnected(html);
+
+  const first = observe(document);
+  validateObservation(first);
+  const firstFile = first.controls.find((control) => control.locator.value === 'resume');
+  assert.ok(firstFile);
+  assert.equal(first.controls.filter((control) => control.type === 'file').length, 1);
+
+
+  initialContainer._connected = false;
+  for (const child of initialContainer.children) child._connected = false;
+  const uploadedContainer = document.createElement('div', document, '', { class: 'file-upload' });
+  const uploadedLabel = document.createElement('label', document, 'Resume', { for: 'resume' });
+  const uploadedInput = document.createElement('input', document, '', { type: 'file', id: 'resume' });
+  uploadedInput.files = [{ name: 'resume.pdf' }];
+  const filename = document.createElement('span', document, 'resume.pdf', { class: 'file-upload__filename' });
+  uploadedContainer.append(uploadedLabel, uploadedInput, filename);
+  form.append(uploadedContainer);
+  markConnected(uploadedContainer);
+
+  const second = observe(document, first.observation_id);
+  validateObservation(second);
+  const secondFile = second.controls.find((control) => control.locator.value === 'resume');
+  assert.ok(secondFile);
+  assert.equal(second.controls.filter((control) => control.type === 'file').length, 1);
+  assert.equal(secondFile.file.names.length, 1);
+  assert.equal(secondFile.file.names[0], 'resume.pdf');
+  assert.equal(secondFile.stable_id, firstFile.stable_id);
+  assert.notEqual(secondFile.ref, firstFile.ref);
+
+  const ledger = mergeObservation(createLedger(first), second);
+  assert.equal(ledger.fields.filter((field) => field.field_id === firstFile.stable_id).length, 1);
+});

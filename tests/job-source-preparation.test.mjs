@@ -117,7 +117,7 @@ INSERT INTO application_jobs (
    NULL, NULL);
 `);
 
-  for (const prefix of ['001-', '002-', '003-', '004-', '005-']) {
+  for (const prefix of ['001-', '002-', '003-', '004-', '005-', '006-', '007-']) {
     const names = await fsp.readdir(path.join(PROJECT_ROOT, 'migrations'));
     const matches = names.filter((name) => name.startsWith(prefix) && name.endsWith('.sql'));
     assert.equal(matches.length, 1, `expected one migration for ${prefix}`);
@@ -262,6 +262,7 @@ function expectedBoundJob({ id, platform, applicationUrl, title, company, descri
   return {
     id,
     platform,
+    applicationHost: new URL(applicationUrl).hostname,
     applicationUrl,
     title,
     company,
@@ -412,6 +413,8 @@ FROM application_jobs WHERE status = 'queued' ORDER BY id;
       {
         id: greenhouse.id,
         platform: greenhouse.platform,
+        applicationHost: greenhouse.applicationHost,
+        applicationHost: greenhouse.applicationHost,
         applicationUrl: greenhouse.applicationUrl,
         title: greenhouse.title,
         company: greenhouse.company,
@@ -424,7 +427,9 @@ FROM application_jobs WHERE status = 'queued' ORDER BY id;
       {
         id: ashbyBound.id,
         platform: ashbyBound.platform,
+        applicationHost: ashbyBound.applicationHost,
         applicationUrl: ashbyBound.applicationUrl,
+        applicationHost: ashbyBound.applicationHost,
         title: ashbyBound.title,
         company: ashbyBound.company,
         location: ashbyBound.location,
@@ -515,6 +520,7 @@ SELECT id, application_url FROM application_jobs WHERE source_db = 'manual.sqlit
     maxActiveJobs: 1,
     expectedJobBinding: {
       platform: greenhouse.platform,
+      applicationHost: greenhouse.applicationHost,
       applicationUrl: greenhouse.applicationUrl,
       title: greenhouse.title,
       company: greenhouse.company,
@@ -587,6 +593,8 @@ FROM application_jobs WHERE id IN (1, 2) ORDER BY id;
   assert.deepEqual(JSON.parse(await fsp.readFile(prepared.workspace.jobSnapshotPath, 'utf8')), {
     id: greenhouse.id,
     application_url: greenhouse.applicationUrl,
+    platform: greenhouse.platform,
+    application_host: greenhouse.applicationHost,
     eligibility_tier: greenhouse.eligibilityTier,
     source_table: 'jobs',
     source_db: 'synthetic-source.sqlite',

@@ -7,6 +7,7 @@ import {
   extractPlatformJobSnapshot,
   filterSupportedJobs,
   planPlatformApplication,
+  reclassifyApplicationRedirect,
 } from '../src/phase1/platforms.mjs';
 
 const GREENHOUSE_URL = 'https://job-boards.greenhouse.io/northstar/jobs/1234567';
@@ -14,7 +15,10 @@ const GREENHOUSE_ALIAS_URL = 'https://boards.greenhouse.io/northstar/jobs/123456
 const GREENHOUSE_EU_URL = 'https://job-boards.eu.greenhouse.io/northstar/jobs/1234567';
 const GREENHOUSE_EU_ALIAS_URL = 'https://boards.eu.greenhouse.io/northstar/jobs/1234567';
 const ASHBY_URL = 'https://jobs.ashbyhq.com/orbit/11111111-1111-4111-8111-111111111111';
+const EMPLOYER_HOST = 'jobs.northstar.example';
+const EMPLOYER_HOSTED_URL = `https://${EMPLOYER_HOST}/careers/backend-engineer/apply`;
 const RESUME_UPLOAD_PATH = '/tmp/synthetic-resume.pdf';
+
 
 function answer(source, value) {
   return { source, value };
@@ -45,10 +49,16 @@ function observerControl(stable_id, ref, overrides = {}) {
   };
 }
 
-function planInput(platform, observation_id, controls, answers) {
+function planInput(platform, observation_id, controls, answers, extras = {}) {
+  const { observationUrl, ...topLevel } = extras;
   return {
     platform,
-    observation: { observation_id, controls },
+    ...topLevel,
+    observation: {
+      observation_id,
+      controls,
+      ...(observationUrl === undefined ? {} : { url: observationUrl }),
+    },
     answers,
     resumeUploadPath: RESUME_UPLOAD_PATH,
   };
@@ -76,6 +86,46 @@ test('accepts exact Greenhouse/Ashby routes and strips tracking queries canonica
     assert.equal(canonicalizeApplicationUrl(url), canonical, url);
   }
 });
+test('classifies employer routes only with an exact verified host and bounded pathname', () => {
+  const employerWithQuery = `${EMPLOYER_HOSTED_URL}?utm_source=fixture`;
+  assert.equal(classifyApplicationUrl(EMPLOYER_HOSTED_URL), null);
+  assert.equal(canonicalizeApplicationUrl(EMPLOYER_HOSTED_URL), null);
+  assert.equal(
+    classifyApplicationUrl(employerWithQuery, { verifiedEmployerHost: EMPLOYER_HOST }),
+    'employer_hosted',
+  );
+  assert.equal(
+    canonicalizeApplicationUrl(employerWithQuery, { verifiedEmployerHost: EMPLOYER_HOST }),
+    EMPLOYER_HOSTED_URL,
+  );
+  for (const [url, host] of [
+    [`https://evil.${EMPLOYER_HOST}/careers/backend-engineer/apply`, EMPLOYER_HOST],
+    [`https://${EMPLOYER_HOST}:443/careers/backend-engineer/apply`, EMPLOYER_HOST],
+    [`https://user:secret@${EMPLOYER_HOST}/careers/backend-engineer/apply`, EMPLOYER_HOST],
+    [`https://${EMPLOYER_HOST}/careers//backend-engineer`, EMPLOYER_HOST],
+    [`https://${EMPLOYER_HOST}/careers/../apply`, EMPLOYER_HOST],
+    [`https://${EMPLOYER_HOST}/careers/backend%2Dengineer/apply`, EMPLOYER_HOST],
+    [`https://${EMPLOYER_HOST}/jobs/apply`, 'other.northstar.example'],
+    [`https://${EMPLOYER_HOST}/backend-engineer/apply`, EMPLOYER_HOST],
+    [`https://${EMPLOYER_HOST}/careers/backend-engineer/apply/extra/one/two/three/four/five/six`, EMPLOYER_HOST],
+  ]) {
+    assert.equal(classifyApplicationUrl(url, { verifiedEmployerHost: host }), null, url);
+    assert.equal(canonicalizeApplicationUrl(url, { verifiedEmployerHost: host }), null, url);
+  }
+  assert.throws(
+    () => classifyApplicationUrl(EMPLOYER_HOSTED_URL, { verifiedEmployerHost: 'xn--northstar.example' }),
+    (error) => error.code === 'INVALID_URL_OPTIONS',
+  );
+  assert.throws(
+    () => classifyApplicationUrl(EMPLOYER_HOSTED_URL, { verifiedEmployerHost: '127.0.0.1' }),
+    (error) => error.code === 'INVALID_URL_OPTIONS',
+  );
+  assert.throws(
+    () => classifyApplicationUrl(EMPLOYER_HOSTED_URL, { verifiedEmployerHost: EMPLOYER_HOST, extra: true }),
+    (error) => error.code === 'INVALID_URL_OPTIONS',
+  );
+});
+
 
 test('rejects credential-bearing, lookalike, malformed, and unsupported ATS URLs', () => {
   const invalid = [
@@ -129,6 +179,12 @@ test('filters supported jobs without mutation, deduplication, or reordering', ()
       applicationUrl: `${ASHBY_URL}?utm_source=duplicate`,
       metadata: { source: 'synthetic-d' },
     },
+    {
+      id: 'employer-hosted',
+      applicationUrl: `${EMPLOYER_HOSTED_URL}?source=fixture`,
+      verifiedEmployerHost: EMPLOYER_HOST,
+      metadata: { source: 'synthetic-e' },
+    },
   ];
   const before = structuredClone(rows);
 
@@ -141,6 +197,7 @@ test('filters supported jobs without mutation, deduplication, or reordering', ()
       { id: 'first-greenhouse', platform: 'greenhouse' },
       { id: 'duplicate-greenhouse', platform: 'greenhouse' },
       { id: 'ashby', platform: 'ashby' },
+      { id: 'employer-hosted', platform: 'employer_hosted' },
     ],
   );
   assert.equal(filtered[1].applicationUrl, `${GREENHOUSE_URL}?gh_src=duplicate`);
@@ -173,6 +230,7 @@ test('extracts a Greenhouse snapshot while preserving text and removing script/s
     schema: 'platform-job-snapshot-v1',
     platform: 'greenhouse',
     applicationUrl: GREENHOUSE_URL,
+    applicationHost: 'job-boards.greenhouse.io',
     externalJobId: '1234567',
     title: 'Backend Platform Engineer',
     company: 'Northstar Robotics',
@@ -211,6 +269,7 @@ test('extracts an Ashby snapshot while preserving text and removing script/style
     schema: 'platform-job-snapshot-v1',
     platform: 'ashby',
     applicationUrl: ASHBY_URL,
+    applicationHost: 'jobs.ashbyhq.com',
     externalJobId: '11111111-1111-4111-8111-111111111111',
     title: 'Frontend Product Engineer',
     company: 'Orbit Software',
@@ -246,19 +305,22 @@ test('extracts normalized source payloads through platform-bound URL identity', 
   });
 
   assert.deepEqual(
-    [greenhouse, ashby].map(({ platform, externalJobId, description }) => ({
+    [greenhouse, ashby].map(({ platform, applicationHost, externalJobId, description }) => ({
       platform,
+      applicationHost,
       externalJobId,
       description,
     })),
     [
       {
         platform: 'greenhouse',
+        applicationHost: 'job-boards.greenhouse.io',
         externalJobId: '1234567',
         description: 'Build Python services.',
       },
       {
         platform: 'ashby',
+        applicationHost: 'jobs.ashbyhq.com',
         externalJobId: '11111111-1111-4111-8111-111111111111',
         description: 'Build accessible React interfaces.',
       },
@@ -278,6 +340,101 @@ test('extracts normalized source payloads through platform-bound URL identity', 
     (error) => error.code === 'PAYLOAD_URL_MISMATCH',
   );
 });
+test('extracts employer snapshots only from the explicit bound host', () => {
+  const snapshot = extractPlatformJobSnapshot({
+    applicationUrl: `${EMPLOYER_HOSTED_URL}?source=fixture`,
+    verifiedEmployerHost: EMPLOYER_HOST,
+    payload: {
+      url: EMPLOYER_HOSTED_URL,
+      job_title: 'Backend Platform Engineer',
+      company: 'Northstar Robotics',
+      location: 'Remote, United States',
+      description: '<p>Build Python services.</p>',
+    },
+  });
+  assert.deepEqual(snapshot, {
+    schema: 'platform-job-snapshot-v1',
+    platform: 'employer_hosted',
+    applicationUrl: `${EMPLOYER_HOSTED_URL}?source=fixture`,
+    applicationHost: EMPLOYER_HOST,
+    externalJobId: 'careers/backend-engineer/apply',
+    title: 'Backend Platform Engineer',
+    company: 'Northstar Robotics',
+    location: 'Remote, United States',
+    description: 'Build Python services.',
+  });
+  assertFrozenDeep(snapshot);
+  assert.throws(
+    () => extractPlatformJobSnapshot({
+      applicationUrl: EMPLOYER_HOSTED_URL,
+      payload: {
+        url: EMPLOYER_HOSTED_URL,
+        job_title: 'Unbound',
+        company: 'Northstar Robotics',
+        location: 'Remote',
+        description: 'No host binding.',
+      },
+    }),
+    (error) => error.code === 'UNSUPPORTED_APPLICATION_URL',
+  );
+});
+test('reclassifies only bounded same-host or exact ATS destinations', () => {
+  const sameHost = reclassifyApplicationRedirect({
+    applicationUrl: `${EMPLOYER_HOSTED_URL}?source=initial`,
+    applicationHost: EMPLOYER_HOST,
+    finalUrl: `https://${EMPLOYER_HOST}/careers/backend-engineer/apply?step=2`,
+  });
+  assert.deepEqual(sameHost, {
+    platform: 'employer_hosted',
+    applicationUrl: EMPLOYER_HOSTED_URL,
+    applicationHost: EMPLOYER_HOST,
+    reclassified: false,
+  });
+  assertFrozenDeep(sameHost);
+  const greenhouse = reclassifyApplicationRedirect({
+    applicationUrl: EMPLOYER_HOSTED_URL,
+    applicationHost: EMPLOYER_HOST,
+    finalUrl: `${GREENHOUSE_ALIAS_URL}?gh_src=redirect`,
+  });
+  assert.deepEqual(greenhouse, {
+    platform: 'greenhouse',
+    applicationUrl: GREENHOUSE_ALIAS_URL,
+    applicationHost: 'boards.greenhouse.io',
+    reclassified: true,
+  });
+  const ashby = reclassifyApplicationRedirect({
+    applicationUrl: EMPLOYER_HOSTED_URL,
+    applicationHost: EMPLOYER_HOST,
+    finalUrl: `${ASHBY_URL}?utm_source=redirect`,
+  });
+  assert.equal(ashby.platform, 'ashby');
+  assert.equal(ashby.applicationUrl, ASHBY_URL);
+  assert.equal(ashby.applicationHost, 'jobs.ashbyhq.com');
+  assert.equal(ashby.reclassified, true);
+  for (const finalUrl of [
+    'https://evil.northstar.example/careers/backend-engineer/apply',
+    'https://jobs.lever.co/northstar/backend-engineer',
+    'not a URL',
+  ]) {
+    assert.throws(
+      () => reclassifyApplicationRedirect({
+        applicationUrl: EMPLOYER_HOSTED_URL,
+        applicationHost: EMPLOYER_HOST,
+        finalUrl,
+      }),
+      (error) => error.code === 'UNSUPPORTED_REDIRECT',
+    );
+  }
+  assert.throws(
+    () => reclassifyApplicationRedirect({
+      applicationUrl: EMPLOYER_HOSTED_URL,
+      applicationHost: '127.0.0.1',
+      finalUrl: EMPLOYER_HOSTED_URL,
+    }),
+    (error) => error.code === 'INVALID_REDIRECT_INPUT',
+  );
+});
+
 
 test('plans Greenhouse controls from observer snake_case fields with distinct mechanics and audit-gated final action', () => {
   const controls = [
@@ -582,4 +739,63 @@ test('plans custom Greenhouse choices and checkbox transitions without redundant
     },
   ]);
   assert.deepEqual(plan.unresolved, []);
+});
+
+test('plans employer-hosted controls and leaves unknown widgets unresolved', () => {
+  const plan = planPlatformApplication(planInput(
+    'employer_hosted',
+    'employer-observation-1',
+    [
+      observerControl('employer-name', 'employer-ref-name'),
+      observerControl('employer-widget', 'employer-ref-widget', {
+        kind: 'widget',
+        tag: 'div',
+        type: null,
+        role: null,
+      }),
+    ],
+    {
+      'employer-name': answer('profile', 'Avery Applicant'),
+      'employer-widget': answer('memory', 'Exact value'),
+    },
+    {
+      applicationUrl: EMPLOYER_HOSTED_URL,
+      applicationHost: EMPLOYER_HOST,
+      observationUrl: `${EMPLOYER_HOSTED_URL}?step=2`,
+    },
+  ));
+
+  assert.equal(plan.platform, 'employer_hosted');
+  assert.equal(plan.adapter, 'employer_hosted_v1');
+  assert.deepEqual(plan.actions, [{
+    fieldId: 'employer-name',
+    operation: 'fill_text',
+    mechanic: 'employer_hosted_native_input',
+    value: 'Avery Applicant',
+    source: 'profile',
+    controlReference: 'employer-ref-name',
+  }]);
+  assert.deepEqual(plan.unresolved, [{
+    fieldId: 'employer-widget',
+    reason: 'unsupported_widget',
+  }]);
+  assertFrozenDeep(plan);
+});
+
+test('reclassifies an employer redirect before selecting platform mechanics', () => {
+  const plan = planPlatformApplication(planInput(
+    'employer_hosted',
+    'redirect-observation-1',
+    [observerControl('redirect-name', 'redirect-ref-name')],
+    { 'redirect-name': answer('profile', 'Avery Applicant') },
+    {
+      applicationUrl: EMPLOYER_HOSTED_URL,
+      applicationHost: EMPLOYER_HOST,
+      observationUrl: GREENHOUSE_URL,
+    },
+  ));
+
+  assert.equal(plan.platform, 'greenhouse');
+  assert.equal(plan.adapter, 'greenhouse_v1');
+  assert.equal(plan.actions[0].mechanic, 'greenhouse_native_input');
 });

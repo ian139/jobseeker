@@ -29,11 +29,11 @@ prepare-or-recover-supported-run
 
 For Phase 3 backlog work, call `prepareOrRecoverSupportedRun` from `src/phase1/preparation.mjs`; do not call a generic claim API first and do not supply a static description or resume shared across jobs. Its successful result is exactly `{ kind, job, resume, run, workspace }`:
 
-1. `kind: recovered` resumes the sole active run only with its persisted answer-memory binding, recreating missing workspace files idempotently from the bound job and selected resume without recompilation.
-2. `kind: claimed` means the exact normalized Greenhouse/Ashby snapshot produced the validated canonical resume and was then atomically claimed with platform, URL, metadata, source-posted timestamp, full description, and description-hash fencing.
-3. `kind: empty` means no complete supported queued snapshot exists; inspect/wait rather than falling through to an unsupported row.
+1. `kind: recovered` resumes the sole active run first, regardless of `minimumJobId`, only with its persisted answer-memory and exact host/URL binding; missing workspace files are recreated without recompilation.
+2. `kind: claimed` means an exact normalized Greenhouse, Ashby, or explicitly host-verified employer snapshot produced the validated canonical resume and was atomically claimed with platform, host, URL, metadata, source timestamp, description, and hash fencing.
+3. `kind: empty` means no complete supported queued snapshot at or above the optional `minimumJobId` floor exists; inspect/wait rather than falling through to an unsupported row.
 
-Only rows admitted by `ingestSupportedJobs` in `src/phase1/job-source.mjs` are eligible. `migrations/005-platform-job-snapshots.sql` refuses to run while a durable run is active and quarantines every legacy `queued`, `claimed`, or `needs_user` row until supported re-ingestion. Never bypass `platforms.mjs` classification, manually set platform metadata, or revive the legacy URL-only claim path.
+Only rows admitted by `ingestSupportedJobs` are eligible. Forward migrations 005–007 refuse active-run rebuilds, restrict the platform enum to exactly three values, add `application_host`, and quarantine unsafe legacy nonterminal rows. Never bypass `platforms.mjs`, infer an employer host from page content, manually set platform metadata, or revive the URL-only claim path.
 
 Open `workspace.contractPath` through the normal `startRun` coordinator. Require the run contract's `application_url`, `job_description_path`, and `resume_upload_path` to equal the returned bound job/workspace/resume identities before browser navigation.
 
@@ -71,17 +71,17 @@ The observer supplies policy-free field state and ledger/evidence refs. The OMP 
 4. Perform each planned helper action in order, recording each semantic outcome against the shared pre-action observation. Stop early on any unexpected state.
 5. Re-run the observer once, accept its diff, and verify retention for every attempted field before planning another batch.
 
-After resolving the fields selected for the current observation, call `planPlatformApplication` with the bound `job.platform`, canonical observer result, resolved answer map, and `session.runMetadata.resume_upload_path`. Treat its frozen Greenhouse/Ashby action list as the mechanic authority:
+After resolving the fields selected for the current observation, call `planPlatformApplication` with the bound `job.platform`, canonical observer result, resolved answer map, and `session.runMetadata.resume_upload_path`. For `employer_hosted`, also pass the bound `applicationUrl` and `applicationHost`; the observation must include its fresh URL. The planner reclassifies a redirect before selecting mechanics and accepts only the same verified host or an exact Greenhouse/Ashby destination.
 
 - `*_native_input` / `*_native_textarea` → exact `tab.fill`;
 - `*_file_input` → exact native file-input `tab.uploadFile`;
 - `*_native_select` → exact serialized `tab.select`;
-- `*_combobox_open` → open the closed custom combobox once, then re-observe and re-plan;
-- `*_combobox_exact_option` → click one exact owned option from the current open-listbox observation;
-- `greenhouse_native_radio` / `ashby_yes_no` → click the exact intended choice;
-- `*_native_checkbox` → click only when observed checked state differs from the desired boolean.
+- `*_combobox_open` → open once, then re-observe and re-plan;
+- `*_combobox_exact_option` → click one exact owned option;
+- `greenhouse_native_radio` / `ashby_yes_no` / `employer_hosted_radio` → click the exact intended choice;
+- `*_native_checkbox` → click only when observed state differs from the desired boolean.
 
-Do not execute an unresolved entry. The planner deliberately excludes the final candidate; the only final-action path remains `prepareSubmission` → `beginFinalSubmit` → OMP click → `completeFinalSubmit`. After each planned action, use the existing fresh observer/snapshot and retention chain below.
+Do not execute an unresolved entry, including any `unknown_control` or `unsupported_widget`. The planner deliberately excludes the final candidate; the only final-action path remains `prepareSubmission` → `beginFinalSubmit` → OMP click → `completeFinalSubmit`.
 
 Primary OMP `browser` tool mechanics on the attached CMUX-TUI browser pane:
 

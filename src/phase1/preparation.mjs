@@ -10,6 +10,7 @@ import {
   recoverActiveRun,
 } from './backlog-runner.mjs';
 import { listBoundQueuedJobs, loadBoundJob } from './job-source.mjs';
+import { canonicalizeApplicationUrl, classifyApplicationUrl } from './platforms.mjs';
 
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
@@ -20,7 +21,7 @@ const WRITE_PRIVATE = fsConstants.O_WRONLY
   | fsConstants.O_EXCL
   | NOFOLLOW;
 const SHA256_HEX = /^[0-9a-f]{64}$/u;
-const PLATFORM_SET = new Set(['greenhouse', 'ashby']);
+const PLATFORM_SET = new Set(['greenhouse', 'ashby', 'employer_hosted']);
 const ELIGIBILITY_SET = new Set(['active_verified', 'unverified_stale', 'backfill_only']);
 const PREPARATION_DIRECTORY = '.phase1-preparation';
 const MAX_DESCRIPTION_CHARS = 12_000;
@@ -66,6 +67,7 @@ const PREPARATION_KEYS = new Set([
   'resumeSkillPath',
   'resumeOutputRoot',
   'compiler',
+  'minimumJobId',
 ]);
 
 const GENERATOR_OUTPUT_KEYS = new Set([
@@ -371,6 +373,7 @@ function normalizeBoundJob(value) {
   assertKeys(value, new Set([
     'id',
     'platform',
+    'applicationHost',
     'applicationUrl',
     'title',
     'company',
@@ -384,16 +387,24 @@ function normalizeBoundJob(value) {
   const id = requirePositiveInteger(value.id, 'E_JOB_BINDING');
   const platform = requireString(value.platform, 'E_JOB_BINDING', 32);
   if (!PLATFORM_SET.has(platform)) fail('E_JOB_BINDING');
+  const applicationHost = requireString(value.applicationHost, 'E_JOB_BINDING', 253);
   const applicationUrl = requireNonblankString(value.applicationUrl, 'E_JOB_BINDING', 16 * 1024);
+  const platformOptions = platform === 'employer_hosted'
+    ? { verifiedEmployerHost: applicationHost }
+    : undefined;
   let parsedUrl;
+  let canonicalUrl;
   try {
     parsedUrl = new URL(applicationUrl);
+    canonicalUrl = canonicalizeApplicationUrl(applicationUrl, platformOptions);
   } catch {
     fail('E_JOB_BINDING');
   }
-  if ((parsedUrl.protocol !== 'https:' && parsedUrl.protocol !== 'http:')
-    || parsedUrl.username !== ''
-    || parsedUrl.password !== '') fail('E_JOB_BINDING');
+  if (canonicalUrl !== applicationUrl
+      || parsedUrl.hostname !== applicationHost
+      || classifyApplicationUrl(applicationUrl, platformOptions) !== platform) {
+    fail('E_JOB_BINDING');
+  }
   const title = requireNonblankString(value.title, 'E_JOB_BINDING', 512);
   const company = requireNonblankString(value.company, 'E_JOB_BINDING', 512);
   const location = requireNullableString(value.location, 'E_JOB_BINDING', 512);
@@ -409,6 +420,7 @@ function normalizeBoundJob(value) {
   return Object.freeze({
     id,
     platform,
+    applicationHost,
     applicationUrl,
     title,
     company,
@@ -425,6 +437,7 @@ function normalizeBoundSummary(value) {
   assertKeys(value, new Set([
     'id',
     'platform',
+    'applicationHost',
     'applicationUrl',
     'title',
     'company',
@@ -437,6 +450,7 @@ function normalizeBoundSummary(value) {
   const result = {
     id: requirePositiveInteger(value.id, 'E_JOB_SUMMARY'),
     platform: requireString(value.platform, 'E_JOB_SUMMARY', 32),
+    applicationHost: requireString(value.applicationHost, 'E_JOB_SUMMARY', 253),
     applicationUrl: requireNonblankString(value.applicationUrl, 'E_JOB_SUMMARY', 16 * 1024),
     title: requireNonblankString(value.title, 'E_JOB_SUMMARY', 512),
     company: requireNonblankString(value.company, 'E_JOB_SUMMARY', 512),
@@ -449,12 +463,29 @@ function normalizeBoundSummary(value) {
   if (!PLATFORM_SET.has(result.platform) || !ELIGIBILITY_SET.has(result.eligibilityTier)) {
     fail('E_JOB_SUMMARY');
   }
+  const platformOptions = result.platform === 'employer_hosted'
+    ? { verifiedEmployerHost: result.applicationHost }
+    : undefined;
+  let parsedUrl;
+  let canonicalUrl;
+  try {
+    parsedUrl = new URL(result.applicationUrl);
+    canonicalUrl = canonicalizeApplicationUrl(result.applicationUrl, platformOptions);
+  } catch {
+    fail('E_JOB_SUMMARY');
+  }
+  if (canonicalUrl !== result.applicationUrl
+      || parsedUrl.hostname !== result.applicationHost
+      || classifyApplicationUrl(result.applicationUrl, platformOptions) !== result.platform) {
+    fail('E_JOB_SUMMARY');
+  }
   return Object.freeze(result);
 }
 
 function sameBoundIdentity(summary, job) {
   return summary.id === job.id
     && summary.platform === job.platform
+    && summary.applicationHost === job.applicationHost
     && summary.applicationUrl === job.applicationUrl
     && summary.title === job.title
     && summary.company === job.company
@@ -538,6 +569,9 @@ async function normalizeWorkspaceInputs(options) {
   const browserSessionId = requireNonblankString(options.browserSessionId, 'E_BROWSER_SESSION_ID', 256);
   const maxActiveJobs = options.maxActiveJobs === undefined ? 1 : options.maxActiveJobs;
   if (maxActiveJobs !== 1) fail('E_MAX_ACTIVE_JOBS');
+  const minimumJobId = options.minimumJobId === undefined
+    ? undefined
+    : requirePositiveInteger(options.minimumJobId, 'E_MINIMUM_JOB_ID');
   await ensurePrivateDirectory(workspaceRoot, 'E_WORKSPACE_ROOT');
   if (applicantProfilePath !== undefined) {
     await validateRegularInput(applicantProfilePath, MAX_PROFILE_BYTES, 'E_APPLICANT_PROFILE_PATH');
@@ -556,6 +590,7 @@ async function normalizeWorkspaceInputs(options) {
     now: options.now,
     leaseSeconds: options.leaseSeconds,
     maxActiveJobs,
+    minimumJobId,
   });
 }
 
@@ -916,10 +951,13 @@ async function boundJobOrNull(database, id) {
   }
 }
 
-async function listCandidates(database) {
+async function listCandidates(database, minimumJobId = undefined) {
   let result;
   try {
-    result = await listBoundQueuedJobs(database);
+    result = await listBoundQueuedJobs(
+      database,
+      minimumJobId === undefined ? {} : { minimumJobId },
+    );
   } catch {
     fail('E_JOB_SOURCE');
   }
@@ -964,6 +1002,7 @@ function runnerOptions(databaseOptions, staged, resume, job) {
     resumeArtifactSha256: resume.pdfSha256,
     expectedJobBinding: {
       platform: job.platform,
+      applicationHost: job.applicationHost,
       applicationUrl: job.applicationUrl,
       title: job.title,
       company: job.company,
@@ -977,6 +1016,9 @@ function runnerOptions(databaseOptions, staged, resume, job) {
     now: databaseOptions.now,
     leaseSeconds: databaseOptions.leaseSeconds,
     maxActiveJobs: databaseOptions.maxActiveJobs,
+    ...(databaseOptions.minimumJobId === undefined
+      ? {}
+      : { minimumJobId: databaseOptions.minimumJobId }),
   };
 }
 
@@ -1090,7 +1132,7 @@ export async function prepareOrRecoverSupportedRun(database, options = {}) {
     }
 
     const normalized = await normalizeCoordinatorOptions(options);
-    const summaries = await listCandidates(database);
+    const summaries = await listCandidates(database, normalized.minimumJobId);
     if (summaries.length === 0) return emptyResult();
 
     const summary = summaries[0];

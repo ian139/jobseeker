@@ -112,6 +112,23 @@ ${rows.map((row) => `INSERT INTO application_jobs (
 );`).join('\n')}
 `);
   await sqlite(database, await migration004());
+  await sqlite(database, `
+ALTER TABLE application_jobs ADD COLUMN platform TEXT;
+ALTER TABLE application_jobs ADD COLUMN application_host TEXT;
+ALTER TABLE application_jobs ADD COLUMN job_title TEXT;
+ALTER TABLE application_jobs ADD COLUMN job_company TEXT;
+ALTER TABLE application_jobs ADD COLUMN job_location TEXT;
+ALTER TABLE application_jobs ADD COLUMN job_description TEXT;
+ALTER TABLE application_jobs ADD COLUMN job_description_sha256 TEXT;
+UPDATE application_jobs
+SET platform = 'greenhouse',
+    application_host = 'job-boards.greenhouse.io',
+    job_title = 'Fixture Engineer',
+    job_company = 'Fixture Company',
+    job_location = 'Remote',
+    job_description = 'Fixture job description.',
+    job_description_sha256 = '${sha256Bytes('Fixture job description.')}';
+`);
 }
 
 function profileValue() {
@@ -475,6 +492,40 @@ test('concurrent claims enforce one global active job', async () => {
     assert.deepEqual(await readRows(value.database, 'SELECT count(*) AS count FROM application_jobs WHERE status = \'queued\''), [{ count: 1 }]);
   } finally {
     await removeFixture(value);
+  }
+});
+
+test('minimumJobId filters new claims without bypassing active recovery', async () => {
+  const recoveryFixture = await fixture([{ id: 1 }, { id: 2 }]);
+  try {
+    const active = await claimNextQueuedJob(recoveryFixture.database, claimOptions(recoveryFixture));
+    const recovered = await recoverOrClaimBacklogRun(
+      recoveryFixture.database,
+      claimOptions(recoveryFixture, { minimumJobId: 2 }),
+    );
+    assert.equal(active.jobId, 1);
+    assert.equal(recovered.kind, 'recovered');
+    assert.equal(recovered.run.jobId, 1);
+  } finally {
+    await removeFixture(recoveryFixture);
+  }
+
+  const claimFixture = await fixture([{ id: 1 }, { id: 2 }]);
+  try {
+    const claimed = await claimNextQueuedJob(
+      claimFixture.database,
+      claimOptions(claimFixture, { minimumJobId: 2 }),
+    );
+    assert.equal(claimed.jobId, 2);
+    assert.deepEqual(await readRows(
+      claimFixture.database,
+      'SELECT id, status FROM application_jobs ORDER BY id',
+    ), [
+      { id: 1, status: 'queued' },
+      { id: 2, status: 'claimed' },
+    ]);
+  } finally {
+    await removeFixture(claimFixture);
   }
 });
 

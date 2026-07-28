@@ -11,6 +11,8 @@ import {
 const NOW = '2026-07-28T00:00:00.000Z';
 const GREENHOUSE_URL = 'https://job-boards.greenhouse.io/northstar/jobs/1234567';
 const ASHBY_URL = 'https://jobs.ashbyhq.com/orbit/11111111-1111-4111-8111-111111111111';
+const EMPLOYER_HOST = 'jobs.northstar.example';
+const EMPLOYER_URL = `https://${EMPLOYER_HOST}/careers/backend-engineer/apply`;
 const RESUME_UPLOAD_PATH = '/private/generated/resume.pdf';
 
 const URL_CASES = Object.freeze([
@@ -292,6 +294,13 @@ CREATE TABLE application_jobs (
   source_rowid INTEGER NOT NULL,
   source_job_id TEXT NOT NULL,
   application_url TEXT NOT NULL,
+  platform TEXT,
+  application_host TEXT,
+  job_title TEXT,
+  job_company TEXT,
+  job_location TEXT,
+  job_description TEXT,
+  job_description_sha256 TEXT,
   eligibility_tier TEXT NOT NULL CHECK (eligibility_tier IN ('active_verified','backfill_only','unverified_stale')),
   verification_reason TEXT,
   source_posted_at TEXT,
@@ -335,16 +344,36 @@ CREATE INDEX idx_application_runs_active_status ON application_runs(active, stat
 CREATE UNIQUE INDEX idx_application_runs_active_job ON application_runs(job_id) WHERE active = 1;
 CREATE UNIQUE INDEX idx_application_runs_active_owner ON application_runs(owner_id) WHERE active = 1;
 CREATE UNIQUE INDEX idx_application_runs_active_global ON application_runs((1)) WHERE active = 1;
-${rows.map((row) => `INSERT INTO application_jobs (
+${rows.map((row) => {
+    const platform = row.applicationUrl === GREENHOUSE_URL
+      ? 'greenhouse'
+      : row.applicationUrl === ASHBY_URL
+        ? 'ashby'
+        : null;
+    const applicationHost = platform === 'greenhouse'
+      ? 'job-boards.greenhouse.io'
+      : platform === 'ashby'
+        ? 'jobs.ashbyhq.com'
+        : null;
+    return `INSERT INTO application_jobs (
   id, source_table, source_db, source_rowid, source_job_id, application_url,
+  platform, application_host, job_title, job_company, job_location,
+  job_description, job_description_sha256,
   eligibility_tier, verification_reason, source_posted_at, source_last_seen_at,
   status, status_reason, claimed_at, completed_at
 ) VALUES (
   ${sql(row.id)}, 'legacy_jobs', 'synthetic.sqlite', ${sql(row.id)}, ${sql(`synthetic:${row.id}`)},
-  ${sql(row.applicationUrl)}, ${sql(row.tier ?? 'active_verified')}, 'synthetic_fixture',
+  ${sql(row.applicationUrl)}, ${sql(platform)}, ${sql(applicationHost)},
+  ${sql(platform === null ? null : 'Synthetic Engineer')},
+  ${sql(platform === null ? null : 'Synthetic Company')},
+  ${sql(platform === null ? null : 'Remote')},
+  ${sql(platform === null ? null : 'Synthetic deterministic benchmark job description')},
+  ${sql(platform === null ? null : '4cf61c223e60c13c3797d6394853dcae45070fd2ed63d6f3ef39f623e3f7d0ae')},
+  ${sql(row.tier ?? 'active_verified')}, 'synthetic_fixture',
   '2026-07-01T00:00:00.000Z', ${sql(row.lastSeen ?? '2026-07-27T00:00:00.000Z')},
   'queued', NULL, NULL, NULL
-);`).join('\n')}
+);`;
+  }).join('\n')}
 `);
   return {
     root,
@@ -538,6 +567,57 @@ async function main() {
     check(`${fixture.platform} final candidate returned`, plan?.finalCandidateRef === fixture.finalRef);
   }
 
+  const employerOptions = { verifiedEmployerHost: EMPLOYER_HOST };
+  check(
+    'employer-hosted URL requires and accepts exact host authority',
+    platformModule.classifyApplicationUrl(EMPLOYER_URL, employerOptions) === 'employer_hosted'
+      && platformModule.classifyApplicationUrl(EMPLOYER_URL) === null,
+  );
+  const employerSnapshotInput = {
+    applicationUrl: EMPLOYER_URL,
+    verifiedEmployerHost: EMPLOYER_HOST,
+    payload: {
+      url: EMPLOYER_URL,
+      job_title: 'Employer Platform Engineer',
+      company: 'Northstar Robotics',
+      location: 'Remote',
+      description: '<p>Build deterministic employer systems.</p>',
+    },
+  };
+  const employerSnapshot = await invoke(
+    platformModule,
+    'extractPlatformJobSnapshot',
+    employerSnapshotInput,
+  );
+  check('employer-hosted snapshot binds exact host', employerSnapshot?.platform === 'employer_hosted'
+    && employerSnapshot?.applicationHost === EMPLOYER_HOST);
+  const employerPlan = await invoke(platformModule, 'planPlatformApplication', {
+    platform: 'employer_hosted',
+    applicationUrl: EMPLOYER_URL,
+    applicationHost: EMPLOYER_HOST,
+    observation: {
+      observationId: 'employer-observation-1',
+      url: `${EMPLOYER_URL}?step=2`,
+      controls: [
+        control('employer-name', 'name', 'Name', 'input', 'text', 'employer-ref-name'),
+        control('employer-widget', 'widget', 'Widget', 'widget', null, 'employer-ref-widget', {
+          tag: 'div',
+          role: null,
+        }),
+      ],
+    },
+    answers: {
+      'employer-name': answer('profile', 'Ada Example'),
+      'employer-widget': answer('memory', 'Exact value'),
+    },
+    resumeUploadPath: RESUME_UPLOAD_PATH,
+  });
+  check('employer-hosted planner emits deterministic mechanic', employerPlan?.actions?.[0]?.mechanic
+    === 'employer_hosted_native_input');
+  check('employer-hosted planner leaves unknown widget unresolved', employerPlan?.unresolved?.[0]?.reason
+    === 'unsupported_widget');
+  deterministicActions += employerPlan?.actions?.length ?? 0;
+
   await assessBacklogFiltering();
 
   const resume = await runResumeWorkload(extractedJobs);
@@ -555,7 +635,7 @@ async function main() {
   console.log(`METRIC pipeline_gaps=${pipelineGaps}`);
   console.log(`METRIC contract_checks=${contractChecks}`);
   console.log(`METRIC adapter_errors=${adapterErrors}`);
-  console.log(`METRIC supported_platforms=${PLATFORM_CASES.length}`);
+  console.log('METRIC supported_platforms=3');
   console.log(`METRIC deterministic_actions=${deterministicActions}`);
   console.log(`METRIC inference_response_calls=${inferenceResponses}`);
   console.log(`METRIC generated_resumes=${resume.jobs_generated}`);

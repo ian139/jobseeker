@@ -1,4 +1,4 @@
-const SUPPORTED_PLATFORMS = Object.freeze(['greenhouse', 'ashby']);
+const SUPPORTED_PLATFORMS = Object.freeze(['greenhouse', 'ashby', 'employer_hosted']);
 const SUPPORTED_PLATFORM_SET = new Set(SUPPORTED_PLATFORMS);
 const ANSWER_SOURCES = new Set(['memory', 'profile', 'resume', 'agent_inference', 'user']);
 const CANDIDATE_CLASSES = new Set(['field', 'non_final_navigation', 'final_candidate', 'unknown']);
@@ -20,6 +20,10 @@ const GREENHOUSE_HOSTS = new Set([
 const ASHBY_HOST = 'jobs.ashbyhq.com';
 const GREENHOUSE_PATH = /^\/([A-Za-z0-9][A-Za-z0-9_-]*)\/jobs\/([1-9][0-9]*)$/u;
 const ASHBY_PATH = /^\/([A-Za-z0-9][A-Za-z0-9_-]*)\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/iu;
+const EMPLOYER_FIRST_SEGMENTS = new Set(['jobs', 'careers', 'apply', 'positions', 'opportunities']);
+const EMPLOYER_SEGMENT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._~-]*$/u;
+const EMPLOYER_HOST_MAX = 253;
+const EMPLOYER_PATH_MAX = 1024;
 const UNSAFE_HTML_ELEMENTS = new Set(['script', 'style', 'noscript', 'template']);
 const BLOCK_HTML_ELEMENTS = new Set([
   'address', 'article', 'aside', 'blockquote', 'br', 'dd', 'div', 'dl', 'dt',
@@ -180,7 +184,39 @@ function rawUrlParts(value) {
   return { authority, rawPath: rawPath || '/' };
 }
 
-function parseApplicationUrl(value) {
+function normalizeVerifiedEmployerHost(value, code = 'INVALID_HOST_BINDING') {
+  assertSafeString(value, code, {
+    allowEmpty: false,
+    max: EMPLOYER_HOST_MAX,
+    trim: true,
+  });
+  if (value !== value.toLowerCase() || value.includes('xn--')) fail(code);
+  const labels = value.split('.');
+  if (labels.length < 2 || labels.some((label) => (
+    label.length === 0
+      || label.length > 63
+      || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(label)
+  ))) fail(code);
+  if (/^(?:[0-9]{1,3}\.){3}[0-9]{1,3}$/u.test(value)) fail(code);
+  return value;
+}
+
+function normalizeEmployerPath(pathname) {
+  if (pathname.length < 1 || pathname.length > EMPLOYER_PATH_MAX
+      || pathname.endsWith('/') || pathname.includes('//')) return null;
+  const segments = pathname.split('/');
+  if (segments.length < 3 || segments.length > 9 || segments[0] !== '') return null;
+  const routeSegments = segments.slice(1);
+  if (!EMPLOYER_FIRST_SEGMENTS.has(routeSegments[0])) return null;
+  if (routeSegments.some((segment) => !EMPLOYER_SEGMENT_PATTERN.test(segment)
+      || segment === '.' || segment === '..')) return null;
+  return routeSegments;
+}
+
+function parseApplicationUrl(value, verifiedEmployerHost = undefined, hostCode = 'INVALID_HOST_BINDING') {
+  const employerHost = verifiedEmployerHost === undefined
+    ? undefined
+    : normalizeVerifiedEmployerHost(verifiedEmployerHost, hostCode);
   if (typeof value !== 'string' || value.length === 0 || value.length > URL_MAX || value.trim() !== value) return null;
   if (/[\u0000-\u001f\u007f]/u.test(value)) return null;
   let parsed;
@@ -191,7 +227,7 @@ function parseApplicationUrl(value) {
   }
   if (parsed.protocol !== 'https:' || parsed.username !== '' || parsed.password !== '' || parsed.hash !== '') return null;
   const raw = rawUrlParts(value);
-  if (raw === null || raw.authority.length === 0 || raw.authority.toLowerCase() !== parsed.hostname) return null;
+  if (raw === null || raw.authority.length === 0 || raw.authority !== parsed.hostname) return null;
   if (raw.rawPath !== parsed.pathname || value.includes('#')) return null;
   if (GREENHOUSE_HOSTS.has(parsed.hostname)) {
     const match = GREENHOUSE_PATH.exec(parsed.pathname);
@@ -213,7 +249,32 @@ function parseApplicationUrl(value) {
       externalJobId: match[2],
     };
   }
+  if (employerHost !== undefined && parsed.hostname === employerHost) {
+    const segments = normalizeEmployerPath(parsed.pathname);
+    if (segments === null) return null;
+    return {
+      platform: 'employer_hosted',
+      host: parsed.hostname,
+      segments,
+      externalJobId: segments.join('/'),
+    };
+  }
   return null;
+}
+
+function normalizeUrlOptions(options, code = 'INVALID_URL_OPTIONS') {
+  if (options === undefined) return undefined;
+  assertRecord(options, code);
+  assertExactKeys(options, new Set(['verifiedEmployerHost']), code);
+  if (!hasOwn(options, 'verifiedEmployerHost')) return undefined;
+  const value = ownValue(options, 'verifiedEmployerHost', code);
+  if (value === undefined) return undefined;
+  return normalizeVerifiedEmployerHost(value, code);
+}
+
+function parseUrlWithOptions(value, options, code = 'INVALID_URL_OPTIONS') {
+  const employerHost = normalizeUrlOptions(options, code);
+  return parseApplicationUrl(value, employerHost, code);
 }
 
 function normalizeText(value, code) {
@@ -329,12 +390,19 @@ function samePlatformRoute(first, second) {
   if (first.platform === 'greenhouse') {
     return first.board === second.board && first.externalJobId === second.externalJobId;
   }
-  return first.organization === second.organization
-    && first.externalJobId.toLowerCase() === second.externalJobId.toLowerCase();
+  if (first.platform === 'ashby') {
+    return first.organization === second.organization
+      && first.externalJobId.toLowerCase() === second.externalJobId.toLowerCase();
+  }
+  return first.host === second.host && first.segments.join('/') === second.segments.join('/');
 }
 
-function snapshotForNormalizedSource(applicationUrl, route, payload) {
-  const payloadRoute = parseApplicationUrl(requirePayloadString(payload, 'url'));
+function snapshotForNormalizedSource(applicationUrl, applicationHost, route, payload) {
+  const payloadRoute = parseApplicationUrl(
+    requirePayloadString(payload, 'url'),
+    route.platform === 'employer_hosted' ? applicationHost : undefined,
+    'INVALID_PAYLOAD',
+  );
   if (!samePlatformRoute(route, payloadRoute)) fail('PAYLOAD_URL_MISMATCH');
   const description = htmlToText(requirePayloadString(payload, 'description'));
   if (description.length === 0) fail('INVALID_PAYLOAD_DESCRIPTION');
@@ -342,7 +410,8 @@ function snapshotForNormalizedSource(applicationUrl, route, payload) {
     schema: 'platform-job-snapshot-v1',
     platform: route.platform,
     applicationUrl,
-    externalJobId: route.externalJobId,
+    applicationHost,
+    externalJobId: route.externalJobId ?? null,
     title: normalizeText(requirePayloadString(payload, 'job_title'), 'INVALID_PAYLOAD'),
     company: normalizeText(requirePayloadString(payload, 'company'), 'INVALID_PAYLOAD'),
     location: normalizeText(requirePayloadString(payload, 'location'), 'INVALID_PAYLOAD'),
@@ -350,10 +419,9 @@ function snapshotForNormalizedSource(applicationUrl, route, payload) {
   });
 }
 
-
 function snapshotForGreenhouse(applicationUrl, route, payload) {
   if (!hasOwn(payload, 'absolute_url')) {
-    return snapshotForNormalizedSource(applicationUrl, route, payload);
+    return snapshotForNormalizedSource(applicationUrl, route.host, route, payload);
   }
   const externalJobId = normalizeExternalId(ownValue(payload, 'id', 'INVALID_PAYLOAD_ID'), 'greenhouse');
   if (externalJobId !== route.externalJobId) fail('PAYLOAD_ID_MISMATCH');
@@ -367,6 +435,7 @@ function snapshotForGreenhouse(applicationUrl, route, payload) {
     schema: 'platform-job-snapshot-v1',
     platform: 'greenhouse',
     applicationUrl,
+    applicationHost: route.host,
     externalJobId,
     title: normalizeText(requirePayloadString(payload, 'title'), 'INVALID_PAYLOAD'),
     company: normalizeText(requirePayloadString(payload, 'company_name'), 'INVALID_PAYLOAD'),
@@ -377,7 +446,7 @@ function snapshotForGreenhouse(applicationUrl, route, payload) {
 
 function snapshotForAshby(applicationUrl, route, payload) {
   if (!hasOwn(payload, 'jobPosting')) {
-    return snapshotForNormalizedSource(applicationUrl, route, payload);
+    return snapshotForNormalizedSource(applicationUrl, route.host, route, payload);
   }
   const posting = requirePayloadRecord(payload, 'jobPosting');
   const externalJobId = normalizeExternalId(ownValue(posting, 'id', 'INVALID_PAYLOAD_ID'), 'ashby');
@@ -390,6 +459,7 @@ function snapshotForAshby(applicationUrl, route, payload) {
     schema: 'platform-job-snapshot-v1',
     platform: 'ashby',
     applicationUrl,
+    applicationHost: route.host,
     externalJobId,
     title: normalizeText(requirePayloadString(posting, 'title'), 'INVALID_PAYLOAD'),
     company: normalizeText(requirePayloadString(posting, 'organizationName'), 'INVALID_PAYLOAD'),
@@ -646,7 +716,6 @@ function isUnclassifiedNonField(control) {
 
 function isNonFieldCandidate(control) {
   return control.candidateClass === 'non_final_navigation'
-    || control.candidateClass === 'unknown'
     || (control.candidateClass === null && isUnclassifiedNonField(control));
 }
 
@@ -711,7 +780,11 @@ function actionFor(platform, kind, control, answer, resumeUploadPath) {
     return {
       ...base,
       operation: 'toggle',
-      mechanic: kind === 'radio' ? 'greenhouse_native_radio' : 'ashby_yes_no',
+      mechanic: platform === 'greenhouse'
+        ? 'greenhouse_native_radio'
+        : platform === 'ashby'
+          ? 'ashby_yes_no'
+          : 'employer_hosted_radio',
       value: optionValueFor(control, answer.value),
     };
   }
@@ -742,12 +815,12 @@ function controlPlanKind(platform, control) {
   if (tag === 'select' || kind === 'select' || type === 'select' || kind === 'native_select') {
     return 'select';
   }
-  if (platform === 'greenhouse') {
+  if (platform === 'greenhouse' || platform === 'employer_hosted') {
     if (role === 'combobox' || role === 'listbox'
         || kind === 'combobox' || kind === 'autocomplete' || kind === 'custom_select') {
       return 'combobox';
     }
-    if (type === 'radio' || kind === 'radio' || kind === 'radio_group'
+    if (type === 'radio' || kind === 'radio' || kind === 'radio_group' || kind === 'yes_no'
         || role === 'radio' || role === 'radiogroup') {
       return 'radio';
     }
@@ -778,12 +851,50 @@ function controlPlanKind(platform, control) {
 function normalizePlanInput(value) {
   const code = 'INVALID_PLAN_INPUT';
   assertRecord(value, code);
-  assertExactKeys(value, new Set(['platform', 'observation', 'answers', 'resumeUploadPath']), code);
-  const platform = ownValue(value, 'platform', code);
+  assertExactKeys(value, new Set([
+    'platform',
+    'observation',
+    'answers',
+    'resumeUploadPath',
+    'applicationUrl',
+    'applicationHost',
+  ]), code);
+  let platform = ownValue(value, 'platform', code);
   if (typeof platform !== 'string' || !SUPPORTED_PLATFORM_SET.has(platform)) fail('INVALID_PLATFORM');
   const observation = assertRecord(ownValue(value, 'observation', code), 'INVALID_OBSERVATION');
   const observationId = aliasValue(observation, ['observationId', 'observation_id'], 'INVALID_OBSERVATION');
   assertSafeString(observationId, 'INVALID_OBSERVATION', { identifier: true, max: ID_MAX });
+  const observationUrl = hasOwn(observation, 'url')
+    ? ownValue(observation, 'url', 'INVALID_OBSERVATION')
+    : undefined;
+  const applicationUrl = hasOwn(value, 'applicationUrl')
+    ? ownValue(value, 'applicationUrl', code)
+    : undefined;
+  const applicationHost = hasOwn(value, 'applicationHost')
+    ? ownValue(value, 'applicationHost', code)
+    : undefined;
+  let effectiveApplicationUrl = applicationUrl;
+  let effectiveApplicationHost = applicationHost;
+  if (platform === 'employer_hosted') {
+    if (applicationUrl === undefined || applicationHost === undefined || observationUrl === undefined) {
+      fail(code);
+    }
+    assertSafeString(applicationUrl, code, { max: URL_MAX, trim: true });
+    assertSafeString(observationUrl, 'INVALID_OBSERVATION', { max: URL_MAX, trim: true });
+    const normalizedHost = normalizeVerifiedEmployerHost(applicationHost, code);
+    const sourceRoute = parseApplicationUrl(applicationUrl, normalizedHost, code);
+    if (sourceRoute?.platform !== 'employer_hosted') fail(code);
+    const redirect = reclassifyApplicationRedirect({
+      applicationUrl,
+      applicationHost: normalizedHost,
+      finalUrl: observationUrl,
+    });
+    platform = redirect.platform;
+    effectiveApplicationUrl = redirect.applicationUrl;
+    effectiveApplicationHost = redirect.applicationHost;
+  } else if (applicationUrl !== undefined || applicationHost !== undefined) {
+    fail(code);
+  }
   const controls = ownValue(observation, 'controls', 'INVALID_OBSERVATION');
   if (!Array.isArray(controls)) fail('INVALID_OBSERVATION');
   const normalizedControls = controls.map((control, index) => normalizeControl(control, index));
@@ -808,28 +919,75 @@ function normalizePlanInput(value) {
   }
   const resumeUploadPath = ownValue(value, 'resumeUploadPath', code);
   assertSafeString(resumeUploadPath, code, { max: TEXT_MAX });
-  return { platform, observationId, controls: normalizedControls, answers: normalizedAnswers, resumeUploadPath };
+  return {
+    platform,
+    observationId,
+    controls: normalizedControls,
+    answers: normalizedAnswers,
+    resumeUploadPath,
+    applicationUrl: effectiveApplicationUrl,
+    applicationHost: effectiveApplicationHost,
+  };
 }
 
-export function classifyApplicationUrl(url) {
-  return parseApplicationUrl(url)?.platform ?? null;
+export function classifyApplicationUrl(url, options = undefined) {
+  return parseUrlWithOptions(url, options)?.platform ?? null;
 }
 
-export function canonicalizeApplicationUrl(url) {
-  const route = parseApplicationUrl(url);
-  if (route === null) return null;
+function canonicalUrlForRoute(url, route) {
   return `https://${route.host}${new URL(url).pathname}`;
 }
 
-export function filterSupportedJobs(rows) {
+export function canonicalizeApplicationUrl(url, options = undefined) {
+  const route = parseUrlWithOptions(url, options);
+  if (route === null) return null;
+  return canonicalUrlForRoute(url, route);
+}
+
+export function reclassifyApplicationRedirect(value) {
+  const code = 'INVALID_REDIRECT_INPUT';
+  assertRecord(value, code);
+  assertExactKeys(value, new Set(['applicationUrl', 'applicationHost', 'finalUrl']), code);
+  const applicationUrl = ownValue(value, 'applicationUrl', code);
+  const applicationHost = ownValue(value, 'applicationHost', code);
+  const finalUrl = ownValue(value, 'finalUrl', code);
+  assertSafeString(applicationUrl, code, { max: URL_MAX, trim: true });
+  const normalizedHost = normalizeVerifiedEmployerHost(applicationHost, code);
+  assertSafeString(finalUrl, code, { max: URL_MAX, trim: true });
+  const sourceRoute = parseApplicationUrl(applicationUrl, normalizedHost, code);
+  if (sourceRoute?.platform !== 'employer_hosted') fail(code);
+  const finalAtsRoute = parseApplicationUrl(finalUrl);
+  const finalRoute = finalAtsRoute ?? parseApplicationUrl(finalUrl, normalizedHost, code);
+  if (finalRoute === null) fail('UNSUPPORTED_REDIRECT');
+  if (finalRoute.platform !== 'employer_hosted'
+      && finalRoute.platform !== 'greenhouse'
+      && finalRoute.platform !== 'ashby') {
+    fail('UNSUPPORTED_REDIRECT');
+  }
+  return immutable({
+    platform: finalRoute.platform,
+    applicationUrl: canonicalUrlForRoute(finalUrl, finalRoute),
+    applicationHost: finalRoute.host,
+    reclassified: finalRoute.platform !== 'employer_hosted',
+  });
+}
+
+export function filterSupportedJobs(rows, options = undefined) {
   if (!Array.isArray(rows)) fail('INVALID_JOB_ROWS');
+  const sharedHost = normalizeUrlOptions(options, 'INVALID_JOB_ROWS');
   const filtered = [];
   for (let index = 0; index < rows.length; index += 1) {
     const row = assertRecord(rows[index], 'INVALID_JOB_ROWS');
     if (!hasOwn(row, 'applicationUrl')) fail('INVALID_JOB_ROWS');
     const applicationUrl = ownValue(row, 'applicationUrl', 'INVALID_JOB_ROWS');
     if (typeof applicationUrl !== 'string') fail('INVALID_JOB_ROWS');
-    const platform = classifyApplicationUrl(applicationUrl);
+    const rowHost = hasOwn(row, 'verifiedEmployerHost')
+      ? ownValue(row, 'verifiedEmployerHost', 'INVALID_JOB_ROWS')
+      : sharedHost;
+    const platform = classifyApplicationUrl(
+      applicationUrl,
+      rowHost === undefined ? undefined : { verifiedEmployerHost: rowHost },
+    );
     if (platform === null) continue;
     const cloned = deepClone(row, `rows[${index}]`);
     cloned.platform = platform;
@@ -841,17 +999,22 @@ export function filterSupportedJobs(rows) {
 export function extractPlatformJobSnapshot(value) {
   const code = 'INVALID_SNAPSHOT_INPUT';
   assertRecord(value, code);
-  assertExactKeys(value, new Set(['applicationUrl', 'payload']), code);
+  assertExactKeys(value, new Set(['applicationUrl', 'verifiedEmployerHost', 'payload']), code);
   const applicationUrl = ownValue(value, 'applicationUrl', code);
   assertSafeString(applicationUrl, code, { max: URL_MAX, trim: true });
-  const route = parseApplicationUrl(applicationUrl);
+  const verifiedEmployerHost = hasOwn(value, 'verifiedEmployerHost')
+    ? ownValue(value, 'verifiedEmployerHost', code)
+    : undefined;
+  const normalizedHost = verifiedEmployerHost === undefined
+    ? undefined
+    : normalizeVerifiedEmployerHost(verifiedEmployerHost, code);
+  const route = parseApplicationUrl(applicationUrl, normalizedHost, code);
   if (route === null) fail('UNSUPPORTED_APPLICATION_URL');
   const payload = assertRecord(ownValue(value, 'payload', code), 'INVALID_PAYLOAD');
-  return route.platform === 'greenhouse'
-    ? snapshotForGreenhouse(applicationUrl, route, payload)
-    : snapshotForAshby(applicationUrl, route, payload);
+  if (route.platform === 'greenhouse') return snapshotForGreenhouse(applicationUrl, route, payload);
+  if (route.platform === 'ashby') return snapshotForAshby(applicationUrl, route, payload);
+  return snapshotForNormalizedSource(applicationUrl, route.host, route, payload);
 }
-
 export function planPlatformApplication(value) {
   const normalized = normalizePlanInput(value);
   const actions = [];
@@ -860,10 +1023,14 @@ export function planPlatformApplication(value) {
   for (const control of normalized.controls) {
     if (control.candidateClass === 'final_candidate' || isNonFieldCandidate(control)) continue;
     if (control.fieldId === null) continue;
+    if (control.candidateClass === 'unknown') {
+      unresolved.push({ fieldId: control.fieldId, reason: 'unknown_control' });
+      continue;
+    }
     const kind = controlPlanKind(normalized.platform, control);
     if (kind === null) {
-      if (control.candidateClass === null && isUnclassifiedNonField(control)) continue;
-      fail('UNSUPPORTED_CONTROL');
+      unresolved.push({ fieldId: control.fieldId, reason: 'unsupported_widget' });
+      continue;
     }
     const answer = normalized.answers.get(control.fieldId);
     if (!control.visible || !control.enabled) {

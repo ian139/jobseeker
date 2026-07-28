@@ -16,14 +16,13 @@ const MAX_QUEUED_ROWS = 100_000;
 const BOUND_BATCH_SIZE = 16;
 const URL_BATCH_SIZE = 256;
 const QUARANTINE_MAX_ROWS = 10_000;
-const URL_MAX = 8192;
 const SOURCE_DB_MAX = 4096;
 const SOURCE_JOB_ID_MAX = 512;
 const SOURCE_TEXT_MAX = 16 * 1024;
 const SOURCE_REASON_MAX = 16 * 1024;
 const METADATA_TEXT_MAX = 512;
 const SHA256_HEX = /^[0-9a-f]{64}$/u;
-const SUPPORTED_PLATFORMS = new Set(['greenhouse', 'ashby']);
+const SUPPORTED_PLATFORMS = new Set(['greenhouse', 'ashby', 'employer_hosted']);
 const SOURCE_TABLES = new Set(['jobs', 'legacy_jobs', 'assistant_jobs']);
 const ELIGIBILITY_TIERS = new Set(['active_verified', 'backfill_only', 'unverified_stale']);
 const SOURCE_KEYS = new Set([
@@ -36,6 +35,7 @@ const SOURCE_KEYS = new Set([
   'verificationReason',
   'sourcePostedAt',
   'sourceLastSeenAt',
+  'verifiedEmployerHost',
   'payload',
 ]);
 const REQUIRED_SOURCE_KEYS = Object.freeze([
@@ -65,6 +65,7 @@ const CORE_COLUMNS = Object.freeze([
 ]);
 const BINDING_COLUMNS = Object.freeze([
   'platform',
+  'application_host',
   'job_title',
   'job_company',
   'job_location',
@@ -82,6 +83,7 @@ const INGEST_COLUMNS = Object.freeze([
   'source_posted_at',
   'source_last_seen_at',
   'platform',
+  'application_host',
   'job_title',
   'job_company',
   'job_location',
@@ -193,10 +195,17 @@ function normalizeSourceJobInternal(input) {
   for (const key of REQUIRED_SOURCE_KEYS) requireOwn(envelope, key, code);
 
   const rawApplicationUrl = ownValue(envelope, 'applicationUrl', code);
-  safeString(rawApplicationUrl, code, URL_MAX, { trim: true });
-  const platform = classifyApplicationUrl(rawApplicationUrl);
+  const verifiedEmployerHost = hasOwn(envelope, 'verifiedEmployerHost')
+    ? ownValue(envelope, 'verifiedEmployerHost', code)
+    : undefined;
+  if (verifiedEmployerHost !== undefined) {
+    safeString(verifiedEmployerHost, code, 253, { trim: true });
+  }
+  const platformOptions = verifiedEmployerHost === undefined
+    ? undefined
+    : { verifiedEmployerHost };
+  const platform = classifyApplicationUrl(rawApplicationUrl, platformOptions);
   if (platform === null) return null;
-
   const sourceTable = ownValue(envelope, 'sourceTable', code);
   if (typeof sourceTable !== 'string' || !SOURCE_TABLES.has(sourceTable)) fail(code);
   const sourceDb = safeString(ownValue(envelope, 'sourceDb', code), code, SOURCE_DB_MAX, { trim: true });
@@ -225,16 +234,23 @@ function normalizeSourceJobInternal(input) {
 
   let applicationUrl;
   try {
-    applicationUrl = canonicalizeApplicationUrl(rawApplicationUrl);
+    applicationUrl = canonicalizeApplicationUrl(rawApplicationUrl, platformOptions);
   } catch {
     fail(code);
   }
-  if (typeof applicationUrl !== 'string' || classifyApplicationUrl(applicationUrl) !== platform) fail(code);
+  if (typeof applicationUrl !== 'string'
+      || classifyApplicationUrl(applicationUrl, platformOptions) !== platform) {
+    fail(code);
+  }
 
   const payload = ownValue(envelope, 'payload', code);
   let snapshot;
   try {
-    snapshot = extractPlatformJobSnapshot({ applicationUrl, payload });
+    snapshot = extractPlatformJobSnapshot({
+      applicationUrl,
+      payload,
+      ...(verifiedEmployerHost === undefined ? {} : { verifiedEmployerHost }),
+    });
   } catch {
     fail('INVALID_SOURCE_JOB_PAYLOAD');
   }
@@ -243,6 +259,12 @@ function normalizeSourceJobInternal(input) {
       || snapshot.applicationUrl !== applicationUrl) {
     fail('INVALID_SOURCE_JOB_PAYLOAD');
   }
+  const applicationHost = safeString(
+    snapshot.applicationHost,
+    'INVALID_SOURCE_JOB_PAYLOAD',
+    253,
+    { trim: true },
+  );
 
   const title = normalizedText(snapshot.title, 'INVALID_SOURCE_JOB_PAYLOAD');
   const company = normalizedText(snapshot.company, 'INVALID_SOURCE_JOB_PAYLOAD');
@@ -264,12 +286,14 @@ function normalizeSourceJobInternal(input) {
     sourcePostedAt,
     sourceLastSeenAt,
     platform,
+    applicationHost,
     jobTitle: title,
     jobCompany: company,
     jobLocation: location,
     jobDescription: description,
     jobDescriptionSha256: descriptionSha256,
   };
+
 }
 
 export function normalizeSourceJob(input) {
@@ -422,6 +446,7 @@ function ingestSql(jobs) {
       job.sourcePostedAt,
       job.sourceLastSeenAt,
       job.platform,
+      job.applicationHost,
       job.jobTitle,
       job.jobCompany,
       job.jobLocation,
@@ -442,6 +467,7 @@ function ingestSql(jobs) {
           source_posted_at = ${sqlLiteral(job.sourcePostedAt)},
           source_last_seen_at = ${sqlLiteral(job.sourceLastSeenAt)},
           platform = ${sqlLiteral(job.platform)},
+          application_host = ${sqlLiteral(job.applicationHost)},
           job_title = ${sqlLiteral(job.jobTitle)},
           job_company = ${sqlLiteral(job.jobCompany)},
           job_location = ${sqlLiteral(job.jobLocation)},
@@ -449,25 +475,41 @@ function ingestSql(jobs) {
           job_description_sha256 = ${sqlLiteral(job.jobDescriptionSha256)},
           status = CASE
             WHEN target.status = 'skipped'
-              AND target.status_reason IN ('platform_reingest_required', 'unsupported_platform')
+              AND target.status_reason IN (
+                'platform_reingest_required',
+                'employer_host_reingest_required',
+                'unsupported_platform'
+              )
               THEN 'queued'
             ELSE target.status
           END,
           status_reason = CASE
             WHEN target.status = 'skipped'
-              AND target.status_reason IN ('platform_reingest_required', 'unsupported_platform')
+              AND target.status_reason IN (
+                'platform_reingest_required',
+                'employer_host_reingest_required',
+                'unsupported_platform'
+              )
               THEN NULL
             ELSE target.status_reason
           END,
           claimed_at = CASE
             WHEN target.status = 'skipped'
-              AND target.status_reason IN ('platform_reingest_required', 'unsupported_platform')
+              AND target.status_reason IN (
+                'platform_reingest_required',
+                'employer_host_reingest_required',
+                'unsupported_platform'
+              )
               THEN NULL
             ELSE target.claimed_at
           END,
           completed_at = CASE
             WHEN target.status = 'skipped'
-              AND target.status_reason IN ('platform_reingest_required', 'unsupported_platform')
+              AND target.status_reason IN (
+                'platform_reingest_required',
+                'employer_host_reingest_required',
+                'unsupported_platform'
+              )
               THEN NULL
             ELSE target.completed_at
           END
@@ -476,7 +518,11 @@ function ingestSql(jobs) {
           target.status = 'queued'
           OR (
             target.status = 'skipped'
-            AND target.status_reason IN ('platform_reingest_required', 'unsupported_platform')
+            AND target.status_reason IN (
+              'platform_reingest_required',
+              'employer_host_reingest_required',
+              'unsupported_platform'
+            )
           )
         )
         AND (
@@ -558,15 +604,25 @@ export async function ingestSupportedJobs(database, rows) {
 function validateStoredSnapshot(row) {
   if (!isRecord(row)) fail('BOUND_JOB_INVALID');
   if (!Number.isSafeInteger(row.id) || row.id < 1) fail('BOUND_JOB_INVALID');
-  if (typeof row.platform !== 'string' || !SUPPORTED_PLATFORMS.has(row.platform)) fail('BOUND_JOB_INVALID');
+  if (typeof row.platform !== 'string' || !SUPPORTED_PLATFORMS.has(row.platform)) {
+    fail('BOUND_JOB_INVALID');
+  }
   if (typeof row.application_url !== 'string') fail('BOUND_JOB_INVALID');
+  const applicationHost = safeString(row.application_host, 'BOUND_JOB_INVALID', 253, { trim: true });
+  const platformOptions = row.platform === 'employer_hosted'
+    ? { verifiedEmployerHost: applicationHost }
+    : undefined;
   let canonicalUrl;
+  let parsedUrl;
   try {
-    canonicalUrl = canonicalizeApplicationUrl(row.application_url);
+    canonicalUrl = canonicalizeApplicationUrl(row.application_url, platformOptions);
+    parsedUrl = new URL(row.application_url);
   } catch {
     fail('BOUND_JOB_INVALID');
   }
-  if (canonicalUrl !== row.application_url || classifyApplicationUrl(row.application_url) !== row.platform) {
+  if (canonicalUrl !== row.application_url
+      || parsedUrl.hostname !== applicationHost
+      || classifyApplicationUrl(row.application_url, platformOptions) !== row.platform) {
     fail('BOUND_JOB_INVALID');
   }
   const title = normalizedText(row.job_title, 'BOUND_JOB_INVALID');
@@ -595,6 +651,7 @@ function validateStoredSnapshot(row) {
   return {
     id: row.id,
     platform: row.platform,
+    applicationHost,
     applicationUrl: row.application_url,
     title,
     company,
@@ -614,7 +671,7 @@ export async function loadBoundJob(database, jobId) {
   const rows = parseRows(
     await runSqlite(
       db,
-      `SELECT id, platform, application_url, job_title, job_company, job_location,
+      `SELECT id, platform, application_host, application_url, job_title, job_company, job_location,
               job_description, job_description_sha256, source_posted_at, source_last_seen_at,
               eligibility_tier
        FROM application_jobs
@@ -627,22 +684,26 @@ export async function loadBoundJob(database, jobId) {
   return immutable(validateStoredSnapshot(rows[0]));
 }
 
-function queuedSelectSql(lastId) {
+function queuedSelectSql(lastId, minimumJobId = undefined) {
+  const minimum = minimumJobId === undefined ? '' : ` AND id >= ${sqlLiteral(minimumJobId)}`;
   return `
-    SELECT id, platform, application_url, job_title, job_company, job_location,
+    SELECT id, platform, application_host, application_url, job_title, job_company, job_location,
            job_description, job_description_sha256, source_posted_at, source_last_seen_at,
            eligibility_tier
     FROM application_jobs
-    WHERE status = 'queued' AND id > ${sqlLiteral(lastId)}
+    WHERE status = 'queued' AND id > ${sqlLiteral(lastId)}${minimum}
     ORDER BY id ASC
     LIMIT ${BOUND_BATCH_SIZE};`;
 }
 
-async function readQueuedBoundRows(database) {
+async function readQueuedBoundRows(database, minimumJobId = undefined) {
   const all = [];
   let lastId = 0;
   while (true) {
-    const rows = parseRows(await runSqlite(database, queuedSelectSql(lastId)), 'SQLITE_RESULT');
+    const rows = parseRows(
+      await runSqlite(database, queuedSelectSql(lastId, minimumJobId)),
+      'SQLITE_RESULT',
+    );
     if (rows.length === 0) break;
     if (rows.length > BOUND_BATCH_SIZE) fail('SQLITE_RESULT');
     let nextId = lastId;
@@ -677,10 +738,13 @@ function listOrder(a, b) {
   return a.id - b.id;
 }
 
-export async function listBoundQueuedJobs(database) {
+export async function listBoundQueuedJobs(database, options = {}) {
+  const minimumJobId = options && typeof options === 'object' && options.minimumJobId !== undefined
+    ? requirePositiveInteger(options.minimumJobId, 'E_MINIMUM_JOB_ID')
+    : undefined;
   const db = databasePath(database);
   await ensureSchema(db, [...CORE_COLUMNS, ...BINDING_COLUMNS]);
-  const rows = await readQueuedBoundRows(db);
+  const rows = await readQueuedBoundRows(db, minimumJobId);
   const jobs = [];
   for (const row of rows) {
     try {

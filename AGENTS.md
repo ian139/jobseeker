@@ -2,15 +2,15 @@
 
 ## Project Overview
 
-This repository implements Phase 1 application execution, the completed Phase 2 per-job resume generator, and the active Phase 3 Greenhouse/Ashby-only SQLite backlog workflow. Phase 3 is explicitly authorized for persistent supervised OMP operation with exactly one active job. Deterministic code owns source/platform classification, normalized job binding, resume preparation, and platform action mechanics; OMP/model reasoning is limited to oversight/diagnosis and allowed unresolved response inference. Unchecked live gates in `TODO.md` remain required evidence for completion claims.
+This repository implements Phase 1 application execution, the completed Phase 2 per-job resume generator, and the active Phase 3 bounded-platform SQLite backlog workflow. Claimable platforms are exactly Greenhouse, Ashby, and explicitly host-verified employer routes. Phase 3 is explicitly authorized for persistent supervised OMP operation with exactly one active job. Deterministic code owns source/platform classification, normalized host-and-URL job binding, resume preparation, redirect reclassification, and platform action mechanics; OMP/model reasoning is limited to oversight/diagnosis and allowed unresolved response inference. Unchecked live gates in `TODO.md` remain required evidence for completion claims.
 
 `TODO.md` is the scope and safety authority. `PROJECT_HANDOFF.md` is historical evidence only; verify its paths and claims against the active tree.
 
 ## Architecture & Data Flow
 
 ```text
-Greenhouse/Ashby source payload + SQLite backlog
-  -> exact platform classification and normalized bound snapshot
+Greenhouse/Ashby/verified-employer-host source payload + SQLite backlog
+  -> exact platform classification and normalized host-bound snapshot
   -> deterministic verified job-specific resume generation
   -> atomic full-snapshot claim and private run workspace
   -> policy-free DOM observer
@@ -29,15 +29,15 @@ Greenhouse/Ashby source payload + SQLite backlog
 `src/phase1/evidence.mjs` publishes bounded, owner-private JSON/JSONL artifacts, file identities, an action journal, and a submission completion report.
 OMP performs browser actions. Final submission is automated by OMP after the completeness audit passes.
 - `src/phase1/backlog-runner.mjs` and `migrations/004-durable-active-runs.sql` own atomic claims, one-active-run enforcement, leases, restart recovery, same-run `needs_user` continuation, workspace binding, and canonical terminal persistence. OMP remains the persistent loop.
-- `src/phase1/platforms.mjs` is the fail-closed Greenhouse/Ashby registry, normalized payload extractor, and deterministic platform action planner. It rejects every unsupported or malformed application route and never performs browser mutation.
-- `src/phase1/job-source.mjs` owns supported ingestion, canonical URL/source deduplication, normalized description hashes, bound queue reads, and unsupported-row quarantine. `migrations/005-platform-job-snapshots.sql` refuses active-run rebuilds, preserves terminal history, and quarantines all legacy nonterminal rows until re-ingestion.
-- `src/phase1/preparation.mjs` composes recovery with persisted answer-memory binding, description-digest-keyed staging, offline canonical resume generation/validation, source-timestamp-inclusive full-snapshot claims, and idempotent workspace creation before browser work.
+- `src/phase1/platforms.mjs` is the fail-closed three-platform registry, normalized payload extractor, deterministic redirect classifier, and action planner. Employer routes require an exact source-verified ASCII DNS host and bounded HTTPS career pathname; unknown widgets remain unresolved.
+- `src/phase1/job-source.mjs` owns supported ingestion, canonical URL/source deduplication, normalized description hashes, host-bound queue reads, and unsupported-row quarantine. Forward migrations 005–007 add the platform snapshot and employer-host authority while refusing active-run rebuilds.
+- `src/phase1/preparation.mjs` composes recovery-first operation with persisted answer-memory binding, optional new-claim-only `minimumJobId`, description-digest-keyed staging, offline canonical resume validation, full host-and-snapshot claims, and idempotent workspace creation.
 
 ## Key Directories
 
 | Path | Purpose |
 | --- | --- |
-| `src/phase1/` | Active contracts, Greenhouse/Ashby source/platform pipeline, backlog preparation, observer, ledger, audit, and evidence implementation. |
+| `src/phase1/` | Active contracts, bounded source/platform pipeline, backlog preparation, observer, ledger, audit, and evidence implementation. |
 | `tests/` | Active Node contract, ledger/audit, and evidence regression tests. |
 | `private/` | Git-ignored, owner-private run inputs and evidence. Never expose or commit its contents. |
 | `skills/playwright-cli/` | Retained Playwright CLI 1.60.0 guidance and SHA-256 provenance. |
@@ -64,7 +64,7 @@ There is no build step, linter, formatter, coverage threshold, Playwright test c
 - **State:** Return cloned, recursively frozen ledger/audit values. Preserve stable IDs, observation chains, and current refs; never mutate caller-owned state.
 - **Privacy:** Store raw applicant values only under `private/`. Public evidence structures use SHA-256 value digests, field IDs, sources, and outcomes—not profile values.
 - **Browser boundary:** Observation code may read DOM/ARIA state only. OMP resolves answers and performs each interaction. Never add JavaScript form mutation, submit calls, or answer policy to the observer.
-- **Supported platforms:** Claimable work is restricted to exact Greenhouse/Ashby routes classified by `platforms.mjs`. Never add a permissive hostname heuristic or let an unclassified queued row pass through a legacy claim path.
+- **Supported platforms:** Claimable work is restricted to exact Greenhouse/Ashby routes or bounded employer routes on one explicitly verified ASCII DNS host. Persist and fence the exact application host with the canonical URL. Never add a permissive hostname heuristic or let an unclassified queued row pass through a legacy claim path.
 - **Model boundary:** Deterministic code owns URL/payload identity, description extraction, queue order/binding, resume generation, control/option mechanics, retention, and audit. Model use is restricted to oversight/diagnosis and evidence-backed non-sensitive response content after memory/profile/resume resolution fails.
 - **CMUX-TUI browser-pane binding:** Resolve the configured endpoint from `CMUX_MUX_CDP_URL`, then `browser.cdp_url` or configured discovery. Require a loopback `ws://` or `http://` URL with no credentials or fragment; reject `wss://`, non-loopback endpoints, the OS-default Chrome profile, and `browser.ephemeral` for durable runs. Bind one immutable `{ muxSessionId, targetId, cdpUrl, profileMode: "persistent", userDataDir? }`; one CMUX-TUI mux session owns one shared Chrome/CDP runtime and each active job owns exactly one target. Reject target/session mismatches and fence every request/result with `muxSessionId`, `targetId`, and `observationId`.
 - **OMP browser attachment:** Attach the named OMP browser tab once with `xd://browser` payload `{"action":"open","name":"job-<job-id>","app":{"cdp_url":"<cdpUrl>","target":"<targetId>"}}`, then reuse that tab through `browser.run`; do not create a second attachment. Close only the job target after durable persistence, never the shared Chrome/runtime.
@@ -94,7 +94,7 @@ There is no build step, linter, formatter, coverage threshold, Playwright test c
 | `src/phase1/job-source.mjs` | Supported ingestion, normalized bound snapshots, queue reads, and quarantine. |
 | `src/phase1/preparation.mjs` | Recovery-first description → resume → exact claim → workspace coordinator. |
 | `src/phase1/backlog-runner.mjs` | Atomic one-active-run lifecycle, leases, exact claim fencing, and persistence. |
-| `migrations/005-platform-job-snapshots.sql` | Greenhouse/Ashby snapshot columns, active-run migration guard, and legacy nonterminal quarantine. |
+| `migrations/005-platform-job-snapshots.sql` through `007-bind-application-host.sql` | Snapshot columns, exact three-platform enum, employer-host binding, active-run guards, and safe legacy quarantine. |
 | `tests/*.test.mjs` | Observable regression contracts for active Phase 1 behavior. |
 | `skills/playwright-cli/SOURCE.json` | Retained Playwright bundle version and recorded hashes. |
 | `schemas/application-decision.schema.json` | Canonical strict per-field decision output contract. |

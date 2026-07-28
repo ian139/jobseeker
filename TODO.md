@@ -2,7 +2,7 @@
 
 This is the execution roadmap for the fresh implementation. `PROJECT_HANDOFF.md` is design history and evidence; this file defines the new build order and acceptance gates.
 
-**Current phase:** Phase 3 is active with a fail-closed Greenhouse/Ashby-only backlog. Deterministic source normalization, exact job binding, canonical resume preparation, and platform action planning are implemented. Persistent supervised OMP operation remains authorized for exactly one active job. Unchecked headed live-submission and persistent-loop gates remain evidence required for completion claims.
+**Current phase:** Phase 3 is active with a fail-closed Greenhouse/Ashby/verified-employer-host backlog. Deterministic source normalization, host-and-URL job binding, canonical resume preparation, redirect reclassification, and platform action planning are implemented. Persistent supervised OMP operation remains authorized for exactly one active job. Unchecked headed live-submission and persistent-loop gates remain evidence required for completion claims.
 
 ## How an OMP agent must use this file
 
@@ -16,7 +16,7 @@ This is the execution roadmap for the fresh implementation. `PROJECT_HANDOFF.md`
 ## Product end state
 
 ```text
-Greenhouse/Ashby source payload
+Greenhouse/Ashby/verified-employer-host source payload
   -> supported-platform classification and canonical SQLite snapshot
   -> deterministic one-page LaTeX resume
   -> exact bound claim and owner-private run workspace
@@ -295,13 +295,13 @@ Phase 2 is complete only when a real generation demonstrates all of these:
 
 ---
 
-# Phase 3 — Greenhouse/Ashby backlog and persistent OMP application loop
+# Phase 3 — bounded platform backlog and persistent OMP application loop
 
 ## Goal
 
-Ingest only exact Greenhouse and Ashby applications into the SQLite backlog, bind each queued row to a normalized immutable job snapshot, deterministically generate the canonical job-specific resume before browser work, and emit platform-specific action mechanics for every observed control. OMP remains the persistent operator, but model reasoning is restricted to oversight/diagnosis and unresolved non-sensitive response content.
+Ingest only exact Greenhouse, Ashby, and explicitly host-verified employer applications into the SQLite backlog, bind each queued row to a normalized immutable job snapshot, deterministically generate the canonical job-specific resume before browser work, and emit platform-specific action mechanics for every observed control. OMP remains the persistent operator, but model reasoning is restricted to oversight/diagnosis and unresolved non-sensitive response content.
 
-Unsupported ATSs and arbitrary URLs never become claimable work. Existing unclassified queued rows are quarantined until they are re-ingested through the supported-platform contract.
+Unsupported ATSs and unverified arbitrary URLs never become claimable work. Existing unclassified queued rows are quarantined until they are re-ingested through the supported-platform contract.
 
 **Active operating authority:** A persistent supervised OMP session may inspect, recover, prepare, claim, apply, audit, and submit one supported backlog application at a time. It must use the durable owner/lease lifecycle, exact job/resume binding, canonical Phase 1 evidence, and automated submission boundary. No separate per-job or per-action permission is required.
 
@@ -311,10 +311,11 @@ The platform registry in `src/phase1/platforms.mjs` is the sole URL authority:
 
 - Greenhouse: exact HTTPS job routes on `job-boards.greenhouse.io`, `boards.greenhouse.io`, and their exact EU hosts.
 - Ashby: exact HTTPS `jobs.ashbyhq.com/<organization>/<uuid>` job routes.
+- Employer-hosted: exact HTTPS routes on one source-supplied, explicitly verified ASCII DNS host; the pathname is bounded to approved career-route prefixes and segments.
 - Tracking query parameters are removed from the canonical application URL.
-- Credentials, fragments, ports, host lookalikes, malformed routes, and every other ATS are rejected.
+- Credentials, fragments, ports, IDN/IP hosts, host lookalikes, malformed routes, and every other ATS are rejected.
 
-`extractPlatformJobSnapshot` validates payload URL identity against the selected platform route, strips unsafe markup, normalizes title/company/location/description, and returns a frozen snapshot. It accepts the exact Greenhouse/Ashby payload shapes and the normalized `jobs` source payload used by the active SQLite source. Raw source payloads remain source-side/private; `application_jobs` stores only the bounded normalized snapshot and SHA-256 description identity.
+`extractPlatformJobSnapshot` validates payload URL and host identity against the selected platform route, strips unsafe markup, normalizes title/company/location/description, and returns a frozen snapshot. Raw source payloads remain source-side/private; `application_jobs` stores only the bounded normalized snapshot, exact application host, and SHA-256 description identity.
 
 ## Deterministic pipeline
 
@@ -336,11 +337,11 @@ source rows
   -> canonical evidence and SQLite outcome
 ```
 
-`prepareOrRecoverSupportedRun` is the browser-preparation boundary. It recovers an existing active run first and rejects a caller-supplied answer-memory path that differs from the persisted run binding. Otherwise it selects the first supported bound snapshot, stages that exact description under a job-and-description-digest path, invokes the canonical Python generator offline with advisory/model environment disabled, validates the five-file manifest and one-page PDF identity, rechecks the snapshot, atomically claims that exact job binding, and creates the private Phase 1 workspace. A crash after claim but before workspace publication is repaired idempotently during recovery without regenerating the resume.
+`prepareOrRecoverSupportedRun` is the browser-preparation boundary. It recovers an existing active run first, regardless of any `minimumJobId` floor, and rejects a caller-supplied answer-memory path that differs from the persisted run binding. Otherwise it selects the first supported bound snapshot at or above the optional floor, stages that exact description under a job-and-description-digest path, invokes the canonical Python generator offline with advisory/model environment disabled, validates the five-file manifest and one-page PDF identity, rechecks the snapshot, atomically claims that exact job-and-host binding, and creates the private Phase 1 workspace. A crash after claim but before workspace publication is repaired idempotently during recovery without regenerating the resume.
 
-The claim predicate includes platform, canonical URL, title, company, location, source posted timestamp, full description, and description SHA-256. A changed row cannot receive a resume generated from an earlier snapshot.
+The claim predicate includes platform, exact application host, canonical URL, title, company, location, source posted timestamp, full description, and description SHA-256. A changed row cannot receive a resume generated from an earlier snapshot.
 
-`planPlatformApplication` consumes the canonical observer result and resolved answer map. It emits frozen Greenhouse- or Ashby-specific mechanics for exact text fill, textarea fill, file upload, native select, staged custom-combobox opening followed by exact option selection, radio/yes-no choice, and checkbox transitions. It never includes the final candidate as an ordinary action. OMP maps each semantic control ref to one current browser selector, executes the emitted mechanic, and re-observes before continuing.
+`planPlatformApplication` consumes the canonical observer result and resolved answer map. Employer-hosted observations are reclassified from the freshly observed URL before any mechanic is selected; only the same verified host or an exact Greenhouse/Ashby destination is accepted. The planner emits frozen platform-specific mechanics for known controls, leaves unknown widgets unresolved, and never includes the final candidate as an ordinary action.
 
 ## Model boundary
 
@@ -394,17 +395,17 @@ Operational validation failures remain active and repairable. They are not evide
 
 ## Implementation checklist
 
-- [x] Define the normalized Greenhouse/Ashby job contract independently of source transport.
-- [x] Reject unsupported ATSs and malformed/lookalike application URLs before ingestion and claiming.
+- [x] Define the normalized Greenhouse/Ashby/verified-employer-host job contract independently of source transport.
+- [x] Reject unsupported ATSs and malformed, unverified, or lookalike application URLs before ingestion and claiming.
 - [x] Canonicalize supported URLs and deduplicate by source identity and canonical URL.
-- [x] Add migration 005, preserve terminal history, refuse active-run rebuilds, and quarantine every unclassified nonterminal row.
+- [x] Add forward migrations 005–007, preserve terminal history, refuse active-run rebuilds, and quarantine legacy nonterminal rows that lack a verified employer-host binding.
 - [x] Extract and hash the exact normalized job description without model involvement.
 - [x] List and load only complete cryptographically bound supported queue snapshots.
 - [x] Generate and validate the canonical five-file one-page resume before browser work.
 - [x] Recheck and atomically claim the exact full snapshot used for generation.
 - [x] Bind the verified resume path/hash and staged description into the private Phase 1 workspace.
 - [x] Repair the claimed-before-workspace crash window without recompiling.
-- [x] Emit distinct deterministic Greenhouse and Ashby action mechanics from canonical observer data.
+- [x] Emit distinct deterministic Greenhouse, Ashby, and employer-hosted action mechanics from canonical observer data, with redirect reclassification and unresolved unknown widgets.
 - [x] Keep the final candidate outside ordinary action plans and behind `prepareSubmission`.
 - [x] Verify the complete supported-source → snapshot → resume → claim → workspace flow with deterministic fixtures.
 - [x] Verify identical recovery does not recompile and a different job cannot reuse the prior job's resume.
@@ -433,8 +434,8 @@ Keep `max_active_jobs = 1`. If no supported work exists, wait and inspect again 
 
 | Parameter | Initial value/meaning |
 |---|---|
-| `db_path` | Local SQLite database after migrations 001–005. |
-| `source_adapter` | Materializes source rows; only exact Greenhouse/Ashby rows survive normalization. |
+| `db_path` | Local SQLite database after migrations 001–007. |
+| `source_adapter` | Materializes source rows; only exact Greenhouse/Ashby or explicitly host-verified employer rows survive normalization. |
 | `applicant_profile_path` | Optional owner-private application profile; one applicant-evidence input is required. |
 | `source_resume_path` | Optional owner-private source resume; one applicant-evidence input is required. |
 | `answer_memory_path` | Canonical owner-private verified answer memory. |
@@ -444,11 +445,12 @@ Keep `max_active_jobs = 1`. If no supported work exists, wait and inspect again 
 | `workspace_root` | Owner-private per-job run workspace root. |
 | `resume_output_root` | Owner-private immutable generator artifact root. |
 | `max_active_jobs` | Exactly `1`. |
+| `minimum_job_id` | Optional inclusive floor for new queue selection only; active-run recovery always takes precedence. |
 | `submit_policy` | Always `omp_agent`. |
 
 ## Explicitly out of scope
 
-- Lever, Workday, custom career sites, and every ATS other than Greenhouse/Ashby;
+- Lever, Workday, unverified custom career sites, and every platform outside Greenhouse, Ashby, and explicitly host-verified employer routes;
 - model-based source classification, job-description extraction, resume generation, queue ranking, or browser mechanics;
 - bypassing source fees, authentication, assessments, or access controls;
 - reviving the old RPC coordinator or custom browser protocol;
@@ -472,4 +474,4 @@ Phase 3 is complete only when the persistent supervised system demonstrates all 
 
 ## OMP kickoff prompt
 
-> Use `skills/application-prep/SKILL.md` as the canonical operating procedure. Call `prepareOrRecoverSupportedRun` with `maxActiveJobs: 1`; do not claim from an unbound URL or use static cross-job description/resume paths. Accept only Greenhouse/Ashby rows normalized by `job-source.mjs`. Use `planPlatformApplication` for platform mechanics, resolve memory/profile/resume deterministically, and use `agent_inference` only for allowed unresolved response content. Execute through the OMP browser, re-observe after every action, and cross the final-submit boundary only after `prepareSubmission` authorizes the exact current ref.
+> Use `skills/application-prep/SKILL.md` as the canonical operating procedure. Call `prepareOrRecoverSupportedRun` with `maxActiveJobs: 1`; use `minimumJobId` only as an inclusive floor for new claims, never recovery. Do not claim from an unbound URL/host or use static cross-job description/resume paths. Accept only rows normalized by `job-source.mjs`. Use `planPlatformApplication` for redirect reclassification and platform mechanics, leave unknown widgets unresolved, and cross the final-submit boundary only after `prepareSubmission` authorizes the exact current ref.

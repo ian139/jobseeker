@@ -818,6 +818,7 @@ const PROFILE_CANONICAL_PATHS = Object.freeze({
     'profile.address.street': Object.freeze(['address', 'street']),
     'profile.address.street2': Object.freeze(['address', 'street2']),
     'profile.location_preferences.current_location': Object.freeze(['location_preferences', 'current_location']),
+    'profile.compensation.target': Object.freeze(['compensation', 'target']),
     'Full Name': Object.freeze(['contact', 'name']),
     Name: Object.freeze(['contact', 'name']),
     'Preferred First Name': Object.freeze(['contact', 'preferred_name']),

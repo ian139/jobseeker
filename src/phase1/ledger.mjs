@@ -1519,10 +1519,23 @@ export function digestPrivateValue(value) {
   return createHash('sha256').update(canonicalValue(value), 'utf8').digest('hex');
 }
 
+const NUMERIC_FIELD_PATTERN = /\b(?:gpa|grade point average|salary|compensation|pay|wage|rate)\b/i;
+
+function canonicalNumericValue(control, value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? String(value) : value;
+  if (typeof value !== 'string') return value;
+  const context = `${control?.label ?? ''} ${control?.name ?? ''} ${control?.description ?? ''}`;
+  if (!NUMERIC_FIELD_PATTERN.test(context)) return value;
+  const candidate = value.trim().replace(/[$,\s]/g, '');
+  if (!/^-?(?:\d+|\d*\.\d+)$/.test(candidate)) return value;
+  const numeric = Number(candidate);
+  return Number.isFinite(numeric) ? String(numeric) : value;
+}
+
 export function digestObservedValue(control, value) {
   const normalized = control?.role === 'radio' && typeof value === 'string'
     ? value.trim().toLowerCase()
-    : value;
+    : canonicalNumericValue(control, value);
   return digestPrivateValue(normalized);
 }
 

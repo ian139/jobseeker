@@ -172,6 +172,7 @@ const STANDARD_PROFILE_ALIASES = Object.freeze({
   'current job title': 'profile.employment.current.title',
   'current location': 'profile.location_preferences.current_location',
   'are you willing to relocate': 'profile.relocation.willing',
+  'what salary do you require': 'profile.compensation.target',
 });
 
 function normalizeClassificationText(text) {

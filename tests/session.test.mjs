@@ -234,6 +234,65 @@ test('coordinator uses the sensitive structured country resolution contract', as
   await finalizeRetained(session, harness.screenshotPath);
 });
 
+test('numeric profile answers retain canonical salary and GPA DOM values', async (t) => {
+  const harness = createHarness(t, {
+    profile: {
+      schema: 'phase1-profile-v1',
+      compensation: { currency: 'USD', target: 120000, period: 'year' },
+      education: [{
+        institution: 'Example University',
+        level: 'college',
+        gpa: 3.8,
+        current: true,
+      }],
+    },
+  });
+  const { run, runPath } = harness.runFor('numeric-profile-values');
+  const session = await startRun(runPath, { startedAt: '2026-07-25T08:00:00.000Z' });
+  const controls = (salary = null, salaryPresent = false, gpa = null, gpaPresent = false) => [
+    {
+      ...fieldControl('salary', salary, salaryPresent),
+      label: 'What salary do you require?',
+    },
+    {
+      ...fieldControl('gpa', gpa, gpaPresent),
+      label: 'College GPA',
+    },
+  ];
+
+  await acceptObservation(session, observation(run.application_url, 1, controls()));
+  const salary = await resolveField(session, {
+    field_id: 'salary',
+    alias: 'What salary do you require?',
+    sensitive: true,
+  });
+  assert.equal(salary.answer.source, 'profile');
+  assert.equal(salary.answer.value, 120000);
+  await recordAction(session, { action: 'fill', field_id: 'salary', outcome: 'succeeded' });
+  await acceptObservation(
+    session,
+    observation(run.application_url, 2, controls('$120,000', true)),
+  );
+  let retention = await verifyRetention(session);
+  assert.equal(retention.ledger.fields.find((field) => field.field_id === 'salary').retained, true);
+
+  const gpa = await resolveField(session, {
+    field_id: 'gpa',
+    alias: 'College GPA',
+    sensitive: true,
+  });
+  assert.equal(gpa.answer.source, 'profile');
+  assert.equal(gpa.answer.value, 3.8);
+  await recordAction(session, { action: 'fill', field_id: 'gpa', outcome: 'succeeded' });
+  await acceptObservation(
+    session,
+    observation(run.application_url, 3, controls('$120,000', true, '3.8', true)),
+  );
+  retention = await verifyRetention(session);
+  assert.equal(retention.ok, true);
+  assert.equal(retention.ledger.fields.find((field) => field.field_id === 'gpa').retained, true);
+});
+
 test('sensitive country excludes both resume and agent inference', async (t) => {
   const sourceResume = 'Synthetic country source resume.';
   const harness = createHarness(t, { sourceResume });

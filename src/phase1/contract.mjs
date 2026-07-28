@@ -1122,6 +1122,7 @@ function inferenceValue(candidate, alias) {
 
 export function resolveAnswer({
     alias,
+    profileAlias = alias,
     memory = [],
     profile = undefined,
     resume = undefined,
@@ -1130,9 +1131,10 @@ export function resolveAnswer({
     user = undefined,
 } = {}) {
     requireAlias(alias, 'alias');
+    requireAlias(profileAlias, 'profileAlias');
     const candidates = [
         { source: 'memory', candidate: memoryValue(memory, alias) },
-        { source: 'profile', candidate: profileValue(profile, alias) },
+        { source: 'profile', candidate: profileValue(profile, profileAlias) },
         { source: 'resume', candidate: candidateValue(resume, alias) },
     ];
     for (const { source, candidate } of candidates) {

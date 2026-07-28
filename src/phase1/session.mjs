@@ -450,19 +450,16 @@ export async function resolveField(session, options) {
     const workingField = workingLedger.fields.find((item) => item.field_id === field.field_id);
     const sensitive = workingField.sensitive === true;
     const allowAgentInference = !sensitive;
-    const answerInputs = {
+    const standardAlias = STANDARD_PROFILE_ALIASES[normalizeClassificationText(input.alias)];
+    const answer = resolveAnswer({
+      alias: input.alias,
+      profileAlias: standardAlias ?? input.alias,
       memory: state.memory,
       profile: state.profile ?? undefined,
       resume: sensitive ? undefined : state.resume,
       agentInference: allowAgentInference ? state.agentInference : undefined,
       user: input.user,
-    };
-    let answer = resolveAnswer({ alias: input.alias, ...answerInputs });
-    const standardAlias = STANDARD_PROFILE_ALIASES[normalizeClassificationText(input.alias)];
-    if (answer.missing && standardAlias !== undefined) {
-      const canonical = resolveAnswer({ alias: standardAlias, ...answerInputs });
-      if (!canonical.missing) answer = { ...canonical, alias: input.alias };
-    }
+    });
     if (remember && answer.missing) {
       throw new TypeError('remembered answers require an explicit user answer');
     }

@@ -558,6 +558,12 @@ export function classifyApplicationUrl(url) {
   return parseApplicationUrl(url)?.platform ?? null;
 }
 
+export function canonicalizeApplicationUrl(url) {
+  const route = parseApplicationUrl(url);
+  if (route === null) return null;
+  return `https://${route.host}${new URL(url).pathname}`;
+}
+
 export function filterSupportedJobs(rows) {
   if (!Array.isArray(rows)) fail('INVALID_JOB_ROWS');
   const filtered = [];

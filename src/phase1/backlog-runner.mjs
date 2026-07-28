@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { constants as fsConstants, promises as fsp } from 'node:fs';
 import path from 'node:path';
 
@@ -563,28 +564,66 @@ function normalizeRunRows(rows, emptyCode = 'E_RUN_RESULT') {
 }
 
 async function supportedQueuedJobs(database, jobId = undefined) {
+  const schemaRows = parseRows(
+    await runSqlite(database, 'PRAGMA table_info(application_jobs);'),
+    'E_JOB_SCHEMA',
+  );
+  const columns = new Set(schemaRows.map((row) => row?.name));
+  const bindingColumns = [
+    'platform',
+    'job_title',
+    'job_company',
+    'job_location',
+    'job_description',
+    'job_description_sha256',
+  ];
+  const bindingCount = bindingColumns.filter((column) => columns.has(column)).length;
+  if (bindingCount !== 0 && bindingCount !== bindingColumns.length) fail('E_JOB_SCHEMA');
+  const hasBindings = bindingCount === bindingColumns.length;
   const target = jobId === undefined ? '' : ` AND id = ${sqlLiteral(jobId)}`;
+  const selection = hasBindings
+    ? `id, application_url, ${bindingColumns.join(', ')}`
+    : 'id, application_url';
   const rows = parseRows(
     await runSqlite(
       database,
-      `SELECT id, application_url FROM application_jobs WHERE status = 'queued'${target};`,
+      `SELECT ${selection} FROM application_jobs WHERE status = 'queued'${target};`,
     ),
     'E_JOB_CANDIDATES',
   );
   const candidates = [];
   for (const row of rows) {
     assertPlainRecord(row, 'E_JOB_CANDIDATES');
+    const expectedKeys = hasBindings
+      ? new Set(['id', 'application_url', ...bindingColumns])
+      : new Set(['id', 'application_url']);
     const keys = Object.keys(row);
-    if (keys.length !== 2 || !keys.includes('id') || !keys.includes('application_url')) {
+    if (keys.length !== expectedKeys.size || keys.some((key) => !expectedKeys.has(key))) {
       fail('E_JOB_CANDIDATES');
     }
     const id = requirePositiveInteger(row.id, 'E_JOB_CANDIDATES');
     const applicationUrl = requireString(row.application_url, 'E_JOB_CANDIDATES', {
       max: 16 * 1024,
     });
-    if (classifyApplicationUrl(applicationUrl) !== null) {
-      candidates.push(Object.freeze({ id, applicationUrl }));
+    const platform = classifyApplicationUrl(applicationUrl);
+    if (platform === null) continue;
+    if (hasBindings) {
+      if (row.platform !== platform) continue;
+      requireString(row.job_title, 'E_JOB_CANDIDATES', { max: 512 });
+      requireString(row.job_company, 'E_JOB_CANDIDATES', { max: 512 });
+      if (row.job_location !== null) {
+        requireString(row.job_location, 'E_JOB_CANDIDATES', { max: 512 });
+      }
+      const description = requireString(row.job_description, 'E_JOB_CANDIDATES', {
+        max: 16 * 1024,
+      });
+      if (typeof row.job_description_sha256 !== 'string'
+        || !SHA256_HEX.test(row.job_description_sha256)
+        || createHash('sha256').update(description).digest('hex') !== row.job_description_sha256) {
+        continue;
+      }
     }
+    candidates.push(Object.freeze({ id, applicationUrl }));
   }
   return Object.freeze(candidates);
 }

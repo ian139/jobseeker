@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "control-diagnosis.schema.json",
+  "title": "Normalized control diagnosis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["observationId", "controlReference", "failureClass", "normalizedControlType", "recommendedAction", "requiresCodeRepair", "reasonCode"],
+  "properties": {
+    "observationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "controlReference": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "failureClass": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "normalizedControlType": { "type": "string", "enum": ["text", "textarea", "email", "phone", "number", "date", "radio_group", "checkbox", "checkbox_group", "native_select", "custom_select", "combobox", "autocomplete", "file_upload", "button", "link", "dialog", "iframe_control", "unknown_control"] },
+    "recommendedAction": { "type": "string", "enum": ["fill_text", "clear", "select_option", "toggle", "upload_file", "click", "open_dialog", "close_dialog", "navigate", "wait", "reobserve"] },
+    "adapterHint": { "type": ["string", "null"], "maxLength": 2048 },
+    "requiresCodeRepair": { "type": "boolean" },
+    "reasonCode": { "type": "string", "pattern": "^[a-z0-9_:-]{1,128}$" }
+  }
+}

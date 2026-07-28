@@ -45,7 +45,7 @@ function runMetadata(resumePath, resumeBytes) {
     observer: 'playwright_dom_v1',
     action_driver: 'omp_browser',
     submit_policy: 'omp_agent',
-    loop_contract: 'one-field-observe-act-reobserve',
+    loop_contract: 'safe-batch-observe-act-reobserve',
     started_at: '2026-01-01T00:00:00Z',
   };
 }
@@ -413,6 +413,24 @@ test('fails closed when the pinned root is replaced during publication', () => {
   } finally {
     fs.fsyncSync = originalFsync;
     store.close();
+    fs.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+test('accepts immutable evidence from the legacy one-field loop contract', async () => {
+  const parent = temporaryDirectory();
+  try {
+    const resumePath = path.join(parent, 'resume.pdf');
+    const resumeBytes = Buffer.from('upload');
+    fs.writeFileSync(resumePath, resumeBytes, { mode: 0o600 });
+    const metadata = {
+      ...runMetadata(resumePath, resumeBytes),
+      loop_contract: 'one-field-observe-act-reobserve',
+    };
+    const evidence = await createEvidenceStore(path.join(parent, 'legacy-run'), metadata);
+    assert.equal(evidence.root, path.join(parent, 'legacy-run'));
+    await evidence.close();
+  } finally {
     fs.rmSync(parent, { recursive: true, force: true });
   }
 });

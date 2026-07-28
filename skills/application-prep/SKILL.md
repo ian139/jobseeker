@@ -11,17 +11,23 @@ Use this skill for one authorized application URL and one local Phase 1 run. Pop
 
 Default to immediate execution, not deliberation. Routine execution has priority over analysis: reason only enough to choose the next truthful action, then use the observed result rather than speculation to choose the next action.
 
-For every application:
+For every application, use the canonical operational path:
 
-1. Observe the current fields.
-2. Fill routine fields from memory, profile, resume, or supported inference.
-3. Select the obvious exact option.
-4. Re-observe and verify retention.
-5. Continue until no unresolved reachable field remains.
-6. Run the completeness audit.
-7. Submit when authorized.
-8. If submission exposes validation errors, re-observe, correct them, rerun the audit, and submit again.
-9. Continue until submission succeeds or a genuine user-only blocker is observed.
+```text
+recover-or-claim
+  -> validate job and resume binding
+  -> observe
+  -> resolve and execute one safe batch of independent routine fields
+  -> re-observe, retain, and repair
+  -> audit
+  -> begin/click/complete submission
+  -> persist outcome
+  -> next job
+```
+
+Use `selectSafeApplicationBatch` for the current observation. A safe batch may contain several independent routine fields; record each semantic action against the shared pre-action observation, then obtain one fresh chained observation and verify retention for every field in the batch. If any action produces unexpected navigation, validation, a blocker, or a DOM change visible to the browser snapshot, stop the batch immediately and re-observe.
+
+Always use a single-action batch for a newly revealed or dependency-marked field, invalid/retry work, file upload, custom widget, select/choice/toggle, non-final navigation, final submission, or any control requiring diagnosis, model inference, or user input. Submission rejection also returns to a fresh observation and repair before another audit.
 
 Do not pause to discuss, summarize, compare alternatives, or request confirmation for routine application decisions. Choose the most direct truthful answer and act. Do not speculate about hypothetical failures or produce progress commentary between ordinary field actions. Do not repeatedly reconsider an already verified field unless a fresh observation or diff marks it stale, invalid, changed, or affected by a newly revealed dependency.
 
@@ -31,20 +37,19 @@ Ask the user only when a required sensitive fact is unavailable; authentication,
 
 Never use an em dash (`—`) in any generated, adapted, or filled application response. Rewrite the sentence with commas, parentheses, a colon, a semicolon, or separate sentences before calling `tab.fill`. This applies to company-specific answers, reusable answer-memory templates, explanations, and all other free-text responses.
 
-## Handoff-safe OMP browser quick start
+## Canonical OMP browser quick start
 
-After a new session, handoff, or model change, reread this section before touching the page. Do not reconstruct browser mechanics from conversation history. Reuse the same visible cmux application surface and the same named OMP `browser` tab when it is still alive; call `browser.open` once when needed, then reuse `browser.run`. Confirm the browser tool is attached to the intended cmux surface rather than silently opening a separate application.
+After a new session, handoff, or model change, read only this section plus the active durable run record before touching the page. Do not reread `PROJECT_HANDOFF.md` or the complete roadmap during routine startup, and do not reconstruct browser mechanics from conversation history. Reuse the same visible CMUX browser surface and named OMP `browser` tab when alive; call `browser.open` once only when needed, then reuse `browser.run`.
 
-The observer supplies policy-free field state and ledger/evidence refs. The OMP browser snapshot supplies live action selectors. An observer ref is never a browser selector. For each single field:
+The observer supplies policy-free field state and ledger/evidence refs. The OMP `browser` snapshot supplies live action selectors. Observer refs are never browser selectors. For each planner batch:
 
-1. Accept the latest observer result and choose the next unresolved field.
-2. Resolve its truthful value through the coordinator.
-3. Take a fresh `tab.ariaSnapshot()` or `tab.observe()` and map that observer field to one exact live control.
-4. Perform one matching OMP browser helper action.
-5. Record the semantic action against the pre-action observer field/ref.
-6. Re-run the observer, accept its diff, and verify retention before continuing.
+1. Call `selectSafeApplicationBatch` against the latest accepted observation and ledger.
+2. Resolve deterministic memory/profile/resume answers in-process. Delegate only an ambiguous inference, unfamiliar-control diagnosis, or confirmed implementation repair.
+3. Take one fresh `tab.ariaSnapshot()` or `tab.observe()` and uniquely map every planned observer field to its live control.
+4. Perform each planned helper action in order, recording each semantic outcome against the shared pre-action observation. Stop early on any unexpected state.
+5. Re-run the observer once, accept its diff, and verify retention for every attempted field before planning another batch.
 
-Primary OMP browser mechanics:
+Primary OMP `browser` tool mechanics on the visible CMUX browser surface:
 
 ```js
 await tab.fill("aria-ref=eNN", exactText);                 // text/textarea; replaces the value
@@ -61,23 +66,23 @@ For resume upload, map the observer file field to exactly one actual `<input typ
 
 Fallback order is strict:
 
-1. OMP `browser` helper on the same cmux surface.
+1. OMP `browser` helper on the visible CMUX browser surface.
 2. Pinned Playwright CLI only when the matching browser helper cannot operate the exact control. Use a fresh CLI snapshot and its current `eNN` ref. Text fallback is exactly `playwright-cli fill eNN "<exact text>"`; chooser fallback is click the uniquely mapped upload trigger and immediately run `playwright-cli upload <session.runMetadata.resume_upload_path>`, using that verified canonical absolute path.
-3. `computer` only when it is available and the remaining interaction is a native browser/OS surface neither browser nor pinned CLI can operate, such as a still-open file chooser. Take a fresh DOM/browser snapshot and a fresh desktop screenshot first, act on the same visible cmux surface, then immediately re-observe through the coordinator.
+3. The OMP `computer` tool only when it is available and the remaining interaction is a native browser/OS surface neither browser nor pinned CLI can operate, such as a still-open file chooser. Take a fresh DOM/browser snapshot and a fresh desktop screenshot first, act on the same visible CMUX browser surface, then immediately re-observe through the coordinator.
 
-Never use `tab.evaluate`, pinned-CLI evaluation, or injected page JavaScript to set a value, attach a file, click Submit, or bypass a UI control. Evaluation remains observation-only. Regardless of which physical mechanic succeeds, the same `recordAction` → fresh observer → `acceptObservation` → `verifyRetention` chain is mandatory.
+Never use `tab.evaluate`, pinned-CLI evaluation, or injected page JavaScript to set a value, attach a file, click Submit, or bypass a UI control. Evaluation remains observation-only. Regardless of which physical mechanic succeeds, record every semantic action; after a safe routine batch, perform one fresh observer → `acceptObservation` → batch retention chain. Controls excluded from batching retain the single-action chain.
 
 ## Fixed authority and privacy boundaries
 
 - Treat `src/phase1/contract.mjs`, `profile.mjs`, `observer.js`, `ledger.mjs`, `audit.mjs`, and `evidence.mjs` as executable authority.
-- Read `skills/playwright-cli/SKILL.md` before opening the browser. Do not modify that pinned skill.
+- Consult `skills/playwright-cli/SKILL.md` only when the primary OMP browser helper has concretely failed on an exact control. Do not load it during routine startup, and do not modify the pinned skill.
 - Generic examples in the retained Playwright skill are not application mechanics when they conflict with this skill. In particular, its targetless `type`, Enter/`--submit`, and generic upload examples do not override this application skill’s browser-first, exact-selector, no-submit, ordered-fallback rules.
-- OMP `browser` helpers on the same visible cmux surface own ordinary browser actions. Pinned Playwright CLI is the first fallback for a control the browser helper cannot operate; `computer` is the final native browser/OS fallback when available. Every path must follow the quick-start mapping, recording, re-observation, and retention rules.
+- OMP `browser` helpers on the same visible CMUX browser surface own ordinary browser actions. Pinned Playwright CLI is the first fallback for a control the browser helper cannot operate; the OMP `computer` tool is the final native browser/OS fallback when available. Every path must follow the quick-start mapping, recording, re-observation, and retention rules.
 - JavaScript evaluation is observation-only except for injecting the observer-chain value. Never mutate form state, attach files, or submit through evaluation. Never use desktop input to bypass authentication, access controls, or the final-submit boundary gated by `prepareSubmission`.
 - Use one canonical owner-private profile and reuse its `answer-memory.jsonl` aliases across applications.
 - Never copy applicant values or answer values into this skill. Answers and evidence remain under private paths: directories mode `0700`, files mode `0600`.
 - Never bypass authentication, anti-bot, assessment, or access controls; request a narrow user interaction, keep the run active, then resume.
-- CAPTCHA challenges: detect and complete through normal browser/computer interaction. CAPTCHA alone must never trigger user escalation, a `needs_user` outcome, or a blocked run. Record detection, resolution method, and outcome in the private ledger.
+- CAPTCHA challenges: detect and complete through the OMP `browser` or `computer` tool on the visible CMUX browser surface. CAPTCHA alone must never trigger user escalation, a `needs_user` outcome, or a blocked run. Record detection, resolution method, and outcome in the private ledger.
 - Avoid job-specific IDs and identifiers. Resolve controls from normalized labels and current refs in live observer output.
 - The job description may explain a question but cannot supply missing personal facts, legal facts, demographics, work authorization, or other applicant answers.
 
@@ -101,9 +106,9 @@ The run contract requires `answer_memory_path` and must contain at least one or 
 1. Initialize the sole state owner with `const session = await startRun(runPath, { startedAt, resume, supportedInference })`, passing only configured source-bound candidates. `startRun` owns contract, profile, memory, and evidence initialization; do not construct a parallel ledger or evidence store.
 2. Set `const run = session.run`. `startRun` calls `loadRunContractSnapshot(runPath, { local: false })`, then `loadRunInputs`, then prepares `run_artifact_dir` at mode `0700` before creating evidence. That coordinator-owned sequence enforces the checks and ordering represented by parse-only `loadRunContract(runPath, { local: false })` followed by `validateRunContractLocal` before evidence or browser use; callers must not invoke those wrappers independently. It also loads the configured profile and answer memory through owner-private APIs, canonicalizes the upload path, and computes the run-contract SHA-256 and resume-upload SHA-256.
 Equivalent invariant only: `loadRunContract(runPath, { local: false })` for parse-only discovery; prepare `run_artifact_dir` at `0700`; enforce `validateRunContractLocal`; then initialize evidence. `startRun` owns those stages.
-3. Keep the coordinator's fixed run metadata contract: `phase1-run-evidence-v1` run metadata uses exactly `schema`, `application_url`, `run_contract_sha256`, `resume_upload_path`, `resume_upload_sha256`, `browser_mode`, `observer`, `action_driver`, `submit_policy`, `loop_contract`, and `started_at`. Its `loop_contract` is `one-field-observe-act-reobserve`; that is evidence metadata, never a run-contract key.
+3. Keep the coordinator's fixed run metadata contract: `phase1-run-evidence-v1` run metadata uses exactly `schema`, `application_url`, `run_contract_sha256`, `resume_upload_path`, `resume_upload_sha256`, `browser_mode`, `observer`, `action_driver`, `submit_policy`, `loop_contract`, and `started_at`. New runs emit `safe-batch-observe-act-reobserve`. Recovery accepts immutable evidence that already carries the legacy `one-field-observe-act-reobserve` value; never rewrite an existing run's metadata.
 `startRun` resolves `resume_upload_path` to its absolute canonical path for evidence run metadata.
-4. Read `skills/playwright-cli/SKILL.md` before browser use, then open `run.application_url` in a headed and visible browser. Remain on that application origin unless an observed, application-owned interaction navigates within its flow.
+4. Open `run.application_url` with the OMP `browser` tool in the headed visible CMUX surface. Remain on that application origin unless an observed, application-owned interaction navigates within its flow.
 5. Clear `__omp_phase1_previous_observation_id_v1` before the initial observer evaluation; before every later IIFE, set or inject `__omp_phase1_previous_observation_id_v1` to the latest accepted observation ID.
 `__omp_phase1_previous_observation_id_v1` carries the previous observation ID for the chained observer.
 6. Evaluate the exact `src/phase1/observer.js` IIFE and capture its returned observation value as `initialObservation`.
@@ -114,37 +119,37 @@ Stop and repair preflight failures before any field mutation. Do not invent a fa
 
 ## Resolve, act, and verify loop
 
-Repeat this coordinator loop without batching fields:
+Repeat this coordinator loop with `selectSafeApplicationBatch({ observation: session.observation, ledger: session.ledger })`.
 
-Observer `ref` values such as `observation-…:control-N` are ledger/evidence identities, not browser targets. Before each physical action, take a fresh OMP browser `tab.ariaSnapshot()` or `tab.observe()` and resolve the current observer control to exactly one live browser selector; use a fresh pinned-CLI snapshot and live CLI `eNN` ref only when the browser helper cannot operate that control. Match the observer frame URL chain, exact role and accessible label, tag/type, and `locator.strategy`/`locator.value`; when snapshot text alone is insufficient, use only observation-only evaluation to compare exact `id`, `name`, role, type, and supported test-ID attributes. Never mutate through evaluation. If zero or multiple controls match, do not act: obtain one fresh chained observation, publish it with `const refreshed = await acceptObservation(session, observation)`, set `ledger = refreshed.ledger`, and retry the mapping once; stop with an ambiguity blocker if it still fails. Do not evaluate or re-observe between the successful mapping and its action.
+Observer `ref` values such as `observation-…:control-N` are ledger/evidence identities, not browser targets. Before a batch, take a fresh OMP `browser` snapshot and map every planned observer control to exactly one live selector. If any mapping is missing or ambiguous, stop and replan that field as a single diagnosis unit.
 
-1. Choose exactly one next unresolved field from `session.ledger` and `session.observation`, excluding radio siblings already satisfied by the radio-group rule below.
-2. Build `resolutionOptions` with the current `field_id`, exact alias, and only applicable `user`, `deliberate_blank`, `semantic_choice`, `sensitive`, `remember`, or `approved_at` keys. Call `const resolved = await resolveField(session, resolutionOptions); ledger = resolved.ledger;`. Normal source precedence is memory, profile, resume, supported inference, then user; required personal facts unavailable under the field's source policy require the user and never job wording.
-3. `resolveField(session, resolutionOptions)` returns the coordinator binding with `field_id`, `observation_id`, `ref`, `source`, and `value_digest` computed by `digestPrivateValue` from the intended observer-semantic value; it includes only applicable `semantic_choice` and `sensitive` keys. A blank requires a deliberate UI-backed semantic choice.
-4. Resolve the current observer field through the bridge and use its unique live browser selector for one matching OMP browser helper action. Use a pinned-CLI live ref only for the documented fallback, or `computer` only for the final native browser/OS fallback. The verified already-correct non-file path performs no physical action.
-5. Immediately after the physical outcome, call `const actionResult = await recordAction(session, attempt); ledger = actionResult.ledger;`. Record the action result against the pre-mutation observation ID and ref before `acceptObservation` publishes the fresh observation; never store a browser selector or CLI interaction ref in `observation_id` or `ref`. Intermediate custom-widget open/filter mechanics and fallback upload-trigger mechanics create no fabricated attempt; only the final semantic field attempt is recorded.
-6. Obtain a fresh DOM observation after every meaningful mutation. Publish it with `const accepted = await acceptObservation(session, observation); ledger = accepted.ledger;` and inspect `accepted.diff` for newly revealed fields or blockers.
-7. At every per-action and final retention check, call `const retention = await verifyRetention(session, proofs); ledger = retention.ledger;`. Retry if `!retention.ok` or `retention.retry_required`. For documented intermediate custom-widget or pinned-CLI multi-select fallback actions, publish each fresh observation but defer retention until the exact intended state is present.
-8. Continue only after the one field is deliberate, valid, retained, and represented by the coordinator's current ledger.
+1. Accept the planner's ordered batch. `mode: 'batch'` contains only independent ordinary controls; `mode: 'single'` preserves the existing priority for every hazardous or ambiguous next unit.
+2. Resolve each planned field with `resolveField` before any browser mutation. Execute a multi-field batch only when every resolution selected deterministic memory, profile, or resume evidence. If any field is missing or selects agent inference/user input, do not execute the batch; process that field through single mode and replan afterward. Invoke typed agents only for ambiguous supported inference, control diagnosis after a concrete mapping/action failure, or repository repair after deterministic defect classification.
+3. Execute planned actions in order from the same fresh browser snapshot and stop on the first non-success. Publish every actually attempted routine fill atomically with `recordActionBatch(session, attempts)`: zero or more successful fills followed by at most one terminal attempted/failed/retry/blocked fill. A lone attempted fill uses `recordAction`. Evidence publication remains inside coordinator APIs, not a separate operator step.
+4. Stop the remaining batch immediately if an action fails, browser state indicates navigation or validation, or a control can no longer be uniquely mapped.
+5. Obtain one fresh chained DOM observation, publish it with `acceptObservation`, inspect the diff, and call `verifyRetention` with proofs covering every attempted field.
+6. Retry only failed/stale fields. Any newly revealed field, invalid field, upload, widget, choice, navigation, or final candidate is processed singly before routine batching resumes.
+7. Continue only when every attempted field is deliberate, valid, retained, and represented by the coordinator's current ledger.
 
-For any non-file field whose latest observer-semantic value or deliberate blank already matches the resolution's `value_digest` and `semantic_choice`, perform no mutation and create no action attempt. Obtain a fresh chained observation, publish it with `acceptObservation(session, observation)`, require the same exact value or choice plus valid state, then call `verifyRetention(session, proofs)`. If the state changed, use the normal action path; if a mismatching field is readonly, stop with a blocker rather than forcing fill/type or fabricating an attempt.
+For any non-file field whose latest observer-semantic value or deliberate blank already matches the resolution, perform no mutation and create no action attempt. Include it in the next fresh observation and retention proof. If it changed, use the normal planner path; if a mismatching field is readonly, stop with a blocker.
+
 
 When no unresolved field remains on a non-final page, select the current `non_final_navigation` candidate only when exactly one candidate has an exact normalized application-entry or forward label: Apply, Apply for this Job, Easy Apply, Apply on Company Website, Continue, Next, Proceed, Review, Start Application, Begin Application, Get Started, or Go to Application. A plainly identified entry control may be activated autonomously; never activate a helper or any `final_candidate`. A nested anchor-and-button pair is one entry control only when both candidates have the same exact allowed label, the anchor contains the button, and the anchor has one same-origin application-path `href`; bridge and activate the anchor, never the nested button. Otherwise require exactly one candidate. Activate the uniquely bridged live ref, then publish `recordAction(session, { action: 'non_final_navigation', field_id: null, ref: current ref, observation_id: latest observation_id, outcome })` and re-observe through `acceptObservation(session, observation)`.
 
-Record each retry before correcting and retrying. For every failed or retry outcome, call `recordAction(session, attempt)` with the error code and current observation/ref. Set `retry_of` to the prior attempt's nonnegative integer sequence/index, never its string `action_id`; never overwrite or hide the failure. A mutation outcome consumes its observation, so accept a fresh observation before any next resolution or action.
-When a final-action attempt is rejected or leaves the application page unchanged, do not classify the job as closed or unavailable and do not close its browser surface. Capture the outcome, obtain a fresh chained observation, identify the validation or unresolved-control cause, resolve and retain it through the normal one-field loop, then return to the pre-submit boundary. Only explicit live evidence that the posting is unavailable may end the run as closed.
+Record each retry before correcting and retrying. A failed routine fill at the end of a multi-action batch is the terminal item in the same atomic `recordActionBatch`; a standalone failure uses `recordAction(session, attempt)`. Set `retry_of` to the prior attempt's nonnegative integer sequence/index, never its string `action_id`; never overwrite or hide the failure. After a batch stops, accept a fresh observation before any further resolution or action.
+When a final-action attempt is rejected or leaves the application page unchanged, do not classify the job as closed or unavailable and do not close its browser surface. Capture the outcome, obtain a fresh chained observation, identify the validation or unresolved-control cause, resolve and retain it through the planner's single-action repair mode, then return to the pre-submit boundary. Only explicit live evidence that the posting is unavailable may end the run as closed.
 
 For every null-digest semantic choice or deliberate blank, `source` must be only `memory`, `profile`, or `user`; never use `resume` or `supported_inference`.
 
 ## UI mechanics recipes
 
-These recipes select mechanics, not applicant answers. Always operate from the latest observer output and retain its current refs for ledger/evidence identity. Use a uniquely mapped live OMP browser selector and the helper matching the control. Pinned CLI refs are fallback-only; targetless pinned CLI `upload <absolute path>` is allowed only immediately after its uniquely mapped trigger has armed a chooser. `computer` is last and only for a remaining native browser/OS interaction.
+These recipes select mechanics, not applicant answers. Always operate from the latest observer output and retain its current refs for ledger/evidence identity. Use a uniquely mapped live OMP `browser` selector on the visible CMUX browser surface and the helper matching the control. Pinned CLI refs are fallback-only; targetless pinned CLI `upload <absolute path>` is allowed only immediately after its uniquely mapped trigger has armed a chooser. The OMP `computer` tool is last and only for a remaining native browser/OS interaction.
 
 ### Ordinary editable controls
 
 Apply the select and choice role recipes below before this shape check. For an editable observer whose role is not combobox, listbox, checkbox, radio, or switch and whose shape is `kind: input` with type other than checkbox, radio, or file; `kind: textarea`; `kind: contenteditable`; or fillable `kind: aria`, role `textbox`, use `await tab.fill(exactSelector, exactText)`. The second argument is only the intended answer. Never prepend `--value`, `--submit`, a command name, label, or option token, and never use `tab.type` for ordinary form values. The pinned-CLI fallback is exactly `playwright-cli fill eNN "<exact text>"` without `--submit`. Serialize date, time, month, week, datetime-local, and numeric values in the exact native format accepted by the control.
 
-After a physical mutation, publish semantic action `fill` with `recordAction(session, attempt)`, obtain a fresh chained observation through `acceptObservation(session, observation)`, and call `verifyRetention(session, proofs)`. Use the coordinator's verified no-mutation path when the current value already matches. Stop on readonly mismatch or when neither the uniquely mapped browser helper nor its documented pinned-CLI fallback supports targeted fill; do not fall back to targetless keystrokes, DOM mutation, or submission. If a reachable field matches no recipe by emitted kind, tag, type, and role, stop at preflight with an unsupported-mechanic blocker.
+After planner-approved routine fills, publish two or three successful semantic `fill` attempts atomically with `recordActionBatch`; a lone fill uses `recordAction`. Then obtain one fresh chained observation through `acceptObservation` and call `verifyRetention` for all attempted fields. Use the coordinator's verified no-mutation path when the current value already matches. Stop on readonly mismatch or when neither the uniquely mapped browser helper nor its documented pinned-CLI fallback supports targeted fill; do not fall back to targetless keystrokes, DOM mutation, or submission. If a reachable field matches no recipe by emitted kind, tag, type, and role, stop at preflight with an unsupported-mechanic blocker.
 
 ### Native select, React Select, and ARIA listbox
 
@@ -164,7 +169,7 @@ The retention proof fields are {
 - `file_name`
 }
 
-Primary path: map the observer file field to exactly one actual `<input type=file>` in the same frame and field/form group, including its hidden native input when applicable; derive and uniquely verify its exact CSS selector; then run `await tab.uploadFile(exactFileInputCss, session.runMetadata.resume_upload_path)`. Inline `aria-ref=eNN` is not supported by `tab.uploadFile`. Do not click or arm a chooser first. If the browser helper cannot operate the exact file input, use the pinned-CLI chooser fallback with that same verified canonical absolute path: map one visible field-associated upload trigger, click its current CLI ref, then immediately run `playwright-cli upload <session.runMetadata.resume_upload_path>`. If that also cannot complete a still-open native chooser and `computer` is available, re-ground from fresh browser and desktop snapshots and operate that chooser on the same visible cmux surface. Stop on missing or ambiguous inputs/triggers. None of these paths creates an intermediate semantic action; record only the upload result.
+Primary path: map the observer file field to exactly one actual `<input type=file>` in the same frame and field/form group, including its hidden native input when applicable; derive and uniquely verify its exact CSS selector; then run `await tab.uploadFile(exactFileInputCss, session.runMetadata.resume_upload_path)` through the OMP `browser` tool on the visible CMUX browser surface. Inline `aria-ref=eNN` is not supported by `tab.uploadFile`. Do not click or arm a chooser first. If the browser helper cannot operate the exact file input, use the pinned-CLI chooser fallback with that same verified canonical absolute path: map one visible field-associated upload trigger, click its current CLI ref, then immediately run `playwright-cli upload <session.runMetadata.resume_upload_path>`. If that also cannot complete a still-open native chooser and the OMP `computer` tool is available, re-ground from fresh browser and desktop snapshots and operate that chooser on the same visible CMUX browser surface. Stop on missing or ambiguous inputs/triggers. None of these paths creates an intermediate semantic action; record only the upload result.
 
 After the physical upload returns, build `uploadAttempt` against the pre-upload observer field/ref/observation with semantic action `upload` and its real success or failure. Publish it with `const uploaded = await recordAction(session, uploadAttempt); ledger = uploaded.ledger;`, then obtain a fresh observation and publish `const accepted = await acceptObservation(session, observation); ledger = accepted.ledger;`. Record a failed attempt and retry through the ordered mechanics before remapping; never claim success when the upload failed.
 
@@ -220,7 +225,7 @@ Answer the parent first, re-observe, inventory all newly reachable questions, an
 1. Capture `finalObservation` through the normal chained observer path and publish it with `const finalAccepted = await acceptObservation(session, finalObservation); ledger = finalAccepted.ledger;`.
 2. Run `const retention = await verifyRetention(session, proofs); ledger = retention.ledger;` with the complete field-ID upload proof map. Stop unless `retention.ok` is true and `retention.retry_required` is false.
 3. Select the visible Submit control's current ref from the final observation. Call `const authorized = await prepareSubmission(session, { finalRef });` and require `authorized.authorized` to be true and `authorized.authorizedFinalRef === finalRef`.
-4. Before any browser click, call `const begun = await beginFinalSubmit(session);` and require `begun.ref === finalRef`. Map `begun.ref` to exactly one live browser selector, then activate it with `tab.click(finalSelector)`. If the browser helper cannot operate the exact control, pinned CLI may click its freshly mapped current ref; `computer` must never cross the final-submit boundary.
+4. Before any browser click, call `const begun = await beginFinalSubmit(session);` and require `begun.ref === finalRef`. Map `begun.ref` to exactly one live browser selector, then activate it with `tab.click(finalSelector)` through the OMP `browser` tool on the visible CMUX browser surface. If the browser helper cannot operate the exact control, pinned CLI may click its freshly mapped current ref; the OMP `computer` tool must never cross the final-submit boundary.
 5. Re-observe the resulting page even when the click helper reports a timeout or error, then call `completeFinalSubmit(session, { attemptId: begun.attemptId, outcome, errorCode })` exactly once with the observed terminal outcome. Never click before `beginFinalSubmit`, and never leave a begun attempt unresolved. A failed or blocked attempt requires a fresh chained observation and a fresh `prepareSubmission` audit before retrying; never reuse an authorization across observations.
 6. After one final-submit attempt succeeds, capture the post-submit screenshot into the owner-private artifact directory and call `const finalized = await finalizeRun(session, { screenshotPath });`. Require `finalized.finalized` to be true. Persist `completed` only from the validated canonical `completion.json`; SQLite derives every submission attempt and the exact count from its paired journal events.
 7. Leave the headed browser open after submission long enough to capture post-submit evidence. Report only private artifact paths and blockers, never applicant values or answer contents.
@@ -251,4 +256,4 @@ Do not create a handoff merely because one job finished. Handoff only when:
 - the model or session is intentionally changing;
 - an unresolved external blocker requires pausing the run.
 
-A handoff must cite the claimed job, persisted outcome, private workspace, current cmux surface and named browser tab, latest accepted observation ID, ledger/evidence paths, verified resume-upload path and retention state, latest verification, blocker, and single next action. The receiving agent must reread `Handoff-safe OMP browser quick start` before any browser action instead of reconstructing mechanics from the handoff narrative.
+A handoff must cite the claimed job, persisted outcome, private workspace, current visible CMUX browser surface and named OMP `browser` tab, latest accepted observation ID, ledger/evidence paths, verified resume-upload path and retention state, latest verification, blocker, and single next action. The receiving agent must reread `Handoff-safe OMP browser quick start` before any browser action instead of reconstructing mechanics from the handoff narrative.

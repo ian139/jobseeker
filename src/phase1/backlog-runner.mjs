@@ -738,6 +738,24 @@ export async function recoverActiveRun(database, options = {}) {
   );
   return normalizeRunRows(rows, 'E_RECOVER_RESULT');
 }
+
+/** Recover the active run before validating preflight inputs or attempting a claim. */
+export async function recoverOrClaimBacklogRun(database, options = {}) {
+  assertPlainRecord(options, 'E_STARTUP_OPTIONS');
+  assertExactKeys(options, CLAIM_KEY_SET, 'E_STARTUP_OPTIONS');
+  const recovered = await recoverActiveRun(database, {
+    ownerId: options.ownerId,
+    browserSessionId: options.browserSessionId,
+    now: options.now,
+    leaseSeconds: options.leaseSeconds,
+  });
+  if (recovered !== null) return Object.freeze({ kind: 'recovered', run: recovered });
+
+  const claimed = await claimNextQueuedJob(database, options);
+  if (claimed === null) return Object.freeze({ kind: 'idle', run: null });
+  return Object.freeze({ kind: 'claimed', run: claimed });
+}
+
 function heartbeatSql(runId, ownerId, browserSessionId, now, expiresAt, reason) {
   const reasonSet = reason === undefined ? '' : `,
     reason_code = ${sqlLiteral(reason)}`;

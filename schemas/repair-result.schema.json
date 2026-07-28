@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "repair-result.schema.json",
+  "title": "ATS repair result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["failureClass", "changedFiles", "testsAdded", "verification", "resumeCurrentRun", "reasonCode"],
+  "properties": {
+    "failureClass": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "changedFiles": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "uniqueItems": true },
+    "testsAdded": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 512 }, "uniqueItems": true },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "commands"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "commands": { "type": "array", "items": { "type": "string", "minLength": 1, "maxLength": 2048 }, "uniqueItems": true }
+      }
+    },
+    "resumeCurrentRun": { "type": "boolean" },
+    "reasonCode": { "type": "string", "pattern": "^[a-z0-9_:-]{1,128}$" }
+  }
+}

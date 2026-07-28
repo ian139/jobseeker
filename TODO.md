@@ -6,7 +6,7 @@ This is the execution roadmap for the fresh implementation. `PROJECT_HANDOFF.md`
 
 ## How an OMP agent must use this file
 
-1. Read `PROJECT_HANDOFF.md`, then read only the active phase below in full.
+1. For implementation or contract changes, read the active phase and consult `PROJECT_HANDOFF.md` only for unresolved history. For routine Phase 3 application startup, use the canonical application skill and active durable run record instead of rereading this roadmap or historical handoffs.
 2. Turn every unchecked item in that phase into an execution plan. Do not reinterpret the phase into a smaller scaffold.
 3. Work through the phase end to end. A fixture, unit test, mocked browser, or CLI success is not a substitute for the phase's live proof.
 4. Keep OMP as the operator and reasoning loop. Deterministic libraries may expose narrow tools, but a custom CLI, daemon, RPC coordinator, or policy engine must not become the product loop.
@@ -37,8 +37,8 @@ The system prepares complete applications and performs final submission after th
 - **Agent inference is the default.** When exact answer memory and profile aliases do not resolve a field, OMP may generate an answer from applicant facts in the source resume plus wording and requirements in the job description. `agent_inference` is an allowed answer source for every field shape, but each inferred answer must carry a rationale digest and the verified resume/job-description evidence digests and must be marked separately in the private ledger/evidence. Inference may transform supported facts but must never supply identity, dates, credentials, work authorization, protected-class answers, salary or compensation, or any other sensitive personal, legal, financial, or medical fact.
 - **Final submission is automated by OMP after `prepareSubmission` authorizes it.** OMP identifies the final control, runs the completeness audit via `prepareSubmission`, durably begins the attempt with `beginFinalSubmit`, clicks the returned ref, and records the observed outcome with `completeFinalSubmit`. This is programmatic audit authorization and requires no human approval.
 - **Direct browser operation replaces the old guarded applier.** Do not reactivate the archived Puppeteer/Python protocol, route allowlist, sensitive-field blocker, safety-policy stack, application RPC service, detached-browser recovery system, or handoff-on-uncertainty behavior. Reuse lessons, not that implementation.
-- **Playwright observes; OMP acts.** The Playwright navigation skill and DOM observer describe the current page and verify retained state. The OMP `browser` tool on the same cmux surface is the primary action driver for clicking application-entry controls, filling, selecting, uploading, scrolling, and non-final navigation. Pinned Playwright CLI is control-specific fallback; `computer` is last-resort native browser/OS fallback when available. Re-observe after every meaningful mutation.
-- **Solve CAPTCHAs automatically.** Detect and complete CAPTCHA challenges using OMP browser or computer-use tools. Re-ground with a fresh observer result and browser snapshot before and after each CAPTCHA interaction. CAPTCHA alone must never trigger user escalation, a `needs_user` outcome, or a blocked run. Record the CAPTCHA detection, resolution method, and outcome in the private ledger.
+- **Playwright observes; OMP acts.** The Playwright navigation skill and DOM observer describe the current page and verify retained state. The OMP `browser` tool on the visible CMUX browser surface is the primary action driver for clicking application-entry controls, filling, selecting, uploading, scrolling, and non-final navigation. Pinned Playwright CLI is control-specific fallback; the OMP `computer` tool is the last-resort native browser/OS fallback when available. Re-observe after every meaningful mutation.
+- **Solve CAPTCHAs automatically.** Detect and complete CAPTCHA challenges using the OMP `browser` or `computer` tool on the visible CMUX browser surface. Re-ground with a fresh observer result and browser snapshot before and after each CAPTCHA interaction. CAPTCHA alone must never trigger user escalation, a `needs_user` outcome, or a blocked run. Record the CAPTCHA detection, resolution method, and outcome in the private ledger.
 - **Live evidence must match the claim.** Browser success requires a real headed browser run on the selected application. Resume success requires a real compiled and inspected PDF. Pipeline success requires the persistent OMP loop to consume a real SQLite row.
 
 ## Assets to retain
@@ -63,7 +63,7 @@ These are the canonical resume baseline and must not be deleted while the new im
 
 ## Goal
 
-Given one application URL, a read-only job-description snapshot, and at least one applicant-evidence input (a local profile JSON, a source resume, or both), an OMP agent uses Playwright-backed DOM observation plus OMP browser actions to complete every user-facing field across the application flow, upload the configured resume, resolve validation errors and dynamically added controls, and stop only when the application is submitted.
+Given one application URL, a read-only job-description snapshot, and at least one applicant-evidence input (a local profile JSON, a source resume, or both), an OMP agent uses Playwright-backed DOM observation plus OMP `browser` tool actions on the visible CMUX browser surface to complete every user-facing field across the application flow, upload the configured resume, resolve validation errors and dynamically added controls, and stop only when the application is submitted.
 
 The target is one concrete application, not a reusable ATS platform and not a backlog worker.
 
@@ -82,7 +82,7 @@ The implementation may choose its file layout, but it must expose one machine-re
 | `run_artifact_dir` | Private location for observations, field ledger, screenshots, and completion evidence. |
 | `browser_mode` | Headed and visible; the same session remains available for OMP review and submission. |
 | `observer` | Playwright/DOM observer that emits a normalized snapshot without deciding answers. |
-| `action_driver` | OMP browser actions, with pinned CLI and native computer use only as ordered fallbacks; never an autonomous Playwright form-filler. |
+| `action_driver` | OMP `browser` tool on the visible CMUX browser surface, with pinned CLI and the OMP `computer` tool only as ordered fallbacks; never an autonomous Playwright form-filler. |
 | `submit_policy` | Fixed to `omp_agent`. Submission is automated after audit. |
 
 At least one of `applicant_profile_path` or `source_resume_path` is required; both are allowed. `resume_upload_path` remains separately required and may point to the same file as `source_resume_path`.
@@ -130,14 +130,14 @@ After step 5, persist the user's answer and immediately resume the loop. Do not 
 1. Open the supplied or agent-selected URL in a headed browser and wait for the page to stabilize.
 2. Observe the current DOM. Inventory all visible/enabled user-facing controls, their labels, types, options, required state, current value, validation state, frame, and whether a control could be final submission.
 3. Merge the observation into a field ledger. Preserve completed fields and add newly revealed fields.
-4. Select exactly one next unresolved field or one safe non-final continuation action.
-5. Resolve the answer using the precedence above. Do not ask permission for target selection, application entry, non-final navigation, routine field resolution, or retries; ask only when no truthful factual answer can be derived or a third-party access control requires human interaction.
-6. Perform the interaction with the OMP browser helper matching the control; use pinned CLI only for a control-specific fallback and `computer` only for a remaining native browser/OS interaction.
-7. Re-observe immediately. Confirm the intended value was retained, capture validation feedback, and detect DOM changes.
-8. If the interaction failed, diagnose and retry with the corrected interaction. Do not abandon the run because the control is custom, optional, sensitive, or unfamiliar.
-9. When the current page has no unresolved fields, activate only the non-final Next/Continue control, then repeat from step 2.
-10. At the final page, run a full completion audit across the ledger and the current DOM. Stop only when every reachable application field is complete and the final Submit control is ready for submission.
-11. Leave the headed browser open, capture a concise completion report, and proceed to `prepareSubmission` and submit.
+4. Call `selectSafeApplicationBatch` for the latest observation. It may select up to three independent ordinary text controls; invalid/retry work, newly revealed or dependency-marked fields, uploads, custom widgets, choices/toggles, navigation, and final submission are always single-action units.
+5. Resolve every planned answer using the precedence above before mutation. A multi-field batch proceeds only when every answer resolves deterministically from memory, profile, or resume. Agent inference, missing restricted facts, and user escalation return to single mode.
+6. Map every planned field to one exact live control on the visible CMUX OMP `browser` surface and perform the interactions in order. Stop on the first non-success or unexpected browser state. Use pinned CLI only for a control-specific fallback and computer input only for a remaining native browser/OS interaction.
+7. Publish all actually attempted routine fills atomically through `recordActionBatch`; publish a lone or hazardous action through `recordAction`. Evidence recording remains inside coordinator APIs.
+8. Re-observe immediately after the batch or single action. Confirm every attempted value was retained, capture validation feedback, and detect DOM changes. Diagnose and retry only the failed/stale field.
+9. When the current page has no unresolved fields, activate only the non-final Next/Continue control as a single action, then repeat from step 2.
+10. At the final page, run a full completion audit across the ledger and current DOM. Stop only when every reachable application field is complete and the final Submit control is ready.
+11. Leave the headed browser open, capture the completion report, and proceed through the audited submission protocol.
 
 The loop must handle at least ordinary text inputs, textareas, native and custom selects, combobox/autocomplete widgets, radios, checkboxes, date/phone/address controls, file uploads, validation messages, conditional questions, and non-final multi-page navigation encountered by the chosen application.
 
@@ -162,7 +162,7 @@ Do not build a database, event-sourcing layer, custom browser protocol, or distr
 - [x] Select one real application URL as the sole Phase 1 target.
 - [x] Implement a normalized Playwright DOM observer for the controls actually present on that application.
 - [x] Expose observation data to the OMP agent without embedding answer policy in the observer.
-- [x] Drive all field interactions through OMP browser actions in the headed browser, with pinned CLI and native computer use as ordered fallbacks.
+- [x] Drive all field interactions through the OMP `browser` tool on the visible CMUX browser surface, with pinned CLI and the OMP `computer` tool as ordered fallbacks.
 - [x] Implement the field ledger and answer-source precedence.
 - [x] Implement re-observation, DOM diffing, value-retention checks, and validation-error recovery.
 - [x] Handle dynamically revealed fields and all non-final pages encountered by the selected application.
@@ -202,7 +202,7 @@ headed live run captures post-submit evidence.
 
 ## OMP kickoff prompt
 
-> Read `PROJECT_HANDOFF.md` for history, `TODO.md` Phase 1 for the authoritative contract, and the handoff-safe quick start in `skills/application-prep/SKILL.md`. Execute Phase 1 only. Use the retained Playwright skill as the DOM-observation guide and the OMP `browser` tool on the same cmux surface as the primary interaction driver; use pinned CLI only for a control-specific fallback and `computer` only for a remaining native browser/OS interaction. For text, call `tab.fill(selector, exactText)` and never prefix `--value` or another option token. For files, uniquely verify the actual file input's exact CSS selector, then call `tab.uploadFile(exactFileInputCss, session.runMetadata.resume_upload_path)` with the canonical absolute PDF path before attempting chooser fallbacks. Select the application from the supplied run input or backlog without asking permission, then use its resume target/profile, resume, job description, and answer memory to drive the coordinator-owned one-field observe → resolve → act → record → re-observe → retain loop. Keep one active browser run until every reachable field is deliberate, valid, retained, and current. Recover validation errors and rejected submits in that same run. Run the completion audit; only after `prepareSubmission` authorizes the exact final ref, activate that Submit control with OMP browser or its control-specific CLI fallback, then re-observe and finalize owner-private completion evidence.
+> Use `skills/application-prep/SKILL.md` as the canonical Phase 1 operating procedure. Start or recover the private run coordinator, then use `selectSafeApplicationBatch` to fill conservative independent routine text fields from one observation and retain them after one fresh chained observation. Keep newly revealed/dependency fields, invalid/retry work, uploads, widgets, choices, navigation, and submission single-action. Use the OMP `browser` tool on the visible CMUX surface; consult pinned CLI guidance only after the exact browser helper fails. Submit only through `prepareSubmission -> beginFinalSubmit -> browser click -> fresh observation -> completeFinalSubmit -> finalizeRun`.
 
 ---
 
@@ -352,32 +352,34 @@ Operational failures remain active/retryable until diagnosed. An error or sensit
 - [ ] Verify from run evidence that the uploaded file hash matches the selected canonical artifact.
 - [ ] Demonstrate the complete source-to-backlog-to-resume-to-browser flow on a real queued job.
 
-## Persistent OMP and cmux operating model
+## Persistent OMP and CMUX operating model
 
 OMP—not a custom CLI daemon—is the long-running orchestrator.
 
 Recommended supervised layout:
 
 - **Control pane:** the persistent OMP session, active phase contract, current job ID, and loop state.
-- **Browser pane/tab:** the headed application session owned by the current run and driven primarily through the OMP browser tool on its cmux surface, with native computer use available only as fallback.
+- **Browser pane/tab:** the headed application session owned by the current run and driven primarily through the OMP `browser` tool on its visible CMUX browser surface, with the OMP `computer` tool available only as native-UI fallback.
 - **Inspection pane:** concise SQLite/job/run status and private artifact paths when diagnosis is needed.
 - **Review workspace:** a completed pre-submit browser may be parked for OMP review without being mistaken for a failed or active fill loop.
 
-Start with `max_active_jobs = 1`. Increase concurrency only after one-at-a-time recovery and browser ownership are proven. Separate cmux workspaces may isolate later concurrent jobs, but SQLite remains the source of durable claim ownership.
+Start with `max_active_jobs = 1`. Increase concurrency only after one-at-a-time recovery and browser ownership are proven. Separate CMUX workspaces may isolate later concurrent jobs, but SQLite remains the source of durable claim ownership.
 
 The persistent agent loop is:
 
 ```text
-read configuration and phase skills
-  -> inspect SQLite for queued or resumable work
-  -> atomically claim one job
-  -> generate/verify job-specific resume (after Step B)
-  -> open or resume headed browser workspace
-  -> run Phase 1 until completion audit passes
-  -> mark completed and submit the application
-  -> record submission outcome
-  -> inspect backlog again
+recover-or-claim
+  -> validate the exact job and resume binding
+  -> observe the headed application
+  -> resolve and execute a safe batch of independent routine fields
+  -> re-observe, retain, and repair
+  -> audit
+  -> begin/click/complete submission
+  -> persist the canonical outcome
+  -> inspect the backlog again
 ```
+
+`recoverOrClaimBacklogRun` owns startup ordering: recover an existing active run first; only when none exists may it preflight and atomically claim one prepared job. `selectSafeApplicationBatch` may batch only conservative independent routine controls. Newly revealed/dependency controls, validation recovery, uploads, widgets, choices, navigation, and submission remain single-action units.
 
 If no work exists, the OMP session waits and checks again using a configured interval or an explicit wake signal. Scripts may provide deterministic source, database, resume, or observation operations to the agent; they do not own the loop.
 
@@ -419,9 +421,9 @@ Phase 3 is complete only when the persistent supervised system demonstrates all 
 - [ ] The Phase 1 loop completes and verifies every reachable application field before submission.
 - [ ] `prepareSubmission(session, { finalRef })` authorizes the exact current final candidate ref, then `beginFinalSubmit(session)` durably records the attempt before the browser click.
 - [ ] OMP clicks the returned ref, `completeFinalSubmit` records the observed outcome, canonical evidence is validated against that job, and SQLite derives `completed` plus the actual attempt count.
-- [ ] The headed browser remains available in the cmux workspace long enough for OMP to capture the submission outcome.
+- [ ] The headed browser remains available in the CMUX workspace long enough for OMP to capture the submission outcome.
 - [ ] OMP returns to backlog inspection after persistence succeeds.
 
 ## OMP kickoff prompt
 
-> Read `PROJECT_HANDOFF.md`, this active Phase 3 contract, both completed lifecycle work records, and the application/resume skills. Operate the SQLite backlog through one persistent supervised OMP session with `max_active_jobs = 1`. On startup or restart, recover the existing durable run before considering a claim. Before claiming a queued job, inspect that exact candidate, obtain its truthful job description, generate and validate its job-specific canonical resume, and run preflight with matching paths and hashes. Then claim atomically, create or recover its private workspace, complete every reachable field through the one-field observe–act–reobserve loop, and perform final submission only through `prepareSubmission -> beginFinalSubmit -> browser click -> fresh observation -> completeFinalSubmit -> finalizeRun`. Persist `completed` only from canonical evidence, clear the active lease, and return to backlog inspection. Never bulk-claim, reuse another job's inputs, bypass access controls, or treat an incomplete/error run as completed.
+> Use `skills/application-prep/SKILL.md` as the canonical operational procedure and the active durable run record as current state. Call `recoverOrClaimBacklogRun` with `max_active_jobs = 1`, then follow its safe-batch observe/act/re-observe loop through audited submission and durable persistence. Do not reread historical handoffs or expand a per-job checklist unless a concrete blocker or defect requires diagnosis.

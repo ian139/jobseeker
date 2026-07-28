@@ -14,6 +14,7 @@ import {
   digestObservedValue,
   mergeObservation,
   recordActionAttempt,
+  recordActionBatch as recordLedgerActionBatch,
   recordResolution,
   resolveFinalSubmitAttempt,
   requiresReobservation,
@@ -277,7 +278,7 @@ export async function startRun(runPath, options = {}) {
     observer: run.observer,
     action_driver: run.action_driver,
     submit_policy: run.submit_policy,
-    loop_contract: 'one-field-observe-act-reobserve',
+    loop_contract: 'safe-batch-observe-act-reobserve',
     started_at: new Date(startedAt).toISOString(),
   };
   const evidence = await createEvidenceStore(run.run_artifact_dir, resumeExisting ? undefined : runMetadata, {
@@ -525,6 +526,51 @@ export async function recordAction(session, attempt) {
     return Object.freeze({ action, actionRef, retryRef, ledger: nextLedger, ledgerRef });
   });
 }
+
+export async function recordActionBatch(session, attempts) {
+  if (!Array.isArray(attempts)) throw new TypeError('attempts must be an array');
+  const input = snapshotValue(attempts, 'attempts', new Set());
+  return transact(session, async (state, markPublished) => {
+    requireObservationState(state);
+    const normalizedAttempts = input.map((attempt) => {
+      const normalized = { ...attempt };
+      if (!Object.hasOwn(normalized, 'observation_id')) {
+        normalized.observation_id = state.ledger.latest_observation_id;
+      }
+      const fieldId = normalized.field_id ?? null;
+      const field = fieldId === null
+        ? null
+        : state.ledger.fields.find((item) => item.field_id === fieldId) ?? null;
+      if (field !== null && normalized.ref === undefined) normalized.ref = field.latest_ref;
+      return normalized;
+    });
+    const nextLedger = recordLedgerActionBatch(state.ledger, normalizedAttempts);
+    const actions = nextLedger.action_attempts.slice(state.ledger.action_attempts.length);
+    const actionRefs = [];
+    const retryRefs = [];
+
+    markPublished();
+    for (const action of actions) {
+      actionRefs.push(await state.evidence.recordAction(action));
+      const shouldRecordRetry = action.retry_of !== null
+        || action.outcome === 'failed'
+        || action.outcome === 'retry'
+        || action.outcome === 'blocked';
+      retryRefs.push(shouldRecordRetry ? await state.evidence.recordRetry(action) : null);
+    }
+    const ledgerRef = await state.evidence.recordLedger(nextLedger);
+    state.ledger = nextLedger;
+    invalidateSubmissionPreparation(state);
+    return Object.freeze({
+      actions: Object.freeze(actions),
+      actionRefs: Object.freeze(actionRefs),
+      retryRefs: Object.freeze(retryRefs),
+      ledger: nextLedger,
+      ledgerRef,
+    });
+  });
+}
+
 function nextFinalSubmitActionId(ledger) {
   const actionIds = new Set(ledger.action_attempts.map((action) => action.action_id));
   let sequence = ledger.action_attempts.length + 1;

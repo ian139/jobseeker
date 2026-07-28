@@ -513,6 +513,10 @@ function validateCompletionReportShape(report) {
 }
 
 const RUN_METADATA_SCHEMA_VERSION = 'phase1-run-evidence-v1';
+const RUN_LOOP_CONTRACTS = new Set([
+  'safe-batch-observe-act-reobserve',
+  'one-field-observe-act-reobserve',
+]);
 const RUN_METADATA_KEYS = new Set([
   'schema',
   'application_url',
@@ -538,7 +542,7 @@ function normalizeRunMetadata(metadata) {
     || metadata.observer !== 'playwright_dom_v1'
     || metadata.action_driver !== 'omp_browser'
     || metadata.submit_policy !== 'omp_agent'
-    || metadata.loop_contract !== 'one-field-observe-act-reobserve') {
+    || !RUN_LOOP_CONTRACTS.has(metadata.loop_contract)) {
     fail('PAYLOAD_INVALID');
   }
   if (typeof metadata.application_url !== 'string' || !/^https?:\/\//.test(metadata.application_url)) fail('PAYLOAD_INVALID');

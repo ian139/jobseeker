@@ -12,6 +12,7 @@ import {
   finalizeRun,
   prepareSubmission,
   recordAction,
+  recordActionBatch,
   resolveField,
   startRun,
   verifyRetention,
@@ -387,6 +388,69 @@ test('coordinator enforces observe-act-reobserve and final submission authorizat
   );
   await finalizeRetained(session, harness.screenshotPath);
 });
+
+test('recordActionBatch publishes routine fills atomically and requires re-observation', async (t) => {
+  const harness = createHarness(t);
+  const { run, runPath } = harness.runFor('batch-actions');
+  const session = await startRun(runPath, { startedAt: '2026-07-25T08:00:00.000Z' });
+  await acceptObservation(session, observation(run.application_url, 1, [
+    fieldControl('alpha'),
+    fieldControl('beta'),
+  ]));
+  const actionArtifacts = () => fs.readdirSync(run.run_artifact_dir)
+    .filter((name) => /^action-\d+\.json$/.test(name));
+
+  const before = session.ledger;
+  await assert.rejects(
+    recordActionBatch(session, [
+      { action: 'fill', field_id: 'alpha', outcome: 'succeeded' },
+      { action: 'select', field_id: 'beta', outcome: 'succeeded' },
+    ]),
+    /only routine fill/i,
+  );
+  assert.strictEqual(session.ledger, before);
+  assert.equal(actionArtifacts().length, 0);
+
+  const successful = await recordActionBatch(session, [
+    { action: 'fill', field_id: 'alpha', outcome: 'succeeded' },
+    { action: 'fill', field_id: 'beta', outcome: 'succeeded' },
+  ]);
+  assert.deepEqual(successful.actions.map((action) => action.action_id), ['action-1', 'action-2']);
+  assert.equal(successful.actionRefs.length, 2);
+  assert.equal(actionArtifacts().length, 2);
+  await assert.rejects(
+    recordActionBatch(session, [
+      { action: 'fill', field_id: 'alpha', outcome: 'succeeded' },
+      { action: 'fill', field_id: 'beta', outcome: 'succeeded' },
+    ]),
+    /consumed|reobserve|fresh observation/i,
+  );
+
+  await acceptObservation(session, observation(run.application_url, 2, [
+    fieldControl('alpha'),
+    fieldControl('beta'),
+  ]));
+  const failed = await recordActionBatch(session, [
+    { action: 'fill', field_id: 'alpha', outcome: 'succeeded' },
+    { action: 'fill', field_id: 'beta', outcome: 'failed', error_code: 'synthetic-failure' },
+  ]);
+  assert.deepEqual(failed.actions.map((action) => action.outcome), ['succeeded', 'failed']);
+  assert.equal(failed.retryRefs[0], null);
+  assert.ok(failed.retryRefs[1]);
+  assert.equal(actionArtifacts().length, 4);
+  await assert.rejects(
+    recordActionBatch(session, [
+      { action: 'fill', field_id: 'alpha', outcome: 'succeeded' },
+      { action: 'fill', field_id: 'beta', outcome: 'succeeded' },
+    ]),
+    /consumed|reobserve|fresh observation/i,
+  );
+  await acceptObservation(session, observation(run.application_url, 3, [
+    fieldControl('alpha'),
+    fieldControl('beta'),
+  ]));
+});
+
 
 test('prepareSubmission authorizes final_submit', async (t) => {
   const harness = createHarness(t, { answers: { field: 'Profile answer' } });

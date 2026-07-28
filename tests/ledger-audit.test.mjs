@@ -8,6 +8,7 @@ import {
   digestPrivateValue,
   diffObservations,
   mergeObservation,
+  recordActionBatch,
   recordActionAttempt,
   recordResolution,
   resolveFinalSubmitAttempt,
@@ -322,6 +323,139 @@ test('rejects stale observation chains, resolutions, and action references', () 
     error_code: 'stale-reference',
   }), /stale|latest reachable/i);
 });
+
+test('records routine fill batches atomically against one observation', () => {
+  const current = observation('obs-1', [
+    control('alpha'),
+    control('beta'),
+    control('gamma'),
+    finalCandidate(),
+  ]);
+  const initial = createLedger(current);
+  const batch = recordActionBatch(initial, [
+    {
+      action: 'fill',
+      field_id: 'alpha',
+      observation_id: 'obs-1',
+      ref: 'ref-alpha',
+      outcome: 'succeeded',
+    },
+    {
+      action: 'fill',
+      field_id: 'beta',
+      observation_id: 'obs-1',
+      ref: 'ref-beta',
+      outcome: 'succeeded',
+    },
+  ]);
+
+  assert.deepEqual(batch.action_attempts.map((action) => action.action_id), ['action-1', 'action-2']);
+  assert.deepEqual(batch.action_attempts.map((action) => action.observation_id), ['obs-1', 'obs-1']);
+  assert.throws(() => recordActionAttempt(batch, {
+    action: 'fill',
+    field_id: 'gamma',
+    observation_id: 'obs-1',
+    ref: 'ref-gamma',
+    outcome: 'succeeded',
+  }), /consumed|reobserve/i);
+
+  const failed = recordActionBatch(initial, [
+    {
+      action: 'fill',
+      field_id: 'alpha',
+      observation_id: 'obs-1',
+      ref: 'ref-alpha',
+      outcome: 'succeeded',
+    },
+    {
+      action: 'fill',
+      field_id: 'beta',
+      observation_id: 'obs-1',
+      ref: 'ref-beta',
+      outcome: 'failed',
+      error_code: 'synthetic-failure',
+    },
+  ]);
+  assert.deepEqual(failed.action_attempts.map((action) => action.outcome), ['succeeded', 'failed']);
+  assert.deepEqual(failed.fields.find((field) => field.field_id === 'beta').retry_notes, ['synthetic-failure']);
+  validateLedger(failed);
+});
+
+test('rejects invalid batch items before publishing or consuming the source ledger', () => {
+  const current = observation('obs-1', [
+    control('alpha'),
+    control('beta'),
+    control('gamma'),
+    finalCandidate(),
+  ]);
+  const initial = createLedger(current);
+  const valid = {
+    action: 'fill',
+    field_id: 'alpha',
+    observation_id: 'obs-1',
+    ref: 'ref-alpha',
+    outcome: 'succeeded',
+  };
+
+  assert.throws(() => recordActionBatch(initial, [
+    valid,
+    {
+      action: 'select',
+      field_id: 'beta',
+      observation_id: 'obs-1',
+      ref: 'ref-beta',
+      outcome: 'succeeded',
+    },
+  ]), /only routine fill/i);
+  assert.equal(initial.action_attempts.length, 0);
+
+  assert.throws(() => recordActionBatch(initial, [
+    valid,
+    { ...valid, field_id: 'alpha', ref: 'ref-alpha' },
+  ]), /distinct/i);
+  assert.throws(() => recordActionBatch(initial, [
+    valid,
+    { ...valid, field_id: 'beta', observation_id: 'obs-old', ref: 'ref-beta' },
+  ]), /current/i);
+  assert.throws(() => recordActionBatch(initial, [
+    { ...valid, outcome: 'attempted' },
+    { ...valid, field_id: 'beta', ref: 'ref-beta' },
+  ]), /succeed|terminal/i);
+  const uncertain = recordActionBatch(initial, [
+    valid,
+    { ...valid, field_id: 'beta', ref: 'ref-beta', outcome: 'attempted' },
+  ]);
+  assert.deepEqual(uncertain.action_attempts.map((action) => action.outcome), ['succeeded', 'attempted']);
+  assert.throws(() => recordActionBatch(initial, [
+    valid,
+    {
+      action: 'fill',
+      field_id: 'final-review',
+      observation_id: 'obs-1',
+      ref: 'ref-final-review',
+      outcome: 'succeeded',
+    },
+  ]), /unknown field|non-final/i);
+
+  const consumed = recordActionAttempt(initial, valid);
+  assert.throws(() => recordActionBatch(consumed, [
+    {
+      action: 'fill',
+      field_id: 'beta',
+      observation_id: 'obs-1',
+      ref: 'ref-beta',
+      outcome: 'succeeded',
+    },
+    {
+      action: 'fill',
+      field_id: 'gamma',
+      observation_id: 'obs-1',
+      ref: 'ref-gamma',
+      outcome: 'succeeded',
+    },
+  ]), /consumed|reobserve/i);
+});
+
 
 test('accepts the declared answer-source precedence and rejects unknown sources', () => {
   const current = observation('obs-1', [control('source-field', { value: 'source-value' }), finalCandidate()]);

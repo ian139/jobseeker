@@ -1333,25 +1333,7 @@ function normalizeActionAttempt(attempt, sequence) {
   return normalized;
 }
 
-export function recordActionAttempt(ledger, attempt) {
-  validateLedgerShape(ledger);
-  const normalized = normalizeActionAttempt(attempt, ledger.action_attempts.length + 1);
-  if (ledger.action_attempts.some((item) => item.action_id === normalized.action_id)) {
-    fail('action.action_id', 'duplicate action identity');
-  }
-  if (normalized.action === 'final_submit' && ledger.action_attempts.some(
-    (item) => item.action === 'final_submit' && item.outcome === 'attempted',
-  )) {
-    fail('action.action', 'a final-submit attempt is already pending', 'PENDING_FINAL_SUBMIT');
-  }
-
-  if (normalized.observation_id !== ledger.latest_observation_id) {
-    throw new Phase1StaleReferenceError('action observation is not current');
-  }
-  if (isFieldMutationAction(normalized.action) && requiresReobservation(ledger)) {
-    throw new Phase1StaleReferenceError('latest observation was consumed by a field mutation; reobserve first');
-  }
-
+function validateActionBinding(ledger, normalized) {
   let boundField = null;
   if (isFieldMutationAction(normalized.action)) {
     boundField = ledger.fields.find((item) => item.field_id === normalized.field_id) ?? null;
@@ -1371,6 +1353,27 @@ export function recordActionAttempt(ledger, attempt) {
       throw new Phase1StaleReferenceError('navigation target is not a non-final candidate');
     }
   }
+  return boundField;
+}
+
+function appendNormalizedActionAttempt(ledger, normalized, { allowConsumed = false } = {}) {
+  if (ledger.action_attempts.some((item) => item.action_id === normalized.action_id)) {
+    fail('action.action_id', 'duplicate action identity');
+  }
+  if (normalized.action === 'final_submit' && ledger.action_attempts.some(
+    (item) => item.action === 'final_submit' && item.outcome === 'attempted',
+  )) {
+    fail('action.action', 'a final-submit attempt is already pending', 'PENDING_FINAL_SUBMIT');
+  }
+
+  if (normalized.observation_id !== ledger.latest_observation_id) {
+    throw new Phase1StaleReferenceError('action observation is not current');
+  }
+  if (!allowConsumed && isFieldMutationAction(normalized.action) && requiresReobservation(ledger)) {
+    throw new Phase1StaleReferenceError('latest observation was consumed by a field mutation; reobserve first');
+  }
+
+  validateActionBinding(ledger, normalized);
 
   const action = { ...normalized, stale_ref: false };
   const shouldInvalidate = isFieldMutationAction(normalized.action);
@@ -1395,6 +1398,82 @@ export function recordActionAttempt(ledger, attempt) {
     action_attempts: [...ledger.action_attempts, action],
     submit_action_count: ledger.submit_action_count + (submit ? 1 : 0),
   });
+}
+
+export function recordActionAttempt(ledger, attempt) {
+  validateLedgerShape(ledger);
+  const normalized = normalizeActionAttempt(attempt, ledger.action_attempts.length + 1);
+  return appendNormalizedActionAttempt(ledger, normalized);
+}
+
+const BATCH_SUCCESS_OUTCOMES = new Set(['succeeded']);
+const BATCH_TERMINAL_STOP_OUTCOMES = new Set(['attempted', 'failed', 'retry', 'blocked']);
+
+function validateBatchAttempt(ledger, normalized, index, finalIndex, fieldIds, refs, actionIds) {
+  const path = `attempts[${index}]`;
+  if (actionIds.has(normalized.action_id)) {
+    fail(`${path}.action_id`, 'duplicate action identity');
+  }
+  actionIds.add(normalized.action_id);
+
+  if (normalized.observation_id !== ledger.latest_observation_id) {
+    throw new Phase1StaleReferenceError(`${path}.observation_id is not current`);
+  }
+  if (normalized.action !== 'fill') {
+    fail(`${path}.action`, 'batch accepts only routine fill actions');
+  }
+
+  const succeeded = BATCH_SUCCESS_OUTCOMES.has(normalized.outcome);
+  const terminalStop = BATCH_TERMINAL_STOP_OUTCOMES.has(normalized.outcome);
+  if (!succeeded && !(terminalStop && index === finalIndex)) {
+    fail(`${path}.outcome`, 'batch actions must succeed before an optional terminal non-success');
+  }
+  if (succeeded && (normalized.retry_of !== null || normalized.error_code !== null)) {
+    fail(`${path}.outcome`, 'successful batch fills cannot carry retry or error semantics');
+  }
+  if (terminalStop && normalized.outcome !== 'attempted' && normalized.error_code === null) {
+    fail(`${path}.error_code`, 'terminal failed/retry/blocked batch fill requires error_code');
+  }
+
+  const field = validateActionBinding(ledger, normalized);
+  if (field === null || field.final) {
+    fail(`${path}.field_id`, 'batch fill must target a current non-final field');
+  }
+  if (fieldIds.has(normalized.field_id)) {
+    fail(`${path}.field_id`, 'batch fields must be distinct');
+  }
+  if (refs.has(normalized.ref)) {
+    fail(`${path}.ref`, 'batch refs must be distinct');
+  }
+  fieldIds.add(normalized.field_id);
+  refs.add(normalized.ref);
+}
+
+export function recordActionBatch(ledger, attempts) {
+  validateLedgerShape(ledger);
+  assertArray(attempts, 'attempts');
+  if (attempts.length < 2 || attempts.length > 3) {
+    fail('attempts', 'batch must contain 2-3 actions');
+  }
+  if (requiresReobservation(ledger)) {
+    throw new Phase1StaleReferenceError('latest observation was consumed by a field mutation; reobserve first');
+  }
+
+  const normalizedAttempts = attempts.map((attempt, index) =>
+    normalizeActionAttempt(attempt, ledger.action_attempts.length + index + 1));
+  const fieldIds = new Set();
+  const refs = new Set();
+  const actionIds = new Set(ledger.action_attempts.map((action) => action.action_id));
+  const finalIndex = normalizedAttempts.length - 1;
+  normalizedAttempts.forEach((normalized, index) => {
+    validateBatchAttempt(ledger, normalized, index, finalIndex, fieldIds, refs, actionIds);
+  });
+
+  let nextLedger = ledger;
+  for (const normalized of normalizedAttempts) {
+    nextLedger = appendNormalizedActionAttempt(nextLedger, normalized, { allowConsumed: true });
+  }
+  return nextLedger;
 }
 function normalizeFinalSubmitResolution(resolution) {
   assertRecord(resolution, 'resolution');

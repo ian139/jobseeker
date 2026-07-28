@@ -17,6 +17,7 @@ import {
   persistTerminalOutcome,
   preflightBacklogRun,
   recoverActiveRun,
+  recoverOrClaimBacklogRun,
   resumeNeedsUserRun,
   skipNeedsUserRun,
 } from '../src/phase1/backlog-runner.mjs';
@@ -203,7 +204,7 @@ async function publishCanonicalCompletion({
       observer: 'playwright_dom_v1',
       action_driver: 'omp_browser',
       submit_policy: 'omp_agent',
-      loop_contract: 'one-field-observe-act-reobserve',
+      loop_contract: 'safe-batch-observe-act-reobserve',
       started_at: NOW,
     });
     store.recordAction({
@@ -307,6 +308,108 @@ test('invalid preflight is rejected before claim and cannot mutate the queue', a
     })));
     assert.deepEqual(await readRows(value.database, 'SELECT id, status FROM application_jobs WHERE id = 2'), [
       { id: 2, status: 'queued' },
+    ]);
+    assert.deepEqual(await readRows(value.database, 'SELECT count(*) AS count FROM application_runs'), [{ count: 0 }]);
+  } finally {
+    await removeFixture(value);
+  }
+});
+
+test('startup recovery takes precedence over invalid claim preflight', async () => {
+  const value = await fixture([{ id: 3 }]);
+  try {
+    const claimed = await claimNextQueuedJob(value.database, claimOptions(value, {
+      ownerId: 'owner-a',
+      browserSessionId: 'browser-a',
+      leaseSeconds: 10,
+    }));
+    const result = await recoverOrClaimBacklogRun(value.database, claimOptions(value, {
+      ownerId: 'owner-b',
+      browserSessionId: 'browser-b',
+      now: '2026-07-26T00:01:00.000Z',
+      leaseSeconds: 60,
+      jobDescriptionPath: path.join(value.root, 'missing-description.txt'),
+    }));
+
+    assert.equal(result.kind, 'recovered');
+    assert.equal(result.run.runId, claimed.runId);
+    assert.equal(result.run.jobId, claimed.jobId);
+    assert.equal(result.run.ownerId, 'owner-b');
+    assert.equal(result.run.browserSessionId, 'browser-b');
+    assert.deepEqual(await readRows(value.database, 'SELECT count(*) AS count FROM application_runs'), [{ count: 1 }]);
+  } finally {
+    await removeFixture(value);
+  }
+});
+
+test('startup rejects unknown options before recovering an active run', async () => {
+  const value = await fixture([{ id: 6 }]);
+  try {
+    const claimed = await claimNextQueuedJob(value.database, claimOptions(value, {
+      ownerId: 'owner-a',
+      browserSessionId: 'browser-a',
+    }));
+    await assert.rejects(
+      () => recoverOrClaimBacklogRun(value.database, {
+        ...claimOptions(value, {
+          ownerId: 'owner-b',
+          browserSessionId: 'browser-b',
+          now: '2026-07-26T00:01:00.000Z',
+        }),
+        unexpected: true,
+      }),
+      (error) => error?.code === 'E_STARTUP_OPTIONS_UNKNOWN_KEY',
+    );
+
+    assert.deepEqual(await readRows(value.database, 'SELECT id, owner_id, browser_session_id FROM application_runs'), [
+      {
+        id: claimed.runId,
+        owner_id: 'owner-a',
+        browser_session_id: 'browser-a',
+      },
+    ]);
+  } finally {
+    await removeFixture(value);
+  }
+});
+
+test('startup claims through the existing atomic path when recovery is idle', async () => {
+  const value = await fixture([{ id: 4 }]);
+  try {
+    const result = await recoverOrClaimBacklogRun(value.database, claimOptions(value));
+
+    assert.equal(result.kind, 'claimed');
+    assert.equal(result.run.jobId, 4);
+    assert.equal(result.run.status, 'applying');
+    assert.deepEqual(await readRows(value.database, 'SELECT count(*) AS count FROM application_runs WHERE active = 1'), [
+      { count: 1 },
+    ]);
+  } finally {
+    await removeFixture(value);
+  }
+});
+
+test('startup returns idle when recovery and claim find no work', async () => {
+  const value = await fixture([]);
+  try {
+    const result = await recoverOrClaimBacklogRun(value.database, claimOptions(value));
+
+    assert.deepEqual(result, { kind: 'idle', run: null });
+    assert.deepEqual(await readRows(value.database, 'SELECT count(*) AS count FROM application_runs'), [{ count: 0 }]);
+  } finally {
+    await removeFixture(value);
+  }
+});
+
+test('invalid startup preflight fails before mutation when recovery is unavailable', async () => {
+  const value = await fixture([{ id: 5 }]);
+  try {
+    await assert.rejects(() => recoverOrClaimBacklogRun(value.database, claimOptions(value, {
+      jobDescriptionPath: path.join(value.root, 'missing-description.txt'),
+    })));
+
+    assert.deepEqual(await readRows(value.database, 'SELECT id, status FROM application_jobs WHERE id = 5'), [
+      { id: 5, status: 'queued' },
     ]);
     assert.deepEqual(await readRows(value.database, 'SELECT count(*) AS count FROM application_runs'), [{ count: 0 }]);
   } finally {

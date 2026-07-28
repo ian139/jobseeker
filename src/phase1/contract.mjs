@@ -829,6 +829,10 @@ const PROFILE_CANONICAL_LINK_KINDS = Object.freeze({
     'profile.links.linkedin': 'linkedin',
     'profile.links.portfolio': 'portfolio',
 });
+const PROFILE_CANONICAL_EMPLOYMENT_KEYS = Object.freeze({
+    'profile.employment.current.employer': 'employer',
+    'profile.employment.current.title': 'title',
+});
 
 function ownPathValue(candidate, segments) {
     let value = candidate;
@@ -860,6 +864,22 @@ function canonicalLinkValue(profile, alias) {
     }
     return match === undefined ? { found: false } : { found: true, value: match };
 }
+function canonicalEmploymentValue(profile, alias) {
+    const key = PROFILE_CANONICAL_EMPLOYMENT_KEYS[alias];
+    if (key === undefined || !isPlainObject(profile) || !Array.isArray(profile.employment)) {
+        return { found: false };
+    }
+    let match;
+    for (const employment of profile.employment) {
+        if (!isPlainObject(employment)
+            || employment.current !== true
+            || !Object.hasOwn(employment, key)) continue;
+        if (match !== undefined) return { found: false };
+        match = employment[key];
+    }
+    return match === undefined ? { found: false } : { found: true, value: match };
+}
+
 
 
 function authorizationCountryIsSupported(question, countries) {
@@ -1006,6 +1026,10 @@ function profileValue(profile, alias) {
     const link = canonicalLinkValue(profile, alias);
     if (link.found) {
         return link;
+    }
+    const employment = canonicalEmploymentValue(profile, alias);
+    if (employment.found) {
+        return employment;
     }
     const exact = candidateValue(profile, alias);
     if (exact.found) {

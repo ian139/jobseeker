@@ -168,6 +168,8 @@ const STANDARD_PROFILE_ALIASES = Object.freeze({
   'address line 2': 'profile.address.street2',
   'linkedin profile url': 'profile.links.linkedin',
   'portfolio url': 'profile.links.portfolio',
+  'current employer': 'profile.employment.current.employer',
+  'current job title': 'profile.employment.current.title',
 });
 
 function normalizeClassificationText(text) {

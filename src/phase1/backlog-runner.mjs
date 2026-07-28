@@ -10,6 +10,7 @@ import {
   validateRunContractLocal,
 } from './contract.mjs';
 import { validateCompletionEvidence } from './evidence.mjs';
+import { classifyApplicationUrl } from './platforms.mjs';
 
 const SQLITE_BINARY = 'sqlite3';
 const SQLITE_MAX_BUFFER = 4 * 1024 * 1024;
@@ -561,7 +562,43 @@ function normalizeRunRows(rows, emptyCode = 'E_RUN_RESULT') {
   return normalizeRunResultRow(rows[0]);
 }
 
-function claimSql(preflight, ownerId, browserSessionId, now, expiresAt) {
+async function supportedQueuedJobs(database, jobId = undefined) {
+  const target = jobId === undefined ? '' : ` AND id = ${sqlLiteral(jobId)}`;
+  const rows = parseRows(
+    await runSqlite(
+      database,
+      `SELECT id, application_url FROM application_jobs WHERE status = 'queued'${target};`,
+    ),
+    'E_JOB_CANDIDATES',
+  );
+  const candidates = [];
+  for (const row of rows) {
+    assertPlainRecord(row, 'E_JOB_CANDIDATES');
+    const keys = Object.keys(row);
+    if (keys.length !== 2 || !keys.includes('id') || !keys.includes('application_url')) {
+      fail('E_JOB_CANDIDATES');
+    }
+    const id = requirePositiveInteger(row.id, 'E_JOB_CANDIDATES');
+    const applicationUrl = requireString(row.application_url, 'E_JOB_CANDIDATES', {
+      max: 16 * 1024,
+    });
+    if (classifyApplicationUrl(applicationUrl) !== null) {
+      candidates.push(Object.freeze({ id, applicationUrl }));
+    }
+  }
+  return Object.freeze(candidates);
+}
+
+function supportedJobPredicate(candidates, alias = 'j') {
+  if (candidates.length === 0) return '0';
+  return `(${candidates.map((candidate) => (
+    `(${alias}.id = ${sqlLiteral(candidate.id)}`
+      + ` AND ${alias}.application_url = ${sqlLiteral(candidate.applicationUrl)})`
+  )).join(' OR ')})`;
+}
+
+
+function claimSql(preflight, ownerId, browserSessionId, now, expiresAt, candidates) {
   const rootPrefix = `${preflight.workspaceRoot}/job-`;
   const priority = QUEUE_PRIORITY_SQL.replaceAll('eligibility_tier', 'j.eligibility_tier');
   return `
@@ -626,6 +663,7 @@ SELECT
   NULL
 FROM application_jobs AS j
 WHERE j.status = 'queued'
+  AND ${supportedJobPredicate(candidates)}
   AND NOT EXISTS (SELECT 1 FROM _backlog_claim_result)
   AND NOT EXISTS (SELECT 1 FROM application_runs WHERE active = 1)
 ORDER BY ${priority},
@@ -658,7 +696,7 @@ JOIN _backlog_claim_result AS c ON c.run_id = r.id;
 COMMIT;
 `;
 }
-function claimSpecificSql(preflight, ownerId, browserSessionId, now, expiresAt, jobId) {
+function claimSpecificSql(preflight, ownerId, browserSessionId, now, expiresAt, jobId, candidates) {
   const rootPrefix = `${preflight.workspaceRoot}/job-`;
   return `
 PRAGMA foreign_keys = ON;
@@ -723,6 +761,7 @@ SELECT
 FROM application_jobs AS j
 WHERE j.id = ${sqlLiteral(jobId)}
   AND j.status = 'queued'
+  AND ${supportedJobPredicate(candidates)}
   AND NOT EXISTS (SELECT 1 FROM _backlog_claim_result)
   AND NOT EXISTS (SELECT 1 FROM application_runs WHERE active = 1)
 LIMIT 1;
@@ -766,10 +805,19 @@ export async function claimSpecificQueuedJob(database, jobId, options = {}) {
   }
   const db = databasePath(database);
   const expiresAt = leaseExpiry(normalized.now, normalized.leaseSeconds);
+  const candidates = await supportedQueuedJobs(db, jobId);
   const rows = parseRows(
     await runSqlite(
       db,
-      claimSpecificSql(preflight, normalized.ownerId, normalized.browserSessionId, normalized.now, expiresAt, jobId),
+      claimSpecificSql(
+        preflight,
+        normalized.ownerId,
+        normalized.browserSessionId,
+        normalized.now,
+        expiresAt,
+        jobId,
+        candidates,
+      ),
     ),
     'E_CLAIM_RESULT',
   );
@@ -790,10 +838,18 @@ export async function claimNextQueuedJob(database, options = {}) {
   }
   const db = databasePath(database);
   const expiresAt = leaseExpiry(normalized.now, normalized.leaseSeconds);
+  const candidates = await supportedQueuedJobs(db);
   const rows = parseRows(
     await runSqlite(
       db,
-      claimSql(preflight, normalized.ownerId, normalized.browserSessionId, normalized.now, expiresAt),
+      claimSql(
+        preflight,
+        normalized.ownerId,
+        normalized.browserSessionId,
+        normalized.now,
+        expiresAt,
+        candidates,
+      ),
     ),
     'E_CLAIM_RESULT',
   );

@@ -166,6 +166,8 @@ const STANDARD_PROFILE_ALIASES = Object.freeze({
   'phone number': 'Phone',
   'street address': 'profile.address.street',
   'address line 2': 'profile.address.street2',
+  'linkedin profile url': 'profile.links.linkedin',
+  'portfolio url': 'profile.links.portfolio',
 });
 
 function normalizeClassificationText(text) {

@@ -825,6 +825,10 @@ const PROFILE_CANONICAL_PATHS = Object.freeze({
     Email: Object.freeze(['contact', 'email']),
     Phone: Object.freeze(['contact', 'phone']),
 });
+const PROFILE_CANONICAL_LINK_KINDS = Object.freeze({
+    'profile.links.linkedin': 'linkedin',
+    'profile.links.portfolio': 'portfolio',
+});
 
 function ownPathValue(candidate, segments) {
     let value = candidate;
@@ -840,6 +844,23 @@ function ownPathValue(candidate, segments) {
 function normalizedQuestion(value) {
     return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
+function canonicalLinkValue(profile, alias) {
+    const kind = PROFILE_CANONICAL_LINK_KINDS[alias];
+    if (kind === undefined || !isPlainObject(profile) || !Array.isArray(profile.links)) {
+        return { found: false };
+    }
+    let match;
+    for (const link of profile.links) {
+        if (!isPlainObject(link) || typeof link.url !== 'string') continue;
+        const matched = [link.kind, link.label].some((value) =>
+            typeof value === 'string' && normalizedQuestion(value) === kind);
+        if (!matched) continue;
+        if (match !== undefined) return { found: false };
+        match = link.url;
+    }
+    return match === undefined ? { found: false } : { found: true, value: match };
+}
+
 
 function authorizationCountryIsSupported(question, countries) {
     const match = question.match(/\b(?:work|employment)\s+(?:in|for)\s+(?:the\s+)?(.+)$/);
@@ -981,6 +1002,10 @@ function profileValue(profile, alias) {
         if (canonical.found) {
             return canonical;
         }
+    }
+    const link = canonicalLinkValue(profile, alias);
+    if (link.found) {
+        return link;
     }
     const exact = candidateValue(profile, alias);
     if (exact.found) {

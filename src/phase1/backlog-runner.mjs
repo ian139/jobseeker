@@ -658,6 +658,123 @@ JOIN _backlog_claim_result AS c ON c.run_id = r.id;
 COMMIT;
 `;
 }
+function claimSpecificSql(preflight, ownerId, browserSessionId, now, expiresAt, jobId) {
+  const rootPrefix = `${preflight.workspaceRoot}/job-`;
+  return `
+PRAGMA foreign_keys = ON;
+BEGIN IMMEDIATE;
+CREATE TEMP TABLE _backlog_claim_result (run_id INTEGER PRIMARY KEY);
+UPDATE application_runs
+SET browser_session_id = ${sqlLiteral(browserSessionId)},
+    lease_expires_at = ${sqlLiteral(expiresAt)},
+    last_progress_at = ${sqlLiteral(now)}
+WHERE active = 1
+  AND owner_id = ${sqlLiteral(ownerId)}
+  AND browser_session_id = ${sqlLiteral(browserSessionId)};
+INSERT INTO _backlog_claim_result (run_id)
+SELECT id
+FROM application_runs
+WHERE active = 1
+  AND owner_id = ${sqlLiteral(ownerId)}
+  AND browser_session_id = ${sqlLiteral(browserSessionId)};
+INSERT INTO application_runs (
+  job_id,
+  status,
+  reason_code,
+  started_at,
+  finished_at,
+  final_url,
+  actions_json,
+  evidence_path,
+  submit_action_count,
+  active,
+  owner_id,
+  browser_session_id,
+  claimed_at,
+  lease_expires_at,
+  last_progress_at,
+  workspace_path,
+  resume_artifact_path,
+  resume_artifact_sha256,
+  answer_memory_path,
+  blocker_alias
+)
+SELECT
+  j.id,
+  'applying',
+  'claimed_by_backlog_runner',
+  ${sqlLiteral(now)},
+  NULL,
+  NULL,
+  '[]',
+  ${sqlLiteral(rootPrefix)} || CAST(j.id AS TEXT) || '/evidence',
+  NULL,
+  1,
+  ${sqlLiteral(ownerId)},
+  ${sqlLiteral(browserSessionId)},
+  ${sqlLiteral(now)},
+  ${sqlLiteral(expiresAt)},
+  ${sqlLiteral(now)},
+  ${sqlLiteral(rootPrefix)} || CAST(j.id AS TEXT),
+  ${sqlLiteral(preflight.resumeArtifactPath)},
+  ${sqlLiteral(preflight.resumeArtifactSha256)},
+  ${sqlLiteral(preflight.answerMemoryPath)},
+  NULL
+FROM application_jobs AS j
+WHERE j.id = ${sqlLiteral(jobId)}
+  AND j.status = 'queued'
+  AND NOT EXISTS (SELECT 1 FROM _backlog_claim_result)
+  AND NOT EXISTS (SELECT 1 FROM application_runs WHERE active = 1)
+LIMIT 1;
+INSERT INTO _backlog_claim_result (run_id)
+SELECT r.id
+FROM application_runs AS r
+WHERE r.active = 1
+  AND r.owner_id = ${sqlLiteral(ownerId)}
+  AND NOT EXISTS (SELECT 1 FROM _backlog_claim_result);
+UPDATE application_jobs
+SET status = 'claimed',
+    status_reason = 'claimed_by_backlog_runner',
+    claimed_at = ${sqlLiteral(now)},
+    completed_at = NULL
+WHERE id IN (
+  SELECT r.job_id
+  FROM application_runs AS r
+  JOIN _backlog_claim_result AS c ON c.run_id = r.id
+  WHERE r.status = 'applying'
+)
+  AND status = 'queued';
+SELECT ${RUN_SELECT_COLUMNS}
+FROM application_runs AS r
+JOIN application_jobs AS j ON j.id = r.job_id
+JOIN _backlog_claim_result AS c ON c.run_id = r.id;
+COMMIT;
+`;
+}
+
+/** Claim a specific queued job and insert its applying run in one transaction. */
+export async function claimSpecificQueuedJob(database, jobId, options = {}) {
+  const normalized = normalizeClaimOptions(options);
+  const preflight = await preflightBacklogRun(normalized.preflightConfig);
+  if (normalized.suppliedResumePath !== undefined
+    && normalized.suppliedResumePath !== preflight.resumeArtifactPath) {
+    fail('E_RESUME_BINDING');
+  }
+  if (normalized.suppliedResumeHash !== undefined
+    && normalized.suppliedResumeHash !== preflight.resumeArtifactSha256) {
+    fail('E_RESUME_BINDING');
+  }
+  const db = databasePath(database);
+  const expiresAt = leaseExpiry(normalized.now, normalized.leaseSeconds);
+  const rows = parseRows(
+    await runSqlite(
+      db,
+      claimSpecificSql(preflight, normalized.ownerId, normalized.browserSessionId, normalized.now, expiresAt, jobId),
+    ),
+    'E_CLAIM_RESULT',
+  );
+  return normalizeRunRows(rows, 'E_CLAIM_RESULT');
+}
 
 /** Claim the next queued job and insert its applying run in one transaction. */
 export async function claimNextQueuedJob(database, options = {}) {

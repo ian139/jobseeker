@@ -817,6 +817,7 @@ const PROFILE_CANONICAL_PATHS = Object.freeze({
     'profile.address.country': Object.freeze(['address', 'country']),
     'profile.address.street': Object.freeze(['address', 'street']),
     'profile.address.street2': Object.freeze(['address', 'street2']),
+    'profile.location_preferences.current_location': Object.freeze(['location_preferences', 'current_location']),
     'Full Name': Object.freeze(['contact', 'name']),
     Name: Object.freeze(['contact', 'name']),
     'Preferred First Name': Object.freeze(['contact', 'preferred_name']),
@@ -844,6 +845,16 @@ function ownPathValue(candidate, segments) {
     }
     return { found: true, value };
 }
+function canonicalRelocationValue(profile, alias) {
+    if (alias !== 'profile.relocation.willing') return { found: false };
+    const relocation = ownPathValue(profile, ['relocation', 'willing']);
+    const preference = ownPathValue(profile, ['location_preferences', 'willing_to_relocate']);
+    if (relocation.found && preference.found && relocation.value !== preference.value) {
+        return { found: false };
+    }
+    return relocation.found ? relocation : preference;
+}
+
 
 function normalizedQuestion(value) {
     return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -1022,6 +1033,10 @@ function profileValue(profile, alias) {
         if (canonical.found) {
             return canonical;
         }
+    }
+    const relocation = canonicalRelocationValue(profile, alias);
+    if (relocation.found) {
+        return relocation;
     }
     const link = canonicalLinkValue(profile, alias);
     if (link.found) {

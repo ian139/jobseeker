@@ -170,6 +170,8 @@ const STANDARD_PROFILE_ALIASES = Object.freeze({
   'portfolio url': 'profile.links.portfolio',
   'current employer': 'profile.employment.current.employer',
   'current job title': 'profile.employment.current.title',
+  'current location': 'profile.location_preferences.current_location',
+  'are you willing to relocate': 'profile.relocation.willing',
 });
 
 function normalizeClassificationText(text) {

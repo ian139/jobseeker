@@ -19,7 +19,7 @@ This is the execution roadmap for the fresh implementation. `PROJECT_HANDOFF.md`
 job source
   -> normalized SQLite backlog
   -> deterministic one-page LaTeX resume
-  -> persistent OMP agent in a supervised cmux workspace
+  -> persistent OMP agent in a supervised CMUX-TUI workspace
   -> headed browser application session
   -> every user-facing application field resolved and verified
   -> OMP agent reviews and submits after the completeness audit passes
@@ -37,8 +37,8 @@ The system prepares complete applications and performs final submission after th
 - **Agent inference is the default.** When exact answer memory and profile aliases do not resolve a field, OMP may generate an answer from applicant facts in the source resume plus wording and requirements in the job description. `agent_inference` is an allowed answer source for every field shape, but each inferred answer must carry a rationale digest and the verified resume/job-description evidence digests and must be marked separately in the private ledger/evidence. Inference may transform supported facts but must never supply identity, dates, credentials, work authorization, protected-class answers, salary or compensation, or any other sensitive personal, legal, financial, or medical fact.
 - **Final submission is automated by OMP after `prepareSubmission` authorizes it.** OMP identifies the final control, runs the completeness audit via `prepareSubmission`, durably begins the attempt with `beginFinalSubmit`, clicks the returned ref, and records the observed outcome with `completeFinalSubmit`. This is programmatic audit authorization and requires no human approval.
 - **Direct browser operation replaces the old guarded applier.** Do not reactivate the archived Puppeteer/Python protocol, route allowlist, sensitive-field blocker, safety-policy stack, application RPC service, detached-browser recovery system, or handoff-on-uncertainty behavior. Reuse lessons, not that implementation.
-- **Playwright observes; OMP acts.** The Playwright navigation skill and DOM observer describe the current page and verify retained state. The OMP `browser` tool on the visible CMUX browser surface is the primary action driver for clicking application-entry controls, filling, selecting, uploading, scrolling, and non-final navigation. Pinned Playwright CLI is control-specific fallback; the OMP `computer` tool is the last-resort native browser/OS fallback when available. Re-observe after every meaningful mutation.
-- **Solve CAPTCHAs automatically.** Detect and complete CAPTCHA challenges using the OMP `browser` or `computer` tool on the visible CMUX browser surface. Re-ground with a fresh observer result and browser snapshot before and after each CAPTCHA interaction. CAPTCHA alone must never trigger user escalation, a `needs_user` outcome, or a blocked run. Record the CAPTCHA detection, resolution method, and outcome in the private ledger.
+- **Playwright observes; OMP acts.** The Playwright navigation skill and DOM observer describe the current page and verify retained state. The OMP `browser` tool on the attached CMUX-TUI browser pane is the primary action driver for clicking application-entry controls, filling, selecting, uploading, scrolling, and non-final navigation. Pinned Playwright CLI is control-specific fallback; the OMP `computer` tool is the last-resort native browser/OS fallback when available. Re-observe after every meaningful mutation.
+- **Solve CAPTCHAs automatically.** Detect and complete CAPTCHA challenges using the OMP `browser` or `computer` tool on the attached CMUX-TUI browser pane. Re-ground with a fresh observer result and browser snapshot before and after each CAPTCHA interaction. CAPTCHA alone must never trigger user escalation, a `needs_user` outcome, or a blocked run. Record the CAPTCHA detection, resolution method, and outcome in the private ledger.
 - **Live evidence must match the claim.** Browser success requires a real headed browser run on the selected application. Resume success requires a real compiled and inspected PDF. Pipeline success requires the persistent OMP loop to consume a real SQLite row.
 
 ## Assets to retain
@@ -63,7 +63,7 @@ These are the canonical resume baseline and must not be deleted while the new im
 
 ## Goal
 
-Given one application URL, a read-only job-description snapshot, and at least one applicant-evidence input (a local profile JSON, a source resume, or both), an OMP agent uses Playwright-backed DOM observation plus OMP `browser` tool actions on the visible CMUX browser surface to complete every user-facing field across the application flow, upload the configured resume, resolve validation errors and dynamically added controls, and stop only when the application is submitted.
+Given one application URL, a read-only job-description snapshot, and at least one applicant-evidence input (a local profile JSON, a source resume, or both), an OMP agent uses Playwright-backed DOM observation plus OMP `browser` tool actions on the attached CMUX-TUI browser pane to complete every user-facing field across the application flow, upload the configured resume, resolve validation errors and dynamically added controls, and stop only when the application is submitted.
 
 The target is one concrete application, not a reusable ATS platform and not a backlog worker.
 
@@ -82,7 +82,7 @@ The implementation may choose its file layout, but it must expose one machine-re
 | `run_artifact_dir` | Private location for observations, field ledger, screenshots, and completion evidence. |
 | `browser_mode` | Headed and visible; the same session remains available for OMP review and submission. |
 | `observer` | Playwright/DOM observer that emits a normalized snapshot without deciding answers. |
-| `action_driver` | OMP `browser` tool on the visible CMUX browser surface, with pinned CLI and the OMP `computer` tool only as ordered fallbacks; never an autonomous Playwright form-filler. |
+| `action_driver` | OMP `browser` tool on the attached CMUX-TUI browser pane, with pinned CLI and the OMP `computer` tool only as ordered fallbacks; never an autonomous Playwright form-filler. |
 | `submit_policy` | Fixed to `omp_agent`. Submission is automated after audit. |
 
 At least one of `applicant_profile_path` or `source_resume_path` is required; both are allowed. `resume_upload_path` remains separately required and may point to the same file as `source_resume_path`.
@@ -90,6 +90,19 @@ At least one of `applicant_profile_path` or `source_resume_path` is required; bo
 When a profile JSON is used, it must be able to represent at least contact details, address, links, education, employment, skills, availability, location/relocation preferences, compensation preferences, work authorization and sponsorship, voluntary demographic choices, reusable yes/no answers, and user-authored explanations. Values remain local and may be omitted until a page actually asks for them.
 
 ## Browser authority
+### CMUX-TUI browser-pane attachment and lifecycle
+
+The browser pane is an attachment to the CMUX-TUI runtime, not a second browser. One mux session owns one shared Chrome/CDP runtime, and each active job owns exactly one target in that runtime. The immutable binding is `{ muxSessionId, targetId, cdpUrl, profileMode: "persistent", userDataDir? }`; reject any target/session mismatch. `userDataDir` is optional but, when present, must be an owner-private session-scoped persistent profile. Never use the OS-default Chrome profile or `browser.ephemeral` for a durable application run.
+
+Derive the configured CMUX-TUI CDP endpoint in this order: `CMUX_MUX_CDP_URL`, then `browser.cdp_url`, then configured discovery. Require a loopback `ws://` or `http://` endpoint with no credentials or fragment; reject `wss://` and every non-loopback endpoint. Do not implement a custom CDP client: OMP `browser` remains the action driver.
+
+Attach exactly once with the OMP browser tool, selecting the job target on the shared runtime:
+
+```json
+{"action":"open","name":"job-<job-id>","app":{"cdp_url":"<cdpUrl>","target":"<targetId>"}}
+```
+
+This is the concrete `xd://browser` `browser.open` payload. After it succeeds, reuse the named tab through `browser.run`; do not call `browser.open` again for the same binding. Every request and result is fenced by `muxSessionId`, `targetId`, and `observationId`. Acceptance that an action was queued is not evidence that it took effect: after every queued action or batch, take a fresh OMP browser snapshot and observer result, accept that observation, and use it to prove retention before the next action. Close only the job target after the terminal outcome and evidence/database state are durably persisted; never close the shared Chrome runtime.
 
 OMP acts by default, without per-job or per-action permission, to:
 
@@ -132,7 +145,7 @@ After step 5, persist the user's answer and immediately resume the loop. Do not 
 3. Merge the observation into a field ledger. Preserve completed fields and add newly revealed fields.
 4. Call `selectSafeApplicationBatch` for the latest observation. It may select up to three independent ordinary text controls; invalid/retry work, newly revealed or dependency-marked fields, uploads, custom widgets, choices/toggles, navigation, and final submission are always single-action units.
 5. Resolve every planned answer using the precedence above before mutation. A multi-field batch proceeds only when every answer resolves deterministically from memory, profile, or resume. Agent inference, missing restricted facts, and user escalation return to single mode.
-6. Map every planned field to one exact live control on the visible CMUX OMP `browser` surface and perform the interactions in order. Stop on the first non-success or unexpected browser state. Use pinned CLI only for a control-specific fallback and computer input only for a remaining native browser/OS interaction.
+6. Map every planned field to one exact live control on the attached CMUX-TUI OMP `browser` pane and perform the interactions in order. Stop on the first non-success or unexpected browser state. Use pinned CLI only for a control-specific fallback and computer input only for a remaining native browser/OS interaction.
 7. Publish all actually attempted routine fills atomically through `recordActionBatch`; publish a lone or hazardous action through `recordAction`. Evidence recording remains inside coordinator APIs.
 8. Re-observe immediately after the batch or single action. Confirm every attempted value was retained, capture validation feedback, and detect DOM changes. Diagnose and retry only the failed/stale field.
 9. When the current page has no unresolved fields, activate only the non-final Next/Continue control as a single action, then repeat from step 2.
@@ -162,7 +175,7 @@ Do not build a database, event-sourcing layer, custom browser protocol, or distr
 - [x] Select one real application URL as the sole Phase 1 target.
 - [x] Implement a normalized Playwright DOM observer for the controls actually present on that application.
 - [x] Expose observation data to the OMP agent without embedding answer policy in the observer.
-- [x] Drive all field interactions through the OMP `browser` tool on the visible CMUX browser surface, with pinned CLI and the OMP `computer` tool as ordered fallbacks.
+- [x] Drive all field interactions through the OMP `browser` tool on the attached CMUX-TUI browser pane, with pinned CLI and the OMP `computer` tool as ordered fallbacks.
 - [x] Implement the field ledger and answer-source precedence.
 - [x] Implement re-observation, DOM diffing, value-retention checks, and validation-error recovery.
 - [x] Handle dynamically revealed fields and all non-final pages encountered by the selected application.
@@ -202,7 +215,7 @@ headed live run captures post-submit evidence.
 
 ## OMP kickoff prompt
 
-> Use `skills/application-prep/SKILL.md` as the canonical Phase 1 operating procedure. Start or recover the private run coordinator, then use `selectSafeApplicationBatch` to fill conservative independent routine text fields from one observation and retain them after one fresh chained observation. Keep newly revealed/dependency fields, invalid/retry work, uploads, widgets, choices, navigation, and submission single-action. Use the OMP `browser` tool on the visible CMUX surface; consult pinned CLI guidance only after the exact browser helper fails. Submit only through `prepareSubmission -> beginFinalSubmit -> browser click -> fresh observation -> completeFinalSubmit -> finalizeRun`.
+> Use `skills/application-prep/SKILL.md` as the canonical Phase 1 operating procedure. Start or recover the private run coordinator, attach once to the configured CMUX-TUI CDP endpoint with the `xd://browser` `browser.open` payload and exact target selection, then reuse `browser.run` on that target. Use `selectSafeApplicationBatch` to fill conservative independent routine text fields from one observation and retain them only after one fresh chained observation and browser snapshot. Keep newly revealed/dependency fields, invalid/retry work, uploads, widgets, choices, navigation, and submission single-action. Queue acceptance is not effect; only fresh observer/snapshot evidence proves retention. Consult pinned CLI guidance only after the exact browser helper fails. Submit only through `prepareSubmission -> beginFinalSubmit -> browser click -> fresh observation -> completeFinalSubmit -> finalizeRun`.
 
 ---
 
@@ -352,18 +365,18 @@ Operational failures remain active/retryable until diagnosed. An error or sensit
 - [ ] Verify from run evidence that the uploaded file hash matches the selected canonical artifact.
 - [ ] Demonstrate the complete source-to-backlog-to-resume-to-browser flow on a real queued job.
 
-## Persistent OMP and CMUX operating model
+## Persistent OMP and CMUX-TUI browser-pane operating model
 
 OMP—not a custom CLI daemon—is the long-running orchestrator.
 
 Recommended supervised layout:
 
 - **Control pane:** the persistent OMP session, active phase contract, current job ID, and loop state.
-- **Browser pane/tab:** the headed application session owned by the current run and driven primarily through the OMP `browser` tool on its visible CMUX browser surface, with the OMP `computer` tool available only as native-UI fallback.
+- **Browser pane/tab:** the headed application target attached to the shared CMUX-TUI runtime and driven primarily through the OMP `browser` tool, with the OMP `computer` tool available only as native-UI fallback.
 - **Inspection pane:** concise SQLite/job/run status and private artifact paths when diagnosis is needed.
 - **Review workspace:** a completed pre-submit browser may be parked for OMP review without being mistaken for a failed or active fill loop.
 
-Start with `max_active_jobs = 1`. Increase concurrency only after one-at-a-time recovery and browser ownership are proven. Separate CMUX workspaces may isolate later concurrent jobs, but SQLite remains the source of durable claim ownership.
+Start with `max_active_jobs = 1`. Each CMUX-TUI mux session has one shared Chrome/CDP runtime and each active job has one target. Increase concurrency only after one-at-a-time recovery and target ownership are proven; separate mux sessions may isolate later concurrent jobs, but SQLite remains the source of durable claim ownership. Close only a target after persistence, never the shared runtime.
 
 The persistent agent loop is:
 
@@ -421,7 +434,7 @@ Phase 3 is complete only when the persistent supervised system demonstrates all 
 - [ ] The Phase 1 loop completes and verifies every reachable application field before submission.
 - [ ] `prepareSubmission(session, { finalRef })` authorizes the exact current final candidate ref, then `beginFinalSubmit(session)` durably records the attempt before the browser click.
 - [ ] OMP clicks the returned ref, `completeFinalSubmit` records the observed outcome, canonical evidence is validated against that job, and SQLite derives `completed` plus the actual attempt count.
-- [ ] The headed browser remains available in the CMUX workspace long enough for OMP to capture the submission outcome.
+- [ ] The headed browser target remains available in the CMUX-TUI browser pane long enough for OMP to capture the submission outcome.
 - [ ] OMP returns to backlog inspection after persistence succeeds.
 
 ## OMP kickoff prompt

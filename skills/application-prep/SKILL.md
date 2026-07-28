@@ -39,7 +39,15 @@ Never use an em dash (`—`) in any generated, adapted, or filled application re
 
 ## Canonical OMP browser quick start
 
-After a new session, handoff, or model change, read only this section plus the active durable run record before touching the page. Do not reread `PROJECT_HANDOFF.md` or the complete roadmap during routine startup, and do not reconstruct browser mechanics from conversation history. Reuse the same visible CMUX browser surface and named OMP `browser` tab when alive; call `browser.open` once only when needed, then reuse `browser.run`.
+After a new session, handoff, or model change, read only this section plus the active durable run record before touching the page. Do not reread `PROJECT_HANDOFF.md` or the complete roadmap during routine startup, and do not reconstruct browser mechanics from conversation history. Reuse the same attached CMUX-TUI browser pane, target, and named OMP `browser` tab when alive; call `browser.open` exactly once for a new binding, then reuse `browser.run`.
+CMUX-TUI browser-pane attachment is explicit: one mux session has one shared Chrome/CDP runtime and one active job has one target. Resolve `cdpUrl` from `CMUX_MUX_CDP_URL`, then `browser.cdp_url` or configured discovery. Require a loopback `ws://` or `http://` endpoint without credentials or fragments; reject `wss://`, non-loopback URLs, the OS-default Chrome profile, and `browser.ephemeral` for durable runs. Use the immutable binding `{ muxSessionId, targetId, cdpUrl, profileMode: "persistent", userDataDir? }`; reject target/session mismatches. `userDataDir` is optional and, when supplied, is owner-private and session-scoped.
+Attach the OMP tab with this concrete `xd://browser` `browser.open` payload, selecting the exact target:
+
+```json
+{"action":"open","name":"job-<job-id>","app":{"cdp_url":"<cdpUrl>","target":"<targetId>"}}
+```
+
+After attachment, use `browser.run` on that named tab for navigation, snapshots, and actions. OMP remains the action driver; do not add a custom CDP client. Fence every request/result with `muxSessionId`, `targetId`, and `observationId`. A queued-action acknowledgement is not an effect: after every queued action or batch, take a fresh OMP browser snapshot and observer result, accept the observation, and prove retention before proceeding. Close only the job target after terminal evidence and durable persistence; never close the shared Chrome/runtime.
 
 The observer supplies policy-free field state and ledger/evidence refs. The OMP `browser` snapshot supplies live action selectors. Observer refs are never browser selectors. For each planner batch:
 
@@ -49,7 +57,7 @@ The observer supplies policy-free field state and ledger/evidence refs. The OMP 
 4. Perform each planned helper action in order, recording each semantic outcome against the shared pre-action observation. Stop early on any unexpected state.
 5. Re-run the observer once, accept its diff, and verify retention for every attempted field before planning another batch.
 
-Primary OMP `browser` tool mechanics on the visible CMUX browser surface:
+Primary OMP `browser` tool mechanics on the attached CMUX-TUI browser pane:
 
 ```js
 await tab.fill("aria-ref=eNN", exactText);                 // text/textarea; replaces the value
@@ -66,23 +74,23 @@ For resume upload, map the observer file field to exactly one actual `<input typ
 
 Fallback order is strict:
 
-1. OMP `browser` helper on the visible CMUX browser surface.
+1. OMP `browser` helper on the attached CMUX-TUI browser pane.
 2. Pinned Playwright CLI only when the matching browser helper cannot operate the exact control. Use a fresh CLI snapshot and its current `eNN` ref. Text fallback is exactly `playwright-cli fill eNN "<exact text>"`; chooser fallback is click the uniquely mapped upload trigger and immediately run `playwright-cli upload <session.runMetadata.resume_upload_path>`, using that verified canonical absolute path.
-3. The OMP `computer` tool only when it is available and the remaining interaction is a native browser/OS surface neither browser nor pinned CLI can operate, such as a still-open file chooser. Take a fresh DOM/browser snapshot and a fresh desktop screenshot first, act on the same visible CMUX browser surface, then immediately re-observe through the coordinator.
+3. The OMP `computer` tool only when it is available and the remaining interaction is a native browser/OS surface neither browser nor pinned CLI can operate, such as a still-open file chooser. Take a fresh DOM/browser snapshot and a fresh desktop screenshot first, act on the same attached CMUX-TUI browser pane, then immediately re-observe through the coordinator.
 
-Never use `tab.evaluate`, pinned-CLI evaluation, or injected page JavaScript to set a value, attach a file, click Submit, or bypass a UI control. Evaluation remains observation-only. Regardless of which physical mechanic succeeds, record every semantic action; after a safe routine batch, perform one fresh observer → `acceptObservation` → batch retention chain. Controls excluded from batching retain the single-action chain.
+Never use `tab.evaluate`, pinned-CLI evaluation, or injected page JavaScript to set a value, attach a file, click Submit, or bypass a UI control. Evaluation remains observation-only. Regardless of which physical mechanic succeeds, record every semantic action; a queued-action acknowledgement is not proof of effect, so after every action or safe routine batch perform one fresh OMP browser snapshot and observer → `acceptObservation` → batch retention chain. Controls excluded from batching retain the single-action chain.
 
 ## Fixed authority and privacy boundaries
 
 - Treat `src/phase1/contract.mjs`, `profile.mjs`, `observer.js`, `ledger.mjs`, `audit.mjs`, and `evidence.mjs` as executable authority.
 - Consult `skills/playwright-cli/SKILL.md` only when the primary OMP browser helper has concretely failed on an exact control. Do not load it during routine startup, and do not modify the pinned skill.
 - Generic examples in the retained Playwright skill are not application mechanics when they conflict with this skill. In particular, its targetless `type`, Enter/`--submit`, and generic upload examples do not override this application skill’s browser-first, exact-selector, no-submit, ordered-fallback rules.
-- OMP `browser` helpers on the same visible CMUX browser surface own ordinary browser actions. Pinned Playwright CLI is the first fallback for a control the browser helper cannot operate; the OMP `computer` tool is the final native browser/OS fallback when available. Every path must follow the quick-start mapping, recording, re-observation, and retention rules.
+- OMP `browser` helpers on the attached CMUX-TUI browser pane own ordinary browser actions. Pinned Playwright CLI is the first fallback for a control the browser helper cannot operate; the OMP `computer` tool is the final native browser/OS fallback when available. Every path must follow the quick-start mapping, recording, re-observation, and retention rules.
 - JavaScript evaluation is observation-only except for injecting the observer-chain value. Never mutate form state, attach files, or submit through evaluation. Never use desktop input to bypass authentication, access controls, or the final-submit boundary gated by `prepareSubmission`.
 - Use one canonical owner-private profile and reuse its `answer-memory.jsonl` aliases across applications.
 - Never copy applicant values or answer values into this skill. Answers and evidence remain under private paths: directories mode `0700`, files mode `0600`.
 - Never bypass authentication, anti-bot, assessment, or access controls; request a narrow user interaction, keep the run active, then resume.
-- CAPTCHA challenges: detect and complete through the OMP `browser` or `computer` tool on the visible CMUX browser surface. CAPTCHA alone must never trigger user escalation, a `needs_user` outcome, or a blocked run. Record detection, resolution method, and outcome in the private ledger.
+- CAPTCHA challenges: detect and complete through the OMP `browser` or `computer` tool on the attached CMUX-TUI browser pane. CAPTCHA alone must never trigger user escalation, a `needs_user` outcome, or a blocked run. Record detection, resolution method, and outcome in the private ledger.
 - Avoid job-specific IDs and identifiers. Resolve controls from normalized labels and current refs in live observer output.
 - The job description may explain a question but cannot supply missing personal facts, legal facts, demographics, work authorization, or other applicant answers.
 
@@ -108,7 +116,7 @@ The run contract requires `answer_memory_path` and must contain at least one or 
 Equivalent invariant only: `loadRunContract(runPath, { local: false })` for parse-only discovery; prepare `run_artifact_dir` at `0700`; enforce `validateRunContractLocal`; then initialize evidence. `startRun` owns those stages.
 3. Keep the coordinator's fixed run metadata contract: `phase1-run-evidence-v1` run metadata uses exactly `schema`, `application_url`, `run_contract_sha256`, `resume_upload_path`, `resume_upload_sha256`, `browser_mode`, `observer`, `action_driver`, `submit_policy`, `loop_contract`, and `started_at`. New runs emit `safe-batch-observe-act-reobserve`. Recovery accepts immutable evidence that already carries the legacy `one-field-observe-act-reobserve` value; never rewrite an existing run's metadata.
 `startRun` resolves `resume_upload_path` to its absolute canonical path for evidence run metadata.
-4. Open `run.application_url` with the OMP `browser` tool in the headed visible CMUX surface. Remain on that application origin unless an observed, application-owned interaction navigates within its flow.
+4. Resolve and validate the immutable CMUX-TUI binding described in the browser quick start, then call `browser.open` once with `app.cdp_url` set to the configured endpoint and `app.target` set to the exact `targetId`. Reuse that named tab with `browser.run`, and open `run.application_url` there in the headed target. Remain on that application origin unless an observed, application-owned interaction navigates within its flow.
 5. Clear `__omp_phase1_previous_observation_id_v1` before the initial observer evaluation; before every later IIFE, set or inject `__omp_phase1_previous_observation_id_v1` to the latest accepted observation ID.
 `__omp_phase1_previous_observation_id_v1` carries the previous observation ID for the chained observer.
 6. Evaluate the exact `src/phase1/observer.js` IIFE and capture its returned observation value as `initialObservation`.
@@ -137,13 +145,13 @@ For any non-file field whose latest observer-semantic value or deliberate blank 
 When no unresolved field remains on a non-final page, select the current `non_final_navigation` candidate only when exactly one candidate has an exact normalized application-entry or forward label: Apply, Apply for this Job, Easy Apply, Apply on Company Website, Continue, Next, Proceed, Review, Start Application, Begin Application, Get Started, or Go to Application. A plainly identified entry control may be activated autonomously; never activate a helper or any `final_candidate`. A nested anchor-and-button pair is one entry control only when both candidates have the same exact allowed label, the anchor contains the button, and the anchor has one same-origin application-path `href`; bridge and activate the anchor, never the nested button. Otherwise require exactly one candidate. Activate the uniquely bridged live ref, then publish `recordAction(session, { action: 'non_final_navigation', field_id: null, ref: current ref, observation_id: latest observation_id, outcome })` and re-observe through `acceptObservation(session, observation)`.
 
 Record each retry before correcting and retrying. A failed routine fill at the end of a multi-action batch is the terminal item in the same atomic `recordActionBatch`; a standalone failure uses `recordAction(session, attempt)`. Set `retry_of` to the prior attempt's nonnegative integer sequence/index, never its string `action_id`; never overwrite or hide the failure. After a batch stops, accept a fresh observation before any further resolution or action.
-When a final-action attempt is rejected or leaves the application page unchanged, do not classify the job as closed or unavailable and do not close its browser surface. Capture the outcome, obtain a fresh chained observation, identify the validation or unresolved-control cause, resolve and retain it through the planner's single-action repair mode, then return to the pre-submit boundary. Only explicit live evidence that the posting is unavailable may end the run as closed.
+When a final-action attempt is rejected or leaves the application page unchanged, do not classify the job as closed or unavailable and do not close its CMUX-TUI target. Capture the outcome, keep the target and pane active, obtain a fresh chained observation, identify the validation or unresolved-control cause, resolve and retain it through the planner's single-action repair mode, then return to the pre-submit boundary. Only explicit live evidence that the posting is unavailable may end the run as closed.
 
 For every null-digest semantic choice or deliberate blank, `source` must be only `memory`, `profile`, or `user`; never use `resume` or `supported_inference`.
 
 ## UI mechanics recipes
 
-These recipes select mechanics, not applicant answers. Always operate from the latest observer output and retain its current refs for ledger/evidence identity. Use a uniquely mapped live OMP `browser` selector on the visible CMUX browser surface and the helper matching the control. Pinned CLI refs are fallback-only; targetless pinned CLI `upload <absolute path>` is allowed only immediately after its uniquely mapped trigger has armed a chooser. The OMP `computer` tool is last and only for a remaining native browser/OS interaction.
+These recipes select mechanics, not applicant answers. Always operate from the latest observer output and retain its current refs for ledger/evidence identity. Use a uniquely mapped live OMP `browser` selector on the attached CMUX-TUI browser pane and the helper matching the control. Pinned CLI refs are fallback-only; targetless pinned CLI `upload <absolute path>` is allowed only immediately after its uniquely mapped trigger has armed a chooser. The OMP `computer` tool is last and only for a remaining native browser/OS interaction.
 
 ### Ordinary editable controls
 
@@ -169,7 +177,7 @@ The retention proof fields are {
 - `file_name`
 }
 
-Primary path: map the observer file field to exactly one actual `<input type=file>` in the same frame and field/form group, including its hidden native input when applicable; derive and uniquely verify its exact CSS selector; then run `await tab.uploadFile(exactFileInputCss, session.runMetadata.resume_upload_path)` through the OMP `browser` tool on the visible CMUX browser surface. Inline `aria-ref=eNN` is not supported by `tab.uploadFile`. Do not click or arm a chooser first. If the browser helper cannot operate the exact file input, use the pinned-CLI chooser fallback with that same verified canonical absolute path: map one visible field-associated upload trigger, click its current CLI ref, then immediately run `playwright-cli upload <session.runMetadata.resume_upload_path>`. If that also cannot complete a still-open native chooser and the OMP `computer` tool is available, re-ground from fresh browser and desktop snapshots and operate that chooser on the same visible CMUX browser surface. Stop on missing or ambiguous inputs/triggers. None of these paths creates an intermediate semantic action; record only the upload result.
+Primary path: map the observer file field to exactly one actual `<input type=file>` in the same frame and field/form group, including its hidden native input when applicable; derive and uniquely verify its exact CSS selector; then run `await tab.uploadFile(exactFileInputCss, session.runMetadata.resume_upload_path)` through the OMP `browser` tool on the attached CMUX-TUI browser pane. Inline `aria-ref=eNN` is not supported by `tab.uploadFile`. Do not click or arm a chooser first. If the browser helper cannot operate the exact input, use the ordered pinned-CLI or computer fallback.
 
 After the physical upload returns, build `uploadAttempt` against the pre-upload observer field/ref/observation with semantic action `upload` and its real success or failure. Publish it with `const uploaded = await recordAction(session, uploadAttempt); ledger = uploaded.ledger;`, then obtain a fresh observation and publish `const accepted = await acceptObservation(session, observation); ledger = accepted.ledger;`. Record a failed attempt and retry through the ordered mechanics before remapping; never claim success when the upload failed.
 
@@ -225,7 +233,7 @@ Answer the parent first, re-observe, inventory all newly reachable questions, an
 1. Capture `finalObservation` through the normal chained observer path and publish it with `const finalAccepted = await acceptObservation(session, finalObservation); ledger = finalAccepted.ledger;`.
 2. Run `const retention = await verifyRetention(session, proofs); ledger = retention.ledger;` with the complete field-ID upload proof map. Stop unless `retention.ok` is true and `retention.retry_required` is false.
 3. Select the visible Submit control's current ref from the final observation. Call `const authorized = await prepareSubmission(session, { finalRef });` and require `authorized.authorized` to be true and `authorized.authorizedFinalRef === finalRef`.
-4. Before any browser click, call `const begun = await beginFinalSubmit(session);` and require `begun.ref === finalRef`. Map `begun.ref` to exactly one live browser selector, then activate it with `tab.click(finalSelector)` through the OMP `browser` tool on the visible CMUX browser surface. If the browser helper cannot operate the exact control, pinned CLI may click its freshly mapped current ref; the OMP `computer` tool must never cross the final-submit boundary.
+4. Before any browser click, call `const begun = await beginFinalSubmit(session);` and require `begun.ref === finalRef`. Map `begun.ref` to exactly one live browser selector, then activate it with `tab.click(finalSelector)` through the OMP `browser` tool on the attached CMUX-TUI browser pane. If the browser helper cannot operate the exact control, pinned CLI may click its freshly mapped current ref; the OMP `computer` tool must never cross the final-submit boundary.
 5. Re-observe the resulting page even when the click helper reports a timeout or error, then call `completeFinalSubmit(session, { attemptId: begun.attemptId, outcome, errorCode })` exactly once with the observed terminal outcome. Never click before `beginFinalSubmit`, and never leave a begun attempt unresolved. A failed or blocked attempt requires a fresh chained observation and a fresh `prepareSubmission` audit before retrying; never reuse an authorization across observations.
 6. After one final-submit attempt succeeds, capture the post-submit screenshot into the owner-private artifact directory and call `const finalized = await finalizeRun(session, { screenshotPath });`. Require `finalized.finalized` to be true. Persist `completed` only from the validated canonical `completion.json`; SQLite derives every submission attempt and the exact count from its paired journal events.
 7. Leave the headed browser open after submission long enough to capture post-submit evidence. Report only private artifact paths and blockers, never applicant values or answer contents.
@@ -234,7 +242,7 @@ Answer the parent first, re-observe, inventory all newly reachable questions, an
 After finalization or when a run cannot proceed, persist exactly one terminal outcome:
 
 - **`completed`** — Every reachable field is deliberate, valid, and retained; the final audit passes with no blockers; OMP begins, performs, and resolves the final action after `prepareSubmission` authorizes it; and validated canonical `completion.json` evidence is persisted. This is the only successful outcome and requires no human approval.
-- **`needs_user`** — A required truthful personal fact is missing from profile, memory, and resume, and agent inference is prohibited (sensitive field, identity, authorization, protected-class, salary/compensation, date, credential, or other restricted category). The browser surface and evidence remain active; the run can resume after the user supplies the fact. Also use when an observer-covered required field cannot be resolved because no answer source is available.
+- **`needs_user`** — A required truthful personal fact is missing from profile, memory, and resume, and agent inference is prohibited (sensitive field, identity, authorization, protected-class, salary/compensation, date, credential, or other restricted category). The CMUX-TUI target and pane plus evidence remain active; the run can resume after the user supplies the fact. Also use when an observer-covered required field cannot be resolved because no answer source is available.
 - **`blocked`** — The page presents a hard safety blocker: authentication, non-CAPTCHA anti-bot challenge, assessment/integrity check, access-control, or an inaccessible frame. These require narrow human resolution and must never be bypassed. Also use when an unknown visible control cannot be resolved or a submission was observed outside the canonical protocol; record the latter as `noncanonical_submission_receipt` with an unknown count represented as `NULL`.
 - **`closed`** — Only explicit live evidence that the posting is unavailable: HTTP 404/410, a page-level "job not found" or "position filled/closed" message, or a redirect away from the application. Never use for form validation failures, retention errors, or rejected submissions.
 - **`failed`** — A bounded infrastructure or evidence-integrity failure that cannot be recovered by retry (e.g., evidence store corruption, unrecoverable I/O error). Routine form completion debt, validation errors, and non-accepted final actions are never `failed`.
@@ -247,7 +255,7 @@ After finalizing and persisting the terminal outcome:
 
 1. Confirm evidence and database state are complete.
 2. Record any newly supplied user answers in private answer memory.
-3. Close only the completed job’s browser surface.
+3. Close only the completed job's target after evidence and database state are durably persisted. Never close the shared Chrome/CDP runtime or another job's target.
 4. Inspect the queue and immediately begin the next eligible job.
 
 Do not create a handoff merely because one job finished. Handoff only when:
@@ -256,4 +264,4 @@ Do not create a handoff merely because one job finished. Handoff only when:
 - the model or session is intentionally changing;
 - an unresolved external blocker requires pausing the run.
 
-A handoff must cite the claimed job, persisted outcome, private workspace, current visible CMUX browser surface and named OMP `browser` tab, latest accepted observation ID, ledger/evidence paths, verified resume-upload path and retention state, latest verification, blocker, and single next action. The receiving agent must reread `Handoff-safe OMP browser quick start` before any browser action instead of reconstructing mechanics from the handoff narrative.
+A handoff must cite the claimed job, persisted outcome, private workspace, current attached CMUX-TUI target and named OMP `browser` tab, latest accepted observation ID, ledger/evidence paths, verified resume-upload path and retention state, latest verification, blocker, and single next action. The receiving agent must reread `Handoff-safe OMP browser quick start` before any browser action instead of reconstructing mechanics from the handoff narrative.

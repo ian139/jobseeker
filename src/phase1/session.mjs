@@ -164,7 +164,6 @@ const STANDARD_PROFILE_ALIASES = Object.freeze({
   'last name': 'Last Name',
   'email address': 'Email',
   'phone number': 'Phone',
-  country: 'profile.address.country',
 });
 
 function normalizeClassificationText(text) {

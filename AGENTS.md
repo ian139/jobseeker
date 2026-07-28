@@ -2,22 +2,24 @@
 
 ## Project Overview
 
-This repository implements Phase 1 application execution, the completed Phase 2 per-job resume generator, and the active Phase 3 SQLite backlog workflow. Phase 3 is explicitly authorized for persistent supervised OMP operation with exactly one active job. The durable lifecycle repair record and current SQLite state are the active implementation evidence; unchecked live gates in `TODO.md` remain evidence required for completion claims and are not marked complete by backlog authorization.
+This repository implements Phase 1 application execution, the completed Phase 2 per-job resume generator, and the active Phase 3 Greenhouse/Ashby-only SQLite backlog workflow. Phase 3 is explicitly authorized for persistent supervised OMP operation with exactly one active job. Deterministic code owns source/platform classification, normalized job binding, resume preparation, and platform action mechanics; OMP/model reasoning is limited to oversight/diagnosis and allowed unresolved response inference. Unchecked live gates in `TODO.md` remain required evidence for completion claims.
 
 `TODO.md` is the scope and safety authority. `PROJECT_HANDOFF.md` is historical evidence only; verify its paths and claims against the active tree.
 
 ## Architecture & Data Flow
 
 ```text
-job source + SQLite backlog
-  -> persistent supervised OMP session claims one job
-  -> verified job-specific resume generation
-  -> private run contract + profile/memory + resume
+Greenhouse/Ashby source payload + SQLite backlog
+  -> exact platform classification and normalized bound snapshot
+  -> deterministic verified job-specific resume generation
+  -> atomic full-snapshot claim and private run workspace
   -> policy-free DOM observer
-  -> OMP answer resolution and browser action
-  -> immutable ledger + retention and completion audit
-  -> canonical private evidence + audited OMP submission
-  -> durable SQLite outcome + next backlog inspection
+  -> deterministic platform action plan
+  -> OMP browser action and fresh retention proof
+  -> optional model inference for unresolved non-sensitive response content
+  -> immutable ledger, completeness audit, and audited submission
+  -> canonical private evidence + durable SQLite outcome
+  -> next supported backlog inspection
 ```
 
 - `src/phase1/contract.mjs` and `profile.mjs` validate fixed run settings, secure local inputs, applicant data, and append-only verified answer memory.
@@ -27,12 +29,15 @@ job source + SQLite backlog
 `src/phase1/evidence.mjs` publishes bounded, owner-private JSON/JSONL artifacts, file identities, an action journal, and a submission completion report.
 OMP performs browser actions. Final submission is automated by OMP after the completeness audit passes.
 - `src/phase1/backlog-runner.mjs` and `migrations/004-durable-active-runs.sql` own atomic claims, one-active-run enforcement, leases, restart recovery, same-run `needs_user` continuation, workspace binding, and canonical terminal persistence. OMP remains the persistent loop.
+- `src/phase1/platforms.mjs` is the fail-closed Greenhouse/Ashby registry, normalized payload extractor, and deterministic platform action planner. It rejects every unsupported or malformed application route and never performs browser mutation.
+- `src/phase1/job-source.mjs` owns supported ingestion, canonical URL/source deduplication, normalized description hashes, bound queue reads, and unsupported-row quarantine. `migrations/005-platform-job-snapshots.sql` refuses active-run rebuilds, preserves terminal history, and quarantines all legacy nonterminal rows until re-ingestion.
+- `src/phase1/preparation.mjs` composes recovery with persisted answer-memory binding, description-digest-keyed staging, offline canonical resume generation/validation, source-timestamp-inclusive full-snapshot claims, and idempotent workspace creation before browser work.
 
 ## Key Directories
 
 | Path | Purpose |
 | --- | --- |
-| `src/phase1/` | Active Phase 1 contracts, observer, ledger, audit, and evidence implementation. |
+| `src/phase1/` | Active contracts, Greenhouse/Ashby source/platform pipeline, backlog preparation, observer, ledger, audit, and evidence implementation. |
 | `tests/` | Active Node contract, ledger/audit, and evidence regression tests. |
 | `private/` | Git-ignored, owner-private run inputs and evidence. Never expose or commit its contents. |
 | `skills/playwright-cli/` | Retained Playwright CLI 1.60.0 guidance and SHA-256 provenance. |
@@ -45,6 +50,8 @@ npm test
 node --test tests/ledger-audit.test.mjs
 node --test tests/contract-profile.test.mjs
 node --test tests/evidence.test.mjs
+node --test tests/platforms.test.mjs
+node --test tests/job-source-preparation.test.mjs
 node --check src/phase1/observer.js
 ```
 
@@ -57,6 +64,8 @@ There is no build step, linter, formatter, coverage threshold, Playwright test c
 - **State:** Return cloned, recursively frozen ledger/audit values. Preserve stable IDs, observation chains, and current refs; never mutate caller-owned state.
 - **Privacy:** Store raw applicant values only under `private/`. Public evidence structures use SHA-256 value digests, field IDs, sources, and outcomes—not profile values.
 - **Browser boundary:** Observation code may read DOM/ARIA state only. OMP resolves answers and performs each interaction. Never add JavaScript form mutation, submit calls, or answer policy to the observer.
+- **Supported platforms:** Claimable work is restricted to exact Greenhouse/Ashby routes classified by `platforms.mjs`. Never add a permissive hostname heuristic or let an unclassified queued row pass through a legacy claim path.
+- **Model boundary:** Deterministic code owns URL/payload identity, description extraction, queue order/binding, resume generation, control/option mechanics, retention, and audit. Model use is restricted to oversight/diagnosis and evidence-backed non-sensitive response content after memory/profile/resume resolution fails.
 - **CMUX-TUI browser-pane binding:** Resolve the configured endpoint from `CMUX_MUX_CDP_URL`, then `browser.cdp_url` or configured discovery. Require a loopback `ws://` or `http://` URL with no credentials or fragment; reject `wss://`, non-loopback endpoints, the OS-default Chrome profile, and `browser.ephemeral` for durable runs. Bind one immutable `{ muxSessionId, targetId, cdpUrl, profileMode: "persistent", userDataDir? }`; one CMUX-TUI mux session owns one shared Chrome/CDP runtime and each active job owns exactly one target. Reject target/session mismatches and fence every request/result with `muxSessionId`, `targetId`, and `observationId`.
 - **OMP browser attachment:** Attach the named OMP browser tab once with `xd://browser` payload `{"action":"open","name":"job-<job-id>","app":{"cdp_url":"<cdpUrl>","target":"<targetId>"}}`, then reuse that tab through `browser.run`; do not create a second attachment. Close only the job target after durable persistence, never the shared Chrome/runtime.
 - **OMP browser mechanics:** Use the OMP `browser` tool (`xd://browser`) on the attached CMUX-TUI browser pane as the primary action driver. Queue acceptance is not proof that an action took effect: after every queued action or batch, re-ground with a fresh observer result and browser snapshot, and use that observation ID to prove retention before acting again. Text entry is `tab.fill(selector, exactText)`—the answer is the second positional argument, and `--value` or any other option token must never be prefixed to it. Inline `"aria-ref=eNN"` selectors are supported for `tab.fill` and `tab.click`; native `tab.select` and `tab.uploadFile` require a uniquely verified exact CSS selector derived from observed control attributes. These helpers are browser actions, not page-JavaScript mutation. Use pinned Playwright CLI mechanics only when the browser helper cannot operate the exact control.
@@ -81,6 +90,11 @@ There is no build step, linter, formatter, coverage threshold, Playwright test c
 | `src/phase1/ledger.mjs` | Observation, diff, resolution, action, and retention contracts. |
 | `src/phase1/audit.mjs` | Final completeness and submission audit. |
 | `src/phase1/evidence.mjs` | Private evidence store and completion finalizer. |
+| `src/phase1/platforms.mjs` | Exact supported ATS registry, payload extraction, and frozen deterministic action plans. |
+| `src/phase1/job-source.mjs` | Supported ingestion, normalized bound snapshots, queue reads, and quarantine. |
+| `src/phase1/preparation.mjs` | Recovery-first description → resume → exact claim → workspace coordinator. |
+| `src/phase1/backlog-runner.mjs` | Atomic one-active-run lifecycle, leases, exact claim fencing, and persistence. |
+| `migrations/005-platform-job-snapshots.sql` | Greenhouse/Ashby snapshot columns, active-run migration guard, and legacy nonterminal quarantine. |
 | `tests/*.test.mjs` | Observable regression contracts for active Phase 1 behavior. |
 | `skills/playwright-cli/SOURCE.json` | Retained Playwright bundle version and recorded hashes. |
 | `schemas/application-decision.schema.json` | Canonical strict per-field decision output contract. |

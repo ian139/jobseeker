@@ -72,6 +72,7 @@ const CLAIM_KEY_SET = new Set([
   'now',
   'leaseSeconds',
   'maxActiveJobs',
+  'expectedJobBinding',
 ]);
 const WORKSPACE_KEY_SET = new Set([
   ...PREFLIGHT_KEYS,
@@ -407,6 +408,57 @@ function pathConfigFrom(value) {
 function normalizeOwner(value, code) {
   return requireString(value, code, { max: 256 });
 }
+function normalizeExpectedJobBinding(value) {
+  if (value === undefined) return undefined;
+  const allowed = new Set([
+    'platform',
+    'applicationUrl',
+    'title',
+    'company',
+    'location',
+    'description',
+    'descriptionSha256',
+    'sourcePostedAt',
+  ]);
+  assertExactKeys(value, allowed, 'E_EXPECTED_JOB_BINDING');
+  const applicationUrl = requireString(
+    value.applicationUrl,
+    'E_EXPECTED_JOB_BINDING',
+    { max: 16 * 1024 },
+  );
+  const platform = classifyApplicationUrl(applicationUrl);
+  if (platform === null || value.platform !== platform) fail('E_EXPECTED_JOB_BINDING');
+  const title = requireString(value.title, 'E_EXPECTED_JOB_BINDING', { max: 512 });
+  const company = requireString(value.company, 'E_EXPECTED_JOB_BINDING', { max: 512 });
+  const location = value.location === null
+    ? null
+    : requireString(value.location, 'E_EXPECTED_JOB_BINDING', { max: 512 });
+  const description = requireString(
+    value.description,
+    'E_EXPECTED_JOB_BINDING',
+    { max: 16 * 1024 },
+  );
+  if (typeof value.descriptionSha256 !== 'string'
+    || !SHA256_HEX.test(value.descriptionSha256)
+    || createHash('sha256').update(description).digest('hex') !== value.descriptionSha256) {
+    fail('E_EXPECTED_JOB_BINDING');
+  }
+  const sourcePostedAt = value.sourcePostedAt === null
+    ? null
+    : normalizeTimestamp(value.sourcePostedAt, 'E_EXPECTED_JOB_BINDING');
+  if (value.sourcePostedAt !== sourcePostedAt) fail('E_EXPECTED_JOB_BINDING');
+  return Object.freeze({
+    platform,
+    applicationUrl,
+    title,
+    company,
+    location,
+    description,
+    descriptionSha256: value.descriptionSha256,
+    sourcePostedAt,
+  });
+}
+
 function normalizeClaimOptions(options) {
   assertExactKeys(options, CLAIM_KEY_SET, 'E_CLAIM_OPTIONS');
   const ownerId = normalizeOwner(options.ownerId, 'E_OWNER_ID');
@@ -423,6 +475,7 @@ function normalizeClaimOptions(options) {
     && (typeof suppliedResumeHash !== 'string' || !SHA256_HEX.test(suppliedResumeHash))) {
     fail('E_RESUME_ARTIFACT_HASH');
   }
+  const expectedJobBinding = normalizeExpectedJobBinding(options.expectedJobBinding);
   return {
     ownerId,
     browserSessionId,
@@ -431,6 +484,7 @@ function normalizeClaimOptions(options) {
     maxActiveJobs,
     suppliedResumePath,
     suppliedResumeHash,
+    expectedJobBinding,
     preflightConfig: pathConfigFrom(options),
   };
 }
@@ -563,7 +617,7 @@ function normalizeRunRows(rows, emptyCode = 'E_RUN_RESULT') {
   return normalizeRunResultRow(rows[0]);
 }
 
-async function supportedQueuedJobs(database, jobId = undefined) {
+async function supportedQueuedJobs(database, jobId = undefined, expectedBinding = undefined) {
   const schemaRows = parseRows(
     await runSqlite(database, 'PRAGMA table_info(application_jobs);'),
     'E_JOB_SCHEMA',
@@ -582,7 +636,7 @@ async function supportedQueuedJobs(database, jobId = undefined) {
   const hasBindings = bindingCount === bindingColumns.length;
   const target = jobId === undefined ? '' : ` AND id = ${sqlLiteral(jobId)}`;
   const selection = hasBindings
-    ? `id, application_url, ${bindingColumns.join(', ')}`
+    ? `id, application_url, ${bindingColumns.join(', ')}, source_posted_at`
     : 'id, application_url';
   const rows = parseRows(
     await runSqlite(
@@ -595,7 +649,7 @@ async function supportedQueuedJobs(database, jobId = undefined) {
   for (const row of rows) {
     assertPlainRecord(row, 'E_JOB_CANDIDATES');
     const expectedKeys = hasBindings
-      ? new Set(['id', 'application_url', ...bindingColumns])
+      ? new Set(['id', 'application_url', ...bindingColumns, 'source_posted_at'])
       : new Set(['id', 'application_url']);
     const keys = Object.keys(row);
     if (keys.length !== expectedKeys.size || keys.some((key) => !expectedKeys.has(key))) {
@@ -607,33 +661,76 @@ async function supportedQueuedJobs(database, jobId = undefined) {
     });
     const platform = classifyApplicationUrl(applicationUrl);
     if (platform === null) continue;
+    let binding = {};
     if (hasBindings) {
       if (row.platform !== platform) continue;
-      requireString(row.job_title, 'E_JOB_CANDIDATES', { max: 512 });
-      requireString(row.job_company, 'E_JOB_CANDIDATES', { max: 512 });
-      if (row.job_location !== null) {
-        requireString(row.job_location, 'E_JOB_CANDIDATES', { max: 512 });
-      }
-      const description = requireString(row.job_description, 'E_JOB_CANDIDATES', {
+      const jobTitle = requireString(row.job_title, 'E_JOB_CANDIDATES', { max: 512 });
+      const jobCompany = requireString(row.job_company, 'E_JOB_CANDIDATES', { max: 512 });
+      const jobLocation = row.job_location === null
+        ? null
+        : requireString(row.job_location, 'E_JOB_CANDIDATES', { max: 512 });
+      const jobDescription = requireString(row.job_description, 'E_JOB_CANDIDATES', {
         max: 16 * 1024,
       });
       if (typeof row.job_description_sha256 !== 'string'
         || !SHA256_HEX.test(row.job_description_sha256)
-        || createHash('sha256').update(description).digest('hex') !== row.job_description_sha256) {
+        || createHash('sha256').update(jobDescription).digest('hex') !== row.job_description_sha256) {
         continue;
       }
+      const sourcePostedAt = row.source_posted_at === null
+        ? null
+        : normalizeTimestamp(row.source_posted_at, 'E_JOB_CANDIDATES');
+      if (row.source_posted_at !== sourcePostedAt) fail('E_JOB_CANDIDATES');
+      binding = {
+        platform,
+        jobTitle,
+        jobCompany,
+        jobLocation,
+        jobDescription,
+        jobDescriptionSha256: row.job_description_sha256,
+        sourcePostedAt,
+      };
     }
-    candidates.push(Object.freeze({ id, applicationUrl }));
+    if (expectedBinding !== undefined && (!hasBindings
+      || applicationUrl !== expectedBinding.applicationUrl
+      || binding.platform !== expectedBinding.platform
+      || binding.jobTitle !== expectedBinding.title
+      || binding.jobCompany !== expectedBinding.company
+      || binding.jobLocation !== expectedBinding.location
+      || binding.jobDescription !== expectedBinding.description
+      || binding.jobDescriptionSha256 !== expectedBinding.descriptionSha256
+      || binding.sourcePostedAt !== expectedBinding.sourcePostedAt)) {
+      continue;
+    }
+    candidates.push(Object.freeze({ id, applicationUrl, ...binding }));
   }
   return Object.freeze(candidates);
 }
 
 function supportedJobPredicate(candidates, alias = 'j') {
   if (candidates.length === 0) return '0';
-  return `(${candidates.map((candidate) => (
-    `(${alias}.id = ${sqlLiteral(candidate.id)}`
-      + ` AND ${alias}.application_url = ${sqlLiteral(candidate.applicationUrl)})`
-  )).join(' OR ')})`;
+  return `(${candidates.map((candidate) => {
+    const clauses = [
+      `${alias}.id = ${sqlLiteral(candidate.id)}`,
+      `${alias}.application_url = ${sqlLiteral(candidate.applicationUrl)}`,
+    ];
+    if (Object.hasOwn(candidate, 'platform')) {
+      clauses.push(
+        `${alias}.platform = ${sqlLiteral(candidate.platform)}`,
+        `${alias}.job_title = ${sqlLiteral(candidate.jobTitle)}`,
+        `${alias}.job_company = ${sqlLiteral(candidate.jobCompany)}`,
+        candidate.jobLocation === null
+          ? `${alias}.job_location IS NULL`
+          : `${alias}.job_location = ${sqlLiteral(candidate.jobLocation)}`,
+        `${alias}.job_description = ${sqlLiteral(candidate.jobDescription)}`,
+        `${alias}.job_description_sha256 = ${sqlLiteral(candidate.jobDescriptionSha256)}`,
+        candidate.sourcePostedAt === null
+          ? `${alias}.source_posted_at IS NULL`
+          : `${alias}.source_posted_at = ${sqlLiteral(candidate.sourcePostedAt)}`,
+      );
+    }
+    return `(${clauses.join(' AND ')})`;
+  }).join(' OR ')})`;
 }
 
 
@@ -844,7 +941,7 @@ export async function claimSpecificQueuedJob(database, jobId, options = {}) {
   }
   const db = databasePath(database);
   const expiresAt = leaseExpiry(normalized.now, normalized.leaseSeconds);
-  const candidates = await supportedQueuedJobs(db, jobId);
+  const candidates = await supportedQueuedJobs(db, jobId, normalized.expectedJobBinding);
   const rows = parseRows(
     await runSqlite(
       db,
@@ -866,6 +963,7 @@ export async function claimSpecificQueuedJob(database, jobId, options = {}) {
 /** Claim the next queued job and insert its applying run in one transaction. */
 export async function claimNextQueuedJob(database, options = {}) {
   const normalized = normalizeClaimOptions(options);
+  if (normalized.expectedJobBinding !== undefined) fail('E_CLAIM_OPTIONS');
   const preflight = await preflightBacklogRun(normalized.preflightConfig);
   if (normalized.suppliedResumePath !== undefined
     && normalized.suppliedResumePath !== preflight.resumeArtifactPath) {

@@ -7,6 +7,8 @@ description: Generate and verify one deterministic, source-backed, job-specific 
 
 Use only the canonical generator in `src/resume_generation/`. It is a narrow deterministic tool: it does not claim jobs, read or mutate SQLite, open a browser, upload files, or perform application/submission actions.
 
+For Phase 3, do not invoke this CLI independently or generate after a generic claim. Use `generateBoundResume` or, normally, `prepareOrRecoverSupportedRun` from `src/phase1/preparation.mjs`. The coordinator stages the exact normalized bound description, disables advisory/model environment, validates the returned manifest/PDF, rechecks the full job snapshot, and only then claims and binds the run. Recovery reuses the selected validated artifact without recompilation.
+
 ## Fixed inputs
 
 Invoke:
@@ -20,7 +22,7 @@ uv run --frozen python -m resume_generation.command \
   --compiler /opt/homebrew/bin/tectonic
 ```
 
-Send exactly one canonical UTF-8 JSON object on stdin, at most 64 KiB:
+Send exactly one canonical UTF-8 JSON object on stdin, at most 64 KiB, with no trailing newline or other whitespace:
 
 ```json
 {"company":"Example","description":"Exact private listing text","id":1,"location":null,"posted_at":null,"schema":"resume-job-v1","title":"Engineer"}
@@ -45,6 +47,7 @@ Success is one `generated-resume-v1` JSON object with exact keys `schema`, `job_
 6. Reopen all five files, validate the manifest self-digest, byte counts, SHA-256 values, job identity, compiler/template/skill/profile fingerprints, and PDF page count before accepting success.
 7. Reuse an existing artifact only when all five files and every identity check validate. Never repair or overwrite a tampered immutable artifact.
 8. Keep deterministic generation functional when optional advisor access is absent or fails. Advice may rank known evidence IDs only.
+9. Phase 3 model use never participates in resume content selection or generation. The only later model lane is allowed unresolved application-response inference/oversight.
 
 ## Prohibited surfaces
 

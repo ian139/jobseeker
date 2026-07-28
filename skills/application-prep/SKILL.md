@@ -14,8 +14,8 @@ Default to immediate execution, not deliberation. Routine execution has priority
 For every application, use the canonical operational path:
 
 ```text
-recover-or-claim
-  -> validate job and resume binding
+prepare-or-recover-supported-run
+  -> validate exact supported job and resume binding
   -> observe
   -> resolve and execute one safe batch of independent routine fields
   -> re-observe, retain, and repair
@@ -24,6 +24,20 @@ recover-or-claim
   -> persist outcome
   -> next job
 ```
+
+### Supported backlog preparation
+
+For Phase 3 backlog work, call `prepareOrRecoverSupportedRun` from `src/phase1/preparation.mjs`; do not call a generic claim API first and do not supply a static description or resume shared across jobs. Its successful result is exactly `{ kind, job, resume, run, workspace }`:
+
+1. `kind: recovered` resumes the sole active run only with its persisted answer-memory binding, recreating missing workspace files idempotently from the bound job and selected resume without recompilation.
+2. `kind: claimed` means the exact normalized Greenhouse/Ashby snapshot produced the validated canonical resume and was then atomically claimed with platform, URL, metadata, source-posted timestamp, full description, and description-hash fencing.
+3. `kind: empty` means no complete supported queued snapshot exists; inspect/wait rather than falling through to an unsupported row.
+
+Only rows admitted by `ingestSupportedJobs` in `src/phase1/job-source.mjs` are eligible. `migrations/005-platform-job-snapshots.sql` refuses to run while a durable run is active and quarantines every legacy `queued`, `claimed`, or `needs_user` row until supported re-ingestion. Never bypass `platforms.mjs` classification, manually set platform metadata, or revive the legacy URL-only claim path.
+
+Open `workspace.contractPath` through the normal `startRun` coordinator. Require the run contract's `application_url`, `job_description_path`, and `resume_upload_path` to equal the returned bound job/workspace/resume identities before browser navigation.
+
+Model use starts only after deterministic preparation and answer lookup. Source filtering, job-description extraction, queue selection, resume generation, control classification, exact option matching, action mechanics, retention, and audit are never model decisions. Use model reasoning only for oversight/diagnosis or an allowed unresolved non-sensitive response that becomes `agent_inference`.
 
 Use `selectSafeApplicationBatch` for the current observation. A safe batch may contain several independent routine fields; record each semantic action against the shared pre-action observation, then obtain one fresh chained observation and verify retention for every field in the batch. If any action produces unexpected navigation, validation, a blocker, or a DOM change visible to the browser snapshot, stop the batch immediately and re-observe.
 
@@ -57,6 +71,18 @@ The observer supplies policy-free field state and ledger/evidence refs. The OMP 
 4. Perform each planned helper action in order, recording each semantic outcome against the shared pre-action observation. Stop early on any unexpected state.
 5. Re-run the observer once, accept its diff, and verify retention for every attempted field before planning another batch.
 
+After resolving the fields selected for the current observation, call `planPlatformApplication` with the bound `job.platform`, canonical observer result, resolved answer map, and `session.runMetadata.resume_upload_path`. Treat its frozen Greenhouse/Ashby action list as the mechanic authority:
+
+- `*_native_input` / `*_native_textarea` → exact `tab.fill`;
+- `*_file_input` → exact native file-input `tab.uploadFile`;
+- `*_native_select` → exact serialized `tab.select`;
+- `*_combobox_open` → open the closed custom combobox once, then re-observe and re-plan;
+- `*_combobox_exact_option` → click one exact owned option from the current open-listbox observation;
+- `greenhouse_native_radio` / `ashby_yes_no` → click the exact intended choice;
+- `*_native_checkbox` → click only when observed checked state differs from the desired boolean.
+
+Do not execute an unresolved entry. The planner deliberately excludes the final candidate; the only final-action path remains `prepareSubmission` → `beginFinalSubmit` → OMP click → `completeFinalSubmit`. After each planned action, use the existing fresh observer/snapshot and retention chain below.
+
 Primary OMP `browser` tool mechanics on the attached CMUX-TUI browser pane:
 
 ```js
@@ -82,7 +108,7 @@ Never use `tab.evaluate`, pinned-CLI evaluation, or injected page JavaScript to 
 
 ## Fixed authority and privacy boundaries
 
-- Treat `src/phase1/contract.mjs`, `profile.mjs`, `observer.js`, `ledger.mjs`, `audit.mjs`, and `evidence.mjs` as executable authority.
+- Treat `src/phase1/platforms.mjs`, `job-source.mjs`, `preparation.mjs`, `backlog-runner.mjs`, `contract.mjs`, `profile.mjs`, `observer.js`, `ledger.mjs`, `audit.mjs`, and `evidence.mjs` as executable authority.
 - Consult `skills/playwright-cli/SKILL.md` only when the primary OMP browser helper has concretely failed on an exact control. Do not load it during routine startup, and do not modify the pinned skill.
 - Generic examples in the retained Playwright skill are not application mechanics when they conflict with this skill. In particular, its targetless `type`, Enter/`--submit`, and generic upload examples do not override this application skill’s browser-first, exact-selector, no-submit, ordered-fallback rules.
 - OMP `browser` helpers on the attached CMUX-TUI browser pane own ordinary browser actions. Pinned Playwright CLI is the first fallback for a control the browser helper cannot operate; the OMP `computer` tool is the final native browser/OS fallback when available. Every path must follow the quick-start mapping, recording, re-observation, and retention rules.

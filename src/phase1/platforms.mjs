@@ -1,12 +1,22 @@
 const SUPPORTED_PLATFORMS = Object.freeze(['greenhouse', 'ashby']);
 const SUPPORTED_PLATFORM_SET = new Set(SUPPORTED_PLATFORMS);
 const ANSWER_SOURCES = new Set(['memory', 'profile', 'resume', 'agent_inference', 'user']);
+const CANDIDATE_CLASSES = new Set(['field', 'non_final_navigation', 'final_candidate', 'unknown']);
+const TEXT_INPUT_TYPES = new Set(['text', 'email', 'tel', 'url', 'number', 'date', 'password']);
+const NON_TEXT_INPUT_TYPES = new Set(['radio', 'checkbox', 'select', 'file', 'submit', 'button']);
+const TRUE_CHECKBOX_ANSWERS = new Set(['true', 'yes', '1', 'on', 'checked']);
+const FALSE_CHECKBOX_ANSWERS = new Set(['false', 'no', '0', 'off', 'unchecked']);
 const SOURCE_MAX = 128;
 const ID_MAX = 512;
 const TEXT_MAX = 16 * 1024;
 const URL_MAX = 8192;
 const HTML_MAX = 4 * 1024 * 1024;
-const GREENHOUSE_HOSTS = new Set(['job-boards.greenhouse.io', 'boards.greenhouse.io']);
+const GREENHOUSE_HOSTS = new Set([
+  'job-boards.greenhouse.io',
+  'boards.greenhouse.io',
+  'job-boards.eu.greenhouse.io',
+  'boards.eu.greenhouse.io',
+]);
 const ASHBY_HOST = 'jobs.ashbyhq.com';
 const GREENHOUSE_PATH = /^\/([A-Za-z0-9][A-Za-z0-9_-]*)\/jobs\/([1-9][0-9]*)$/u;
 const ASHBY_PATH = /^\/([A-Za-z0-9][A-Za-z0-9_-]*)\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/iu;
@@ -154,7 +164,7 @@ function deepFreeze(value, seen = new Set()) {
 }
 
 function immutable(value) {
-  return deepFreeze(value);
+  return deepFreeze(deepClone(value));
 }
 
 function rawUrlParts(value) {
@@ -314,19 +324,44 @@ function requirePayloadRecord(payload, key, code = 'INVALID_PAYLOAD') {
   if (!hasOwn(payload, key)) fail(code);
   return assertRecord(ownValue(payload, key, code), code);
 }
+function samePlatformRoute(first, second) {
+  if (first?.platform !== second?.platform) return false;
+  if (first.platform === 'greenhouse') {
+    return first.board === second.board && first.externalJobId === second.externalJobId;
+  }
+  return first.organization === second.organization
+    && first.externalJobId.toLowerCase() === second.externalJobId.toLowerCase();
+}
+
+function snapshotForNormalizedSource(applicationUrl, route, payload) {
+  const payloadRoute = parseApplicationUrl(requirePayloadString(payload, 'url'));
+  if (!samePlatformRoute(route, payloadRoute)) fail('PAYLOAD_URL_MISMATCH');
+  const description = htmlToText(requirePayloadString(payload, 'description'));
+  if (description.length === 0) fail('INVALID_PAYLOAD_DESCRIPTION');
+  return immutable({
+    schema: 'platform-job-snapshot-v1',
+    platform: route.platform,
+    applicationUrl,
+    externalJobId: route.externalJobId,
+    title: normalizeText(requirePayloadString(payload, 'job_title'), 'INVALID_PAYLOAD'),
+    company: normalizeText(requirePayloadString(payload, 'company'), 'INVALID_PAYLOAD'),
+    location: normalizeText(requirePayloadString(payload, 'location'), 'INVALID_PAYLOAD'),
+    description,
+  });
+}
+
 
 function snapshotForGreenhouse(applicationUrl, route, payload) {
+  if (!hasOwn(payload, 'absolute_url')) {
+    return snapshotForNormalizedSource(applicationUrl, route, payload);
+  }
   const externalJobId = normalizeExternalId(ownValue(payload, 'id', 'INVALID_PAYLOAD_ID'), 'greenhouse');
   if (externalJobId !== route.externalJobId) fail('PAYLOAD_ID_MISMATCH');
-  const absoluteUrl = requirePayloadString(payload, 'absolute_url');
-  const absoluteRoute = parseApplicationUrl(absoluteUrl);
-  if (absoluteRoute?.platform !== 'greenhouse' || absoluteRoute.externalJobId !== route.externalJobId) {
-    fail('PAYLOAD_URL_MISMATCH');
-  }
+  const absoluteRoute = parseApplicationUrl(requirePayloadString(payload, 'absolute_url'));
+  if (!samePlatformRoute(route, absoluteRoute)) fail('PAYLOAD_URL_MISMATCH');
   const location = requirePayloadRecord(payload, 'location');
   const locationName = normalizeText(requirePayloadString(location, 'name'), 'INVALID_PAYLOAD');
-  const content = requirePayloadString(payload, 'content');
-  const description = htmlToText(content);
+  const description = htmlToText(requirePayloadString(payload, 'content'));
   if (description.length === 0) fail('INVALID_PAYLOAD_DESCRIPTION');
   return immutable({
     schema: 'platform-job-snapshot-v1',
@@ -341,17 +376,15 @@ function snapshotForGreenhouse(applicationUrl, route, payload) {
 }
 
 function snapshotForAshby(applicationUrl, route, payload) {
+  if (!hasOwn(payload, 'jobPosting')) {
+    return snapshotForNormalizedSource(applicationUrl, route, payload);
+  }
   const posting = requirePayloadRecord(payload, 'jobPosting');
   const externalJobId = normalizeExternalId(ownValue(posting, 'id', 'INVALID_PAYLOAD_ID'), 'ashby');
   if (externalJobId.toLowerCase() !== route.externalJobId.toLowerCase()) fail('PAYLOAD_ID_MISMATCH');
-  const postingUrl = requirePayloadString(posting, 'applicationUrl');
-  const postingRoute = parseApplicationUrl(postingUrl);
-  if (postingRoute?.platform !== 'ashby'
-      || postingRoute.externalJobId.toLowerCase() !== route.externalJobId.toLowerCase()) {
-    fail('PAYLOAD_URL_MISMATCH');
-  }
-  const descriptionHtml = requirePayloadString(posting, 'descriptionHtml');
-  const description = htmlToText(descriptionHtml);
+  const postingRoute = parseApplicationUrl(requirePayloadString(posting, 'applicationUrl'));
+  if (!samePlatformRoute(route, postingRoute)) fail('PAYLOAD_URL_MISMATCH');
+  const description = htmlToText(requirePayloadString(posting, 'descriptionHtml'));
   if (description.length === 0) fail('INVALID_PAYLOAD_DESCRIPTION');
   return immutable({
     schema: 'platform-job-snapshot-v1',
@@ -381,11 +414,65 @@ function aliasValue(value, keys, code = 'INVALID_PLAN_INPUT') {
   return found ? selected : undefined;
 }
 
+function optionalSafeString(value, code, {
+  allowEmpty = true,
+  identifier = false,
+  max = TEXT_MAX,
+} = {}) {
+  if (value === undefined || value === null) return value;
+  return assertSafeString(value, code, { allowEmpty, identifier, max });
+}
+
+function optionalBoolean(value, code, fallback) {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') fail(code);
+  return value;
+}
+
+function normalizeValueState(value, code) {
+  const hasValue = hasOwn(value, 'value');
+  const rawValue = hasValue ? ownValue(value, 'value', code) : null;
+  if (rawValue !== null && typeof rawValue !== 'string' && typeof rawValue !== 'boolean'
+      && !(Array.isArray(rawValue) && rawValue.every((item) => typeof item === 'string'))) {
+    fail(code);
+  }
+  if (Array.isArray(rawValue)) {
+    for (const item of rawValue) assertSafeString(item, code, { allowEmpty: true, max: TEXT_MAX });
+  } else if (typeof rawValue === 'string') {
+    assertSafeString(rawValue, code, { allowEmpty: true, max: TEXT_MAX });
+  }
+  const rawPresent = aliasValue(value, ['valuePresent', 'value_present'], code);
+  const valuePresent = optionalBoolean(rawPresent, code, rawValue !== null
+    && (!Array.isArray(rawValue) || rawValue.length > 0)
+    && (typeof rawValue !== 'string' || rawValue.length > 0));
+  return { value: rawValue, valuePresent };
+}
+
+function normalizeOption(value, optionIndex, code) {
+  assertRecord(value, code);
+  const label = aliasValue(value, ['label'], code);
+  const optionValue = aliasValue(value, ['value'], code);
+  if (label === undefined || optionValue === undefined) fail(code);
+  optionalSafeString(label, code, { allowEmpty: true, max: TEXT_MAX });
+  optionalSafeString(optionValue, code, { allowEmpty: true, max: TEXT_MAX });
+  const disabled = optionalBoolean(aliasValue(value, ['disabled'], code), code, false);
+  const selected = optionalBoolean(aliasValue(value, ['selected'], code), code, false);
+  return {
+    label: label ?? null,
+    value: optionValue ?? null,
+    disabled,
+    selected,
+    optionIndex,
+  };
+}
+
 function normalizeControl(value, index) {
   const code = 'INVALID_OBSERVATION';
   assertRecord(value, code);
   const fieldId = aliasValue(value, ['fieldId', 'field_id', 'stableId', 'stable_id'], code);
-  if (fieldId !== null && fieldId !== undefined) assertSafeString(fieldId, code, { identifier: true, max: ID_MAX });
+  if (fieldId !== null && fieldId !== undefined) {
+    assertSafeString(fieldId, code, { identifier: true, max: ID_MAX });
+  }
   const controlReference = aliasValue(value, ['controlReference', 'control_reference', 'ref', 'reference'], code);
   if (controlReference !== null && controlReference !== undefined) {
     assertSafeString(controlReference, code, { identifier: true, max: ID_MAX });
@@ -393,40 +480,62 @@ function normalizeControl(value, index) {
   const name = aliasValue(value, ['name'], code);
   const label = aliasValue(value, ['label'], code);
   const kind = aliasValue(value, ['kind'], code);
+  const tag = aliasValue(value, ['tag'], code);
   const type = aliasValue(value, ['type', 'inputType', 'input_type'], code);
   const role = aliasValue(value, ['role'], code);
-  for (const [candidate, allowNull] of [[name, true], [label, true], [kind, true], [type, true], [role, true]]) {
-    if (candidate !== undefined && candidate !== null && typeof candidate !== 'string') fail(code);
-    if (!allowNull && candidate === null) fail(code);
+  for (const candidate of [name, label]) {
+    optionalSafeString(candidate, code, { allowEmpty: true, max: TEXT_MAX });
+  }
+  for (const candidate of [kind, tag, type, role]) {
+    optionalSafeString(candidate, code, { allowEmpty: true, identifier: true, max: ID_MAX });
   }
   const options = aliasValue(value, ['options'], code);
   if (options !== undefined && !Array.isArray(options)) fail(code);
-  const normalizedOptions = (options ?? []).map((option, optionIndex) => {
-    assertRecord(option, code);
-    const optionLabel = ownValue(option, 'label', code);
-    const optionValue = ownValue(option, 'value', code);
-    assertSafeString(optionLabel, code, { max: TEXT_MAX });
-    assertSafeString(optionValue, code, { max: TEXT_MAX });
-    return { label: optionLabel, value: optionValue, optionIndex };
-  });
-  const candidate = aliasValue(value, ['candidateClass', 'candidate_class', 'class'], code);
+  const normalizedOptions = (options ?? []).map((option, optionIndex) =>
+    normalizeOption(option, optionIndex, code));
+
+  const candidateClass = aliasValue(value, ['candidateClass', 'candidate_class', 'class'], code);
   const nestedCandidate = aliasValue(value, ['candidate'], code);
-  let candidateClass = candidate;
+  let normalizedCandidateClass = candidateClass;
   if (nestedCandidate !== undefined && nestedCandidate !== null) {
     assertRecord(nestedCandidate, code);
     const nestedClass = aliasValue(nestedCandidate, ['class', 'candidateClass', 'candidate_class'], code);
     if (nestedClass !== undefined) {
-      if (candidateClass !== undefined && candidateClass !== null && candidateClass !== nestedClass) fail(code);
-      candidateClass = nestedClass;
+      if (normalizedCandidateClass !== undefined && !Object.is(normalizedCandidateClass, nestedClass)) {
+        fail(code);
+      }
+      normalizedCandidateClass = nestedClass;
     }
   }
-  if (candidateClass !== undefined && candidateClass !== null && typeof candidateClass !== 'string') fail(code);
-  const required = aliasValue(value, ['required'], code);
-  if (required !== undefined && typeof required !== 'boolean') fail(code);
-  const visible = aliasValue(value, ['visible'], code);
-  if (visible !== undefined && typeof visible !== 'boolean') fail(code);
-  const enabled = aliasValue(value, ['enabled'], code);
-  if (enabled !== undefined && typeof enabled !== 'boolean') fail(code);
+  optionalSafeString(normalizedCandidateClass, code, { allowEmpty: false, identifier: true, max: ID_MAX });
+  if (normalizedCandidateClass !== undefined && normalizedCandidateClass !== null
+      && !CANDIDATE_CLASSES.has(normalizedCandidateClass)) {
+    fail(code);
+  }
+
+  const required = optionalBoolean(aliasValue(value, ['required'], code), code, false);
+  const visible = optionalBoolean(aliasValue(value, ['visible'], code), code, true);
+  const enabledAlias = aliasValue(value, ['enabled'], code);
+  const disabledAlias = aliasValue(value, ['disabled'], code);
+  const enabled = optionalBoolean(enabledAlias, code, disabledAlias === undefined ? true : !optionalBoolean(disabledAlias, code, false));
+  const disabled = optionalBoolean(disabledAlias, code, !enabled);
+  if (enabled !== !disabled) fail(code);
+  const readonly = optionalBoolean(
+    aliasValue(value, ['readonly', 'readOnly', 'read_only'], code),
+    code,
+    false,
+  );
+  const checked = aliasValue(value, ['checked'], code);
+  if (checked !== undefined && checked !== null && typeof checked !== 'boolean') fail(code);
+  const selected = aliasValue(value, ['selected'], code);
+  if (selected !== undefined && selected !== null
+      && !(Array.isArray(selected) && selected.every((item) => typeof item === 'string'))) {
+    fail(code);
+  }
+  if (Array.isArray(selected)) {
+    for (const item of selected) assertSafeString(item, code, { allowEmpty: true, max: TEXT_MAX });
+  }
+  const state = normalizeValueState(value, code);
   if (fieldId === undefined) fail(code, `control ${index} is missing fieldId`);
   return {
     fieldId: fieldId ?? null,
@@ -434,15 +543,23 @@ function normalizeControl(value, index) {
     name: typeof name === 'string' ? name : '',
     label: typeof label === 'string' ? label : '',
     kind: typeof kind === 'string' ? kind.toLowerCase() : '',
+    tag: typeof tag === 'string' ? tag.toLowerCase() : '',
     type: typeof type === 'string' ? type.toLowerCase() : '',
     role: typeof role === 'string' ? role.toLowerCase() : '',
     options: normalizedOptions,
-    candidateClass: candidateClass ?? null,
-    required: required === undefined ? false : required,
-    visible: visible !== false,
-    enabled: enabled !== false,
+    candidateClass: normalizedCandidateClass ?? null,
+    required,
+    visible,
+    enabled,
+    disabled,
+    readonly,
+    value: state.value,
+    valuePresent: state.valuePresent,
+    checked: checked ?? null,
+    selected: selected ?? null,
   };
 }
+
 
 function normalizeAnswer(value, fieldId) {
   const code = 'INVALID_ANSWERS';
@@ -459,29 +576,95 @@ function normalizeAnswer(value, fieldId) {
 }
 
 function optionValueFor(control, answerValue) {
-  const byLabel = control.options.filter((option) => option.label === answerValue);
-  const byValue = control.options.filter((option) => option.value === answerValue);
-  const matches = [...new Map([...byLabel, ...byValue].map((option) => [option.optionIndex, option])).values()];
-  if (matches.length !== 1) fail('INVALID_OPTION_MAPPING');
-  return matches[0].value;
+  const matches = [];
+  for (const option of control.options) {
+    if (option.disabled) continue;
+    if (option.label === answerValue || option.value === answerValue) {
+      matches.push(option);
+    }
+  }
+  if (matches.length > 1) fail('INVALID_OPTION_MAPPING');
+  if (matches.length === 1) {
+    if (matches[0].value === null) fail('INVALID_OPTION_MAPPING');
+    return matches[0].value;
+  }
+  const choiceLike = control.kind === 'radio'
+    || control.type === 'radio'
+    || control.role === 'radio'
+    || control.role === 'radiogroup';
+  if (choiceLike && (typeof control.value === 'string' || control.value === null)) {
+    if (control.label === answerValue || control.value === answerValue) return control.value ?? answerValue;
+  }
+  fail('INVALID_OPTION_MAPPING');
+}
+function checkboxValueFor(control, answerValue) {
+  const normalized = answerValue.trim().toLowerCase();
+  if (TRUE_CHECKBOX_ANSWERS.has(normalized)) return true;
+  if (FALSE_CHECKBOX_ANSWERS.has(normalized)) return false;
+  if (control.label === answerValue || control.value === answerValue) return true;
+  fail('INVALID_CHECKBOX_MAPPING');
 }
 
-function controlPlanKind(platform, control) {
-  if (control.type === 'file' || control.kind === 'file') return 'file';
-  if (platform === 'greenhouse') {
-    if (control.kind === 'select' || control.type === 'select') return 'select';
-    if (control.kind === 'radio' || control.type === 'radio' || control.role === 'radio') return 'radio';
-    if (control.kind === 'textarea' || control.type === 'textarea') return 'textarea';
-    if (control.kind === 'input' && new Set(['', 'text', 'email', 'tel', 'url', 'number', 'date', 'password']).has(control.type)) {
-      return 'input';
-    }
-    return null;
+
+function readonlyMatches(kind, control, answerValue) {
+  if (kind === 'checkbox') {
+    return typeof control.checked === 'boolean'
+      && control.checked === checkboxValueFor(control, answerValue);
   }
-  if (control.role === 'combobox') return 'combobox';
-  if (control.role === 'radiogroup') return 'yes_no';
-  if (control.kind === 'textarea' || control.type === 'textarea') return 'textarea';
-  if (control.kind === 'input' && !new Set(['radio', 'checkbox', 'select', 'file']).has(control.type)) return 'input';
-  return null;
+  if (!control.valuePresent) {
+    return (kind === 'input' || kind === 'textarea')
+      && answerValue === ''
+      && (control.value === null || control.value === '');
+  }
+  if (kind === 'file') return true;
+  if (kind === 'select' || kind === 'combobox' || kind === 'radio' || kind === 'yes_no') {
+    const expected = optionValueFor(control, answerValue);
+    const observed = control.value ?? (
+      Array.isArray(control.selected) && control.selected.length === 1
+        ? control.selected[0]
+        : control.selected
+    );
+    if (Array.isArray(observed)) return observed.length === 1 && observed[0] === expected;
+    if (kind === 'radio' || kind === 'yes_no') {
+      return control.checked !== false && observed === expected;
+    }
+    return observed === expected;
+  }
+  return control.value === answerValue;
+}
+
+function isUnclassifiedNonField(control) {
+  return control.kind === 'button'
+    || control.kind === 'navigation'
+    || control.kind === 'link'
+    || control.tag === 'button'
+    || control.tag === 'a'
+    || control.role === 'button'
+    || control.type === 'submit'
+    || control.type === 'image';
+}
+
+function isNonFieldCandidate(control) {
+  return control.candidateClass === 'non_final_navigation'
+    || control.candidateClass === 'unknown'
+    || (control.candidateClass === null && isUnclassifiedNonField(control));
+}
+
+function planFinalCandidate(controls) {
+  const current = controls.filter((control) =>
+    control.candidateClass === 'final_candidate' && control.visible && control.enabled);
+  if (current.length > 1) fail('AMBIGUOUS_FINAL_CANDIDATE');
+  if (current.length === 0) return null;
+  if (current[0].controlReference === null) fail('INVALID_OBSERVATION');
+  return current[0].controlReference;
+}
+
+function normalizeMissingAnswer(control, kind, unresolved) {
+  if (!control.required) return;
+  unresolved.push({
+    fieldId: control.fieldId,
+    reason: kind === 'textarea' ? 'inference_required' : 'answer_required',
+  });
 }
 
 function actionFor(platform, kind, control, answer, resumeUploadPath) {
@@ -499,11 +682,28 @@ function actionFor(platform, kind, control, answer, resumeUploadPath) {
   }
   if (kind === 'input') return base;
   if (kind === 'textarea') return { ...base, mechanic: `${platform}_native_textarea` };
-  if (kind === 'select' || kind === 'combobox') {
+  if (kind === 'select') {
     return {
       ...base,
       operation: 'select_option',
-      mechanic: kind === 'select' ? 'greenhouse_native_select' : 'ashby_combobox_exact_option',
+      mechanic: `${platform}_native_select`,
+      value: optionValueFor(control, answer.value),
+    };
+  }
+  if (kind === 'combobox') {
+    if (control.options.length === 0) {
+      if (control.role === 'listbox') fail('INVALID_OPTION_MAPPING');
+      return {
+        ...base,
+        operation: 'open_combobox',
+        mechanic: `${platform}_combobox_open`,
+        value: answer.value,
+      };
+    }
+    return {
+      ...base,
+      operation: 'select_option',
+      mechanic: `${platform}_combobox_exact_option`,
       value: optionValueFor(control, answer.value),
     };
   }
@@ -515,8 +715,65 @@ function actionFor(platform, kind, control, answer, resumeUploadPath) {
       value: optionValueFor(control, answer.value),
     };
   }
+  if (kind === 'checkbox') {
+    const desired = checkboxValueFor(control, answer.value);
+    if (control.checked === desired) return null;
+    if (typeof control.checked !== 'boolean') fail('INVALID_OBSERVATION');
+    return {
+      ...base,
+      operation: 'toggle',
+      mechanic: `${platform}_native_checkbox`,
+      value: desired,
+    };
+  }
   fail('UNSUPPORTED_CONTROL');
 }
+
+function controlPlanKind(platform, control) {
+  const kind = control.kind;
+  const tag = control.tag;
+  const type = control.type;
+  const role = control.role;
+  if (type === 'file' || kind === 'file' || tag === 'file') return 'file';
+  if (tag === 'textarea' || kind === 'textarea' || type === 'textarea') return 'textarea';
+  if (type === 'checkbox' || kind === 'checkbox' || role === 'checkbox' || role === 'switch') {
+    return 'checkbox';
+  }
+  if (tag === 'select' || kind === 'select' || type === 'select' || kind === 'native_select') {
+    return 'select';
+  }
+  if (platform === 'greenhouse') {
+    if (role === 'combobox' || role === 'listbox'
+        || kind === 'combobox' || kind === 'autocomplete' || kind === 'custom_select') {
+      return 'combobox';
+    }
+    if (type === 'radio' || kind === 'radio' || kind === 'radio_group'
+        || role === 'radio' || role === 'radiogroup') {
+      return 'radio';
+    }
+    if ((tag === 'input' || kind === 'input' || kind === 'aria' || kind === 'contenteditable'
+        || role === 'textbox' || role === 'searchbox' || TEXT_INPUT_TYPES.has(type))
+        && !NON_TEXT_INPUT_TYPES.has(type)) {
+      return 'input';
+    }
+    return null;
+  }
+  if (role === 'combobox' || role === 'listbox'
+      || kind === 'combobox' || kind === 'autocomplete' || kind === 'custom_select') {
+    return 'combobox';
+  }
+  if (role === 'radiogroup' || role === 'radio' || type === 'radio'
+      || kind === 'radio' || kind === 'radio_group') {
+    return 'yes_no';
+  }
+  if ((tag === 'input' || kind === 'input' || kind === 'aria' || kind === 'contenteditable'
+      || role === 'textbox' || role === 'searchbox' || TEXT_INPUT_TYPES.has(type))
+      && !NON_TEXT_INPUT_TYPES.has(type)) {
+    return 'input';
+  }
+  return null;
+}
+
 
 function normalizePlanInput(value) {
   const code = 'INVALID_PLAN_INPUT';
@@ -599,34 +856,39 @@ export function planPlatformApplication(value) {
   const normalized = normalizePlanInput(value);
   const actions = [];
   const unresolved = [];
-  let finalCandidateRef = null;
+  const finalCandidateRef = planFinalCandidate(normalized.controls);
   for (const control of normalized.controls) {
-    const isFinal = control.candidateClass === 'final_candidate';
-    if (isFinal) {
-      if (finalCandidateRef === null && control.visible && control.enabled) {
-        if (control.controlReference === null) fail('INVALID_OBSERVATION');
-        finalCandidateRef = control.controlReference;
-      }
-      continue;
-    }
+    if (control.candidateClass === 'final_candidate' || isNonFieldCandidate(control)) continue;
     if (control.fieldId === null) continue;
     const kind = controlPlanKind(normalized.platform, control);
-    if (kind === null) fail('UNSUPPORTED_CONTROL');
+    if (kind === null) {
+      if (control.candidateClass === null && isUnclassifiedNonField(control)) continue;
+      fail('UNSUPPORTED_CONTROL');
+    }
     const answer = normalized.answers.get(control.fieldId);
-    if (answer === undefined) {
-      if (control.required) {
-        unresolved.push({
-          fieldId: control.fieldId,
-          reason: kind === 'textarea' ? 'inference_required' : 'answer_required',
-        });
+    if (!control.visible || !control.enabled) {
+      if (answer !== undefined) {
+        unresolved.push({ fieldId: control.fieldId, reason: 'control_unavailable' });
       }
       continue;
     }
-    if (!control.visible || !control.enabled) {
-      unresolved.push({ fieldId: control.fieldId, reason: 'control_unavailable' });
+    if (control.controlReference === null) fail('INVALID_OBSERVATION');
+    if (control.readonly) {
+      if (answer === undefined) {
+        if (!control.valuePresent && control.required) {
+          unresolved.push({ fieldId: control.fieldId, reason: 'control_unavailable' });
+        }
+        continue;
+      }
+      if (!readonlyMatches(kind, control, answer.value)) fail('READONLY_MISMATCH');
       continue;
     }
-    actions.push(actionFor(normalized.platform, kind, control, answer, normalized.resumeUploadPath));
+    if (answer === undefined) {
+      normalizeMissingAnswer(control, kind, unresolved);
+      continue;
+    }
+    const action = actionFor(normalized.platform, kind, control, answer, normalized.resumeUploadPath);
+    if (action !== null) actions.push(action);
   }
   return immutable({
     schema: 'deterministic-platform-plan-v1',

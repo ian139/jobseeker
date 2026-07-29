@@ -74,8 +74,9 @@ function runFor(root, { profilePath, sourceResumePath, uploadPath, memoryPath, a
         answer_memory_path: memoryPath,
         run_artifact_dir: artifactPath,
         browser_mode: 'headed',
-        observer: 'playwright_dom_v1',
-        action_driver: 'omp_browser',
+        perception_driver: 'image_agent_v1',
+        action_driver: 'omp_computer',
+        model_provider: 'codex',
         submit_policy: 'omp_agent',
     };
 }
@@ -186,8 +187,9 @@ test('unknown keys, fixed enum changes, and missing evidence fail closed', () =>
         answer_memory_path: 'answers.jsonl',
         run_artifact_dir: 'artifacts',
         browser_mode: 'headless',
-        observer: 'playwright_dom_v1',
-        action_driver: 'omp_browser',
+        perception_driver: 'image_agent_v1',
+        action_driver: 'omp_computer',
+        model_provider: 'codex',
         submit_policy: 'omp_agent',
     }), /E_RUN_BROWSER_MODE/);
     assert.throws(() => validateRunContract({
@@ -198,8 +200,9 @@ test('unknown keys, fixed enum changes, and missing evidence fail closed', () =>
         answer_memory_path: 'answers.jsonl',
         run_artifact_dir: 'artifacts',
         browser_mode: 'headed',
-        observer: 'playwright_dom_v1',
-        action_driver: 'omp_browser',
+        perception_driver: 'image_agent_v1',
+        action_driver: 'omp_computer',
+        model_provider: 'codex',
         submit_policy: 'omp_agent',
     }), /E_RUN_EVIDENCE_REQUIRED/);
 });

@@ -77,8 +77,6 @@ export const FAILURE_CLASSES = enumList([
   VALIDATION: 'validation',
   VALIDATION_FAILURE: 'validation',
   STALE_OBSERVATION: 'stale_observation',
-  STALE_REFERENCE: 'stale_observation',
-  STALE_REF: 'stale_observation',
   NAVIGATION: 'navigation',
   NAVIGATION_FAILURE: 'navigation',
   ACTION: 'action',
@@ -169,7 +167,7 @@ const UNCERTAIN_OUTCOMES = new Set([
   'timed-out',
   'disconnected',
   'connection_lost',
-  'browser_closed',
+  'surface_closed',
   'transport_error',
 ]);
 const BLOCKED_OUTCOMES = new Set(['blocked', 'access_control', 'user_required', 'needs_user']);
@@ -182,8 +180,6 @@ const CLASS_ALIASES = new Map([
   ['invalid_field', 'validation'],
   ['required_field', 'validation'],
   ['stale', 'stale_observation'],
-  ['stale_ref', 'stale_observation'],
-  ['stale_reference', 'stale_observation'],
   ['stale_observation', 'stale_observation'],
   ['observation_stale', 'stale_observation'],
   ['navigation', 'navigation'],
@@ -200,8 +196,7 @@ const CLASS_ALIASES = new Map([
   ['observation', 'observation'],
   ['observation_error', 'observation'],
   ['observation_failure', 'observation'],
-  ['dom_error', 'observation'],
-  ['snapshot_error', 'observation'],
+  ['screenshot_error', 'observation'],
   ['transient', 'transient'],
   ['transient_error', 'transient'],
   ['transient_failure', 'transient'],
@@ -235,10 +230,10 @@ const CLASS_ALIASES = new Map([
 
 const CLASS_FAMILY_TOKENS = Object.freeze({
   validation: ['valid', 'invalid', 'required', 'constraint', 'field'],
-  stale_observation: ['stale', 'reference', 'ref', 'observation'],
+  stale_observation: ['stale', 'target', 'observation'],
   navigation: ['navigation', 'redirect', 'route', 'url', 'posting', 'not_found', '404'],
-  action: ['action', 'click', 'fill', 'select', 'upload', 'control'],
-  observation: ['observation', 'snapshot', 'dom', 'frame'],
+  action: ['action', 'click', 'type_text', 'press_key', 'scroll', 'upload_file', 'target'],
+  observation: ['observation', 'screenshot', 'surface', 'image'],
   transient: ['transient', 'network', 'timeout', 'disconnect', 'rate_limit', 'temporary'],
 });
 
@@ -428,6 +423,7 @@ function budgetStateAndCandidate(first, second) {
     'failure', 'failureClass', 'failure_class', 'class', 'kind', 'category', 'type',
     'strategy', 'approach', 'method', 'plan', 'action', 'actionType', 'action_type',
     'observationId', 'observation_id', 'newObservationId', 'new_observation_id',
+    'targetId', 'target_id', 'finalTargetId', 'final_target_id',
     'attemptId', 'attempt_id', 'outcome', 'result', 'code', 'errorCode', 'error_code',
   ];
   if (retryFields.some((key) => Object.hasOwn(first, key))) {
@@ -489,11 +485,18 @@ function normalizeRetryEntry(input, index = 0) {
   if (!isRecord(value)) recoveryFail('INVALID_RETRY', 'retry record must be an object', { index });
   const strategy = normalizedIdentifier(firstDefined(value.strategy, value.approach, value.method, value.plan), null);
   const action = normalizedIdentifier(firstDefined(value.action, value.actionType, value.action_type), null);
-  const observationId = normalizedIdentifier(firstDefined(value.observationId, value.observation_id, value.newObservationId, value.new_observation_id), null);
+  const observationId = normalizedIdentifier(firstDefined(
+    value.observationId,
+    value.observation_id,
+    value.newObservationId,
+    value.new_observation_id,
+  ), null);
+  const targetId = normalizedIdentifier(firstDefined(value.targetId, value.target_id), null);
+  const finalTargetId = normalizedIdentifier(firstDefined(value.finalTargetId, value.final_target_id), null);
   const attemptId = normalizedIdentifier(firstDefined(value.attemptId, value.attempt_id), null);
   const failure = classifyFailure(value.failure ?? value);
-  if (strategy === null && action === null && observationId === null) {
-    recoveryFail('RETRY_CONTEXT_REQUIRED', 'a retry requires a changed strategy or a new observation');
+  if (strategy === null && action === null && observationId === null && targetId === null && finalTargetId === null) {
+    recoveryFail('RETRY_CONTEXT_REQUIRED', 'a retry requires a changed strategy, visual target, or new observation');
   }
   return {
     retryIndex: Number.isSafeInteger(value.retryIndex) ? value.retryIndex : index,
@@ -501,6 +504,8 @@ function normalizeRetryEntry(input, index = 0) {
     strategy: strategy ?? action,
     action,
     observationId,
+    targetId,
+    finalTargetId,
     attemptId,
     code: failure.code,
     outcome: normalizedIdentifier(firstDefined(value.outcome, value.result), null),
@@ -517,11 +522,27 @@ function previousRetryState(state, history, count) {
     state.observationId,
     state.observation_id,
   ), null);
-  if (strategy === null && observationId === null && count === 0) return null;
+  const targetId = normalizedIdentifier(firstDefined(
+    state.lastTargetId,
+    state.last_target_id,
+    state.targetId,
+    state.target_id,
+  ), null);
+  const finalTargetId = normalizedIdentifier(firstDefined(
+    state.lastFinalTargetId,
+    state.last_final_target_id,
+    state.finalTargetId,
+    state.final_target_id,
+  ), null);
+  if (strategy === null && observationId === null && targetId === null && finalTargetId === null && count === 0) {
+    return null;
+  }
   return {
     retryIndex: Math.max(0, count - 1),
     strategy,
     observationId,
+    targetId,
+    finalTargetId,
     action: normalizedIdentifier(firstDefined(state.lastAction, state.last_action, state.action), null),
     failureClass: canonicalClass(firstDefined(state.lastFailureClass, state.last_failure_class, state.failureClass)) ?? 'unknown',
     attemptId: null,
@@ -555,6 +576,7 @@ function retryProgress(previous, current) {
     return {
       strategyChanged: current.strategy !== null,
       observationChanged: current.observationId !== null,
+      targetChanged: current.targetId !== null || current.finalTargetId !== null,
     };
   }
   return {
@@ -562,6 +584,10 @@ function retryProgress(previous, current) {
       && (previous.strategy === null || current.strategy !== previous.strategy),
     observationChanged: current.observationId !== null
       && (previous.observationId === null || current.observationId !== previous.observationId),
+    targetChanged: (current.targetId !== null
+      && (previous.targetId === null || current.targetId !== previous.targetId))
+      || (current.finalTargetId !== null
+        && (previous.finalTargetId === null || current.finalTargetId !== previous.finalTargetId)),
   };
 }
 
@@ -578,8 +604,8 @@ function validateHistory(state, history, count) {
     const current = normalizeRetryEntry(history[index], index);
     if (previous !== null) {
       const progress = retryProgress(previous, current);
-      if (!progress.strategyChanged && !progress.observationChanged) {
-        recoveryFail('RETRY_NO_PROGRESS', 'each retry must change strategy or use a new observation', { index });
+      if (!progress.strategyChanged && !progress.observationChanged && !progress.targetChanged) {
+        recoveryFail('RETRY_NO_PROGRESS', 'each retry must change strategy, visual target, or use a new observation', { index });
       }
     }
     previous = current;
@@ -601,8 +627,8 @@ export function validateRetryBudget(input = {}, candidate = undefined) {
     const candidateEntry = normalizeRetryEntry(split.candidate, count);
     const previous = previousRetryState(state, history, count);
     const progress = retryProgress(previous, candidateEntry);
-    if (previous !== null && !progress.strategyChanged && !progress.observationChanged) {
-      recoveryFail('RETRY_NO_PROGRESS', 'each retry must change strategy or use a new observation');
+    if (previous !== null && !progress.strategyChanged && !progress.observationChanged && !progress.targetChanged) {
+      recoveryFail('RETRY_NO_PROGRESS', 'each retry must change strategy, visual target, or use a new observation');
     }
     if (count >= maxRetries) recoveryFail('RETRY_BUDGET_EXHAUSTED', 'retry budget is exhausted', { maxRetries, count });
     history.push(candidateEntry);
@@ -611,6 +637,7 @@ export function validateRetryBudget(input = {}, candidate = undefined) {
       lastRetry: candidateEntry,
       strategyChanged: progress.strategyChanged,
       observationChanged: progress.observationChanged,
+      targetChanged: progress.targetChanged,
     });
   }
   return outputBudget(state, history, count, maxRetries);
@@ -650,8 +677,9 @@ export function recordRetry(first = {}, second = undefined) {
   const progress = retryProgress(previous, entry);
   const strategyChanged = progress.strategyChanged;
   const observationChanged = progress.observationChanged;
-  if (previous !== null && !strategyChanged && !observationChanged) {
-    recoveryFail('RETRY_NO_PROGRESS', 'each retry must change strategy or use a new observation');
+  const targetChanged = progress.targetChanged;
+  if (previous !== null && !strategyChanged && !observationChanged && !targetChanged) {
+    recoveryFail('RETRY_NO_PROGRESS', 'each retry must change strategy, visual target, or use a new observation');
   }
   history.push(entry);
   return outputBudget(state, history, count + 1, maxRetries, {
@@ -660,6 +688,7 @@ export function recordRetry(first = {}, second = undefined) {
     lastRetry: entry,
     strategyChanged,
     observationChanged,
+    targetChanged,
     sameRun: true,
     sameWorkspace: true,
   });
@@ -823,11 +852,41 @@ function outcomeToken(value) {
   return normalizedToken(value);
 }
 
+function visualFinalTargetId(observation) {
+  const explicit = firstDefined(
+    observation.finalTargetId,
+    observation.final_target_id,
+    observation.targetId,
+    observation.target_id,
+  );
+  if (explicit !== undefined && explicit !== null) return normalizedIdentifier(explicit, null);
+  if (!Array.isArray(observation.targets)) return null;
+  const candidates = observation.targets.filter((target) => isRecord(target)
+    && isRecord(target.candidate)
+    && target.candidate.class === 'final_candidate'
+    && target.visible === true
+    && target.enabled !== false);
+  if (candidates.length !== 1) return null;
+  return normalizedIdentifier(candidates[0].target_id ?? candidates[0].targetId, null);
+}
+
 function observationSubmissionSignal(observation) {
   if (!isRecord(observation)) {
-    return { success: false, failed: false, uncertain: false, captcha: false, observationId: null };
+    return {
+      success: false,
+      failed: false,
+      uncertain: false,
+      captcha: false,
+      observationId: null,
+      finalTargetId: null,
+    };
   }
-  const observationId = normalizedIdentifier(firstDefined(observation.observationId, observation.observation_id, observation.id), null);
+  const observationId = normalizedIdentifier(
+    firstDefined(observation.observationId, observation.observation_id),
+    null,
+  );
+  const finalTargetId = visualFinalTargetId(observation);
+  const surface = isRecord(observation.surface) ? observation.surface : {};
   const explicitStatus = outcomeToken(firstDefined(
     observation.submissionStatus,
     observation.submission_status,
@@ -835,46 +894,49 @@ function observationSubmissionSignal(observation) {
     observation.outcome,
     observation.result,
   ));
-  const signalText = normalizedText(firstDefined(
-    observation.title,
-    observation.url,
-    observation.finalUrl,
-    observation.final_url,
-    observation.text,
-    observation.message,
-  ), '').toLowerCase();
-  if (explicitStatus.includes('captcha')
-    || observation.captcha === true
-    || observation.captchaRequired === true
-    || observation.captcha_required === true
-    || /(?:captcha|recaptcha|hcaptcha|turnstile)/u.test(signalText)) {
-    return { success: false, failed: true, uncertain: false, captcha: true, observationId };
+  const signalText = normalizedText(firstDefined(surface.title, surface.url), '').toLowerCase();
+  const blockerTokens = Array.isArray(observation.blockers)
+    ? observation.blockers.map((blocker) => normalizedToken(firstDefined(
+      blocker?.code,
+      blocker?.kind,
+      blocker?.type,
+      blocker?.reason,
+    )))
+    : [];
+  const captcha = explicitStatus.includes('captcha')
+    || blockerTokens.some((token) => /(?:captcha|recaptcha|hcaptcha|turnstile)/u.test(token))
+    || /(?:captcha|recaptcha|hcaptcha|turnstile)/u.test(signalText);
+  const base = { observationId, finalTargetId };
+  if (captcha) {
+    return { success: false, failed: true, uncertain: false, captcha: true, ...base };
   }
   if (SUCCESS_OUTCOMES.has(explicitStatus)
     || observation.submitted === true
     || observation.confirmation === true
     || observation.confirmed === true
     || observation.success === true) {
-    return { success: true, failed: false, uncertain: false, captcha: false, observationId };
+    return { success: true, failed: false, uncertain: false, captcha: false, ...base };
   }
-  if (BLOCKED_OUTCOMES.has(explicitStatus)
+  const blocked = BLOCKED_OUTCOMES.has(explicitStatus)
+    || blockerTokens.some((token) => token === 'access_control' || token === 'user_required' || token === 'needs_user')
     || observation.accessControl === true
     || observation.access_control === true
     || observation.userRequired === true
-    || observation.user_required === true) {
-    return { success: false, failed: true, uncertain: false, captcha: false, blocked: true, observationId };
+    || observation.user_required === true;
+  if (blocked) {
+    return { success: false, failed: true, uncertain: false, captcha: false, blocked: true, ...base };
   }
   if (FAILED_OUTCOMES.has(explicitStatus)
     || observation.submitted === false
     || observation.failed === true
     || observation.error === true) {
-    return { success: false, failed: true, uncertain: false, captcha: false, observationId };
+    return { success: false, failed: true, uncertain: false, captcha: false, ...base };
   }
   if (/(?:application|submission).{0,32}(?:success|submitted|received|thank\s*you)/u.test(signalText)
     || /thank\s*you.{0,32}(?:application|applying)/u.test(signalText)) {
-    return { success: true, failed: false, uncertain: false, captcha: false, observationId };
+    return { success: true, failed: false, uncertain: false, captcha: false, ...base };
   }
-  return { success: false, failed: false, uncertain: true, captcha: false, observationId };
+  return { success: false, failed: false, uncertain: true, captcha: false, ...base };
 }
 
 function submissionAttempts(input) {
@@ -912,13 +974,15 @@ export function reconcileSubmission(input = {}, options = undefined) {
     || attempts.some((entry) => UNCERTAIN_OUTCOMES.has(outcomeToken(firstDefined(entry.outcome, entry.status))));
   const action = normalizedToken(firstDefined(value.action, extra.action));
   const attemptId = normalizedAttemptId(value, previous);
+  const observation = firstDefined(value.observation, value.postSubmitObservation, value.post_submit_observation, extra.observation);
+  const signal = observationSubmissionSignal(observation);
+  const finalTargetId = signal.finalTargetId
+    ?? normalizedIdentifier(firstDefined(value.finalTargetId, value.final_target_id, extra.finalTargetId, extra.final_target_id), null);
   const previousAttemptId = normalizedIdentifier(firstDefined(previous.attemptId, previous.attempt_id, attempts.at(-1)?.attemptId, attempts.at(-1)?.attempt_id), null);
   const isNewFinalSubmit = FINAL_SUBMIT_ACTIONS.has(action)
     && (attemptId === null || previousAttemptId === null || attemptId !== previousAttemptId || priorUncertain);
   const rawOutcome = firstDefined(value.outcome, value.result, value.submissionOutcome, value.submission_outcome, value.status);
   const rawToken = outcomeToken(rawOutcome);
-  const observation = firstDefined(value.observation, value.postSubmitObservation, value.post_submit_observation, extra.observation);
-  const signal = observationSubmissionSignal(observation);
   if (isNewFinalSubmit && (priorUncertain || previousStatus === 'succeeded' || previousStatus === 'completed')) {
     recoveryFail('DUPLICATE_FINAL_SUBMIT', 'a final submit cannot be issued until the previous submission is reconciled', {
       attemptId,
@@ -953,16 +1017,20 @@ export function reconcileSubmission(input = {}, options = undefined) {
   }
   const observationId = signal.observationId
     ?? normalizedIdentifier(firstDefined(value.observationId, value.observation_id), null);
-  const freshObservation = observationId !== null && observationId !== previous.observationId && observationId !== previous.observation_id;
+  const freshObservation = observationId !== null
+    && observationId !== previous.observationId
+    && observationId !== previous.observation_id;
   const unresolved = status === 'uncertain' || status === 'pending';
   const terminal = status === 'blocked' || status === 'succeeded';
-  const finalSubmitForbidden = unresolved || terminal;
-  const canSubmit = status === 'failed' && freshObservation;
+  const retryAllowed = status === 'failed' && freshObservation;
+  const finalSubmitForbidden = unresolved || terminal || finalTargetId === null || failureClass === 'captcha';
+  const finalSubmitAllowed = retryAllowed && !finalSubmitForbidden;
   const attempt = {
     attemptId,
     outcome: status,
     status,
     observationId,
+    finalTargetId,
     reconciled: !unresolved,
   };
   const nextAttempts = attempts.filter((entry) => {
@@ -975,6 +1043,7 @@ export function reconcileSubmission(input = {}, options = undefined) {
     schema: SUBMISSION_RECONCILIATION_SCHEMA,
     attemptId,
     previousAttemptId,
+    finalTargetId,
     attempts: nextAttempts,
     status,
     outcome: status,
@@ -988,11 +1057,11 @@ export function reconcileSubmission(input = {}, options = undefined) {
     pending: status === 'pending',
     blocked: status === 'blocked',
     terminal,
-    retryAllowed: canSubmit,
-    canRetry: canSubmit,
-    finalSubmitAllowed: canSubmit,
-    allowFinalSubmit: canSubmit,
-    canSubmit,
+    retryAllowed,
+    canRetry: retryAllowed,
+    finalSubmitAllowed,
+    allowFinalSubmit: finalSubmitAllowed,
+    canSubmit: finalSubmitAllowed,
     requiresReconciliation: unresolved,
     requiresFreshObservation: unresolved || status === 'failed',
     freshObservation,
@@ -1017,6 +1086,8 @@ export function reconcileSubmission(input = {}, options = undefined) {
 export function canIssueFinalSubmit(reconciliation = {}) {
   if (!isRecord(reconciliation)) return false;
   return reconciliation.finalSubmitAllowed === true
+    && typeof reconciliation.finalTargetId === 'string'
+    && reconciliation.finalTargetId.length > 0
     && reconciliation.duplicateFinalSubmitForbidden !== true
     && reconciliation.finalSubmitForbidden !== true;
 }

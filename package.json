@@ -9,7 +9,11 @@
   "exports": {
     ".": "./src/phase1/contract.mjs",
     "./contract": "./src/phase1/contract.mjs",
-    "./profile": "./src/phase1/profile.mjs"
+    "./computer-use": "./src/phase1/computer-use-adapter.mjs",
+    "./planner": "./src/phase1/planner.mjs",
+    "./profile": "./src/phase1/profile.mjs",
+    "./session": "./src/phase1/session.mjs",
+    "./visual-observation": "./src/phase1/visual-observation.mjs"
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs"

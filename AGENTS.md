@@ -1,102 +1,106 @@
 # Repository Guidelines
 
-## Project Overview
+## Authority and current posture
 
-This repository implements Phase 1 application execution, the completed Phase 2 per-job resume generator, and the active Phase 3 SQLite backlog workflow. Phase 3 is explicitly authorized for persistent supervised OMP operation with exactly one active job. The durable lifecycle repair record and current SQLite state are the active implementation evidence; unchecked live gates in `TODO.md` remain evidence required for completion claims and are not marked complete by backlog authorization.
+This repository contains three related capabilities:
 
-`TODO.md` is the scope and safety authority. `PROJECT_HANDOFF.md` is historical evidence only; verify its paths and claims against the active tree.
+1. Phase 1 prepares and submits one application with screenshot-first computer use.
+2. Phase 2 generates the canonical one-page resume from source-backed evidence.
+3. Phase 3 stores jobs in SQLite and runs one supervised application at a time.
 
-## Architecture & Data Flow
+`TODO.md` is the active scope and safety authority. `PROJECT_HANDOFF.md` records history and design evidence; it never overrides the active contract. A backlog authorization permits supervised operation, but it is not proof of an unobserved live application or submission. Do not mark a live gate complete without direct evidence from the current visible browser.
+
+## Architecture and data flow
 
 ```text
 job source + SQLite backlog
   -> persistent supervised OMP session claims one job
   -> verified job-specific resume generation
-  -> private run contract + profile/memory + resume
-  -> policy-free DOM observer
-  -> OMP answer resolution and browser action
-  -> immutable ledger + retention and completion audit
-  -> canonical private evidence + audited OMP submission
-  -> durable SQLite outcome + next backlog inspection
+  -> private phase1-run-v2 contract and applicant evidence
+  -> fresh desktop screenshot of the current visible headed browser
+  -> Codex or Gemini visual observation
+  -> immutable visual target ledger and answer resolution
+  -> coordinate/keyboard computer action
+  -> fresh screenshot and visual retention proof
+  -> completeness audit and current final-candidate authorization
+  -> audited two-phase final submission
+  -> private evidence and durable SQLite outcome
+  -> next backlog inspection
 ```
 
-- `src/phase1/contract.mjs` and `profile.mjs` validate fixed run settings, secure local inputs, applicant data, and append-only verified answer memory.
-- `src/phase1/observer.js` is a self-contained page-context IIFE. It inventories controls, frames, blockers, values, validation, and final-action candidates; it must not choose answers or perform actions.
-- `src/phase1/ledger.mjs` owns stable field identity, exact answer-source precedence, observation chains/diffs, deliberate grouped states, action references, and retention checks.
-`src/phase1/audit.mjs` requires every active field to be deliberate, valid, retained, and current while rejecting unknown controls, blockers, stale refs, and incomplete submissions.
-`src/phase1/evidence.mjs` publishes bounded, owner-private JSON/JSONL artifacts, file identities, an action journal, and a submission completion report.
-OMP performs browser actions. Final submission is automated by OMP after the completeness audit passes.
-- `src/phase1/backlog-runner.mjs` and `migrations/004-durable-active-runs.sql` own atomic claims, one-active-run enforcement, leases, restart recovery, same-run `needs_user` continuation, workspace binding, and canonical terminal persistence. OMP remains the persistent loop.
+The visible screenshot is the only source of interface state. The selected Codex or Gemini agent interprets the screenshot into `phase1-visual-observation-v1`; OMP computer use performs the resulting coordinate or keyboard action. There is one action driver, `omp_computer`, and no alternate interaction stack.
 
-## Key Directories
+## Run-v2 contract
+
+Every application run uses these fixed values:
+
+| Key | Required value |
+| --- | --- |
+| `schema` | `phase1-run-v2` |
+| `browser_mode` | `headed` |
+| `perception_driver` | `image_agent_v1` |
+| `action_driver` | `omp_computer` |
+| `model_provider` | `codex` or `gemini` |
+| `submit_policy` | `omp_agent` |
+
+The contract also carries `application_url`, `job_description_path`, `resume_upload_path`, `answer_memory_path`, `run_artifact_dir`, and at least one of `applicant_profile_path` or `source_resume_path`. Paths and source material remain owner-private. A run owns one job; a persistent backlog session may have only one active run.
+
+The visual observation schema is `phase1-visual-observation-v1`. Its required top-level keys are `schema`, `observation_id`, `previous_observation_id`, `observed_at`, `surface`, `agent`, `targets`, and `blockers`. `surface` is `{ surface_id, url, title, screenshot_sha256, viewport: { width, height } }`. `agent` is `{ provider, model }`, with provider `codex` or `gemini`.
+
+Each target is:
+
+```text
+{
+  target_id, field_id, group_id, kind, label, description, bounds,
+  visible, enabled, required, readonly, value_state, checked, selected,
+  options, validation, file, candidate, confidence
+}
+```
+
+`bounds` contains integer screenshot pixels `{ x, y, width, height }` with positive dimensions entirely inside the viewport. `value_state` is `blank`, `present`, `selected`, or `unknown`. A visual observation never contains raw applicant values. `validation` is `{ valid, message_present }` with nullable `valid`; `file` is null or `{ present, file_name }` with a nullable basename; and `candidate` is `{ class, reason }` where class is `field`, `non_final_navigation`, `final_candidate`, or `unknown`.
+
+## Visual operating loop
+
+- Capture a fresh screenshot of the current visible browser before every analysis and action decision. Bind the screenshot SHA-256, surface identity, viewport, and observation identity together.
+- Ask the configured Codex or Gemini provider to analyze only that image. Reject observations with mismatched image identity, stale surface identity, invalid bounds, unknown provider, or raw applicant values.
+- Merge accepted observations into an immutable ledger. Rename all target bindings to `target_id`, `targetId`, and `finalTargetId`; never introduce the retired binding names.
+- Resolve answers in exact order: `memory -> profile -> resume -> agent_inference -> user`. Inference may transform source-backed, non-sensitive facts only. Never infer identity, authorization, protected-class, compensation, date, credential, medical, legal, or other sensitive facts. Ask one precise question when truth cannot otherwise be established, save the answer in private memory, and resume the same run.
+- Use only the visual target ledger. Choose conservative batches only for independent routine fields; newly revealed or dependent fields, invalid/retry work, uploads, choices, widgets, navigation, blockers, and final submission are single actions.
+- Use `captureView`, `analyzeView`, and `performAction`. The adapter permits only `click`, `type_text`, `press_key`, `scroll`, and `upload_file`. Click coordinates come from current `bounds`; text and key actions are deliberate computer input on the same visible surface.
+- After every `performAction`, including an error or timeout, capture a fresh image and obtain a chained visual observation before diagnosing, retrying, or taking another action. Retention is image-based: the later target state must match and include explicit proof `{ action_id, visually_confirmed, file_name? }`.
+- Keep observations, diffs, action journal, retry records, retention proofs, screenshot identities, and final evidence immutable. Store no raw applicant values in evidence; publish only bounded digests, IDs, basenames, outcomes, and screenshot identities.
+- Final submission is permitted only for the current visual `final_candidate`. Run the completeness and retention audit, call `prepareSubmission(session, { finalTargetId })`, require authorization for that exact target, then call `beginFinalSubmit` before the click. Perform the authorized computer click, capture a fresh image, and call `completeFinalSubmit` exactly once with the observed outcome. A failed attempt requires a new observation and new authorization. Finalize only after one successful audited attempt and post-submit image evidence.
+
+## Important areas
 
 | Path | Purpose |
 | --- | --- |
-| `src/phase1/` | Active Phase 1 contracts, observer, ledger, audit, and evidence implementation. |
-| `tests/` | Active Node contract, ledger/audit, and evidence regression tests. |
-| `private/` | Git-ignored, owner-private run inputs and evidence. Never expose or commit its contents. |
-| `skills/playwright-cli/` | Retained Playwright CLI 1.60.0 guidance and SHA-256 provenance. |
-| `Archive/` | Reference-only resume-generation code and applicant evidence; not the active Phase 1 runtime. |
+| `src/phase1/contract.mjs` | Fixed run-v2 settings, secure local inputs, answer memory, and source precedence. |
+| `src/phase1/profile.mjs` | Exact private applicant-profile schema and aliases. |
+| `src/phase1/planner.mjs` | Visual application planning and conservative batch selection. |
+| `src/phase1/ledger.mjs` | Immutable visual observations, diffs, resolutions, actions, and retention. |
+| `src/phase1/audit.mjs` | Completeness, retention, and final-target authorization. |
+| `src/phase1/evidence.mjs` | Owner-private screenshot identities, action journal, and completion evidence. |
+| `src/phase1/backlog-runner.mjs` | Atomic claims, one-active-run enforcement, leases, recovery, and terminal persistence. |
+| `tests/` | Node contract and regression tests for the active implementation. |
+| `private/` | Git-ignored owner-private inputs and evidence; never expose or commit contents. |
+| `Archive/` | Reference-only resume-generation code and applicant evidence. |
 
-## Development Commands
+## Code conventions and safety
 
-```sh
-npm test
-node --test tests/ledger-audit.test.mjs
-node --test tests/contract-profile.test.mjs
-node --test tests/evidence.test.mjs
-node --check src/phase1/observer.js
-```
+- Use ESM, two-space indentation, Node.js 22 or newer, and the dependency-free package surface.
+- Reject unknown keys and malformed, oversized, non-canonical, symlinked, or permission-unsafe inputs with stable error codes. Keep fixed run values fail-closed.
+- Return cloned, recursively frozen ledger and audit values. Preserve stable IDs and observation chains; never mutate caller-owned state.
+- Keep raw applicant values under owner-private paths only. Public evidence uses SHA-256 digests, field IDs, source classes, basenames, screenshot hashes, and outcomes.
+- Preserve regular-file and no-symlink checks, owner-only modes, bounded reads, canonical JSON, atomic no-replace publication, descriptor identity checks, and directory finalization.
+- Secure contract/profile I/O and evidence publication are asynchronous at integration boundaries; the ledger and evidence records remain serialized and immutable.
+- Do not bypass authentication, assessments, anti-bot challenges, or access controls. A CAPTCHA or other external challenge is a live interaction boundary; record only its private outcome and keep the run active when it needs the user.
+- A rejected final action is not a closed job. Re-observe the current image, repair the actual unresolved or invalid target, retain it, and return to the audit boundary. Only explicit live evidence that the posting is unavailable may produce `closed`.
 
-There is no build step, linter, formatter, coverage threshold, Playwright test config, Docker workflow, or CI pipeline. Do not invent commands from historical documents.
+## Runtime and verification
 
-## Code Conventions & Common Patterns
+Use Node.js 22 or newer and npm. Keep browser profiles, screenshots, resumes, answer memory, and evidence under owner-private, git-ignored paths. Do not add a runtime dependency merely to operate the visible browser.
 
-- **Modules and naming:** Use ESM and two-space indentation. Files use `.mjs`, except the injected observer IIFE in `observer.js`. Prefer `camelCase` functions/values, `PascalCase` error/store classes, and `UPPER_SNAKE_CASE` fixed schemas and limits.
-- **Validation:** Reject unknown keys and malformed, oversized, non-canonical, symlinked, or permission-unsafe inputs with stable error codes. Keep fixed run values (`headed`, `playwright_dom_v1`, `omp_browser`, `omp_agent`) fail-closed.
-- **State:** Return cloned, recursively frozen ledger/audit values. Preserve stable IDs, observation chains, and current refs; never mutate caller-owned state.
-- **Privacy:** Store raw applicant values only under `private/`. Public evidence structures use SHA-256 value digests, field IDs, sources, and outcomes—not profile values.
-- **Browser boundary:** Observation code may read DOM/ARIA state only. OMP resolves answers and performs each interaction. Never add JavaScript form mutation, submit calls, or answer policy to the observer.
-- **OMP browser mechanics:** Use the OMP `browser` tool (`xd://browser`) on the same visible CMUX browser surface as the primary action driver. Re-ground with a fresh observer result and browser snapshot before acting. Text entry is `tab.fill(selector, exactText)`—the answer is the second positional argument, and `--value` or any other option token must never be prefixed to it. Inline `"aria-ref=eNN"` selectors are supported for `tab.fill` and `tab.click`; native `tab.select` and `tab.uploadFile` require a uniquely verified exact CSS selector derived from observed control attributes. These helpers are browser actions, not page-JavaScript mutation. Use pinned Playwright CLI mechanics only when the browser helper cannot operate the exact control.
-- **OMP computer-use fallback:** After both the OMP `browser` tool and the documented pinned-CLI mechanic cannot operate a native browser/OS interaction, use the OMP `computer` tool on the same visible CMUX browser surface, especially for a still-open upload chooser. Re-ground from a fresh DOM/snapshot and fresh desktop screenshot before every computer-use action; retain CMUX browser observation and evidence as the source of truth. Never use computer input to bypass authentication, access controls, or the final-submit boundary (gated by `prepareSubmission` audit).
+Run the existing Node test suite and focused contract tests when validating source changes. For a live application change, the required proof is a real headed session: fresh screenshot chain, visual ledger, action journal, retention proofs, upload identity, final audit, audited submission journal, and post-submit screenshot. A unit pass never replaces that live gate. Keep logs free of applicant values, resume text, authentication state, raw job payloads, and screenshots.
 
-- **CAPTCHA handling:** Detect and complete CAPTCHA challenges automatically using the OMP `browser` or `computer` tool on the visible CMUX browser surface. Re-ground with a fresh observer result and browser snapshot before and after each CAPTCHA interaction. CAPTCHA alone must never trigger user escalation, a `needs_user` outcome, or a blocked run. Record the CAPTCHA detection, resolution method, and outcome in the private ledger.
-- **Application autonomy:** Infer and execute routine application decisions from the backlog, run contract, profile, resume, job context, and current page without requesting per-job or per-action permission. This includes selecting the next eligible job, opening a clearly identified application-entry control such as Apply/Easy Apply/Apply on company website, choosing non-final navigation, resolving aliases, formatting supported answers, handling optional fields, and retrying recoverable validation failures.
-- **Submission recovery:** A rejected or non-accepted final action does not establish that a job is closed or ineligible. Keep its browser surface and run active, re-observe the page, diagnose the actual validation or required-field cause, resolve and retain it, then rerun the preparation loop. Only explicit live evidence that the posting is unavailable may produce a closed outcome.
-- **Answer precedence:** `memory -> profile -> resume -> agent_inference -> user`. When memory/profile lack an exact alias, agent inference may generate a non-sensitive answer from resume facts plus job-description context. Every inferred answer requires a rationale digest and verified resume/job-description evidence digests and is marked separately in private ledger/evidence. Never infer identity, authorization, protected-class, salary/compensation, date, credential, or other sensitive personal, legal, financial, or medical facts. Ask only when a truthful answer cannot be derived or a third-party authentication/access-control interaction is required. Every application answer the user provides in the main session must be saved in owner-private answer memory, with its exact question/site alias when available, for reuse and future reference. Persist the verified answer before resuming the same browser session.
-- **Filesystem safety:** Preserve regular-file/no-symlink checks, owner-only modes, bounded reads, canonical JSON, atomic no-replace publication, descriptor identity checks, and submission finalization.
-- **Async:** Secure contract/profile I/O and the evidence factory are async at integration boundaries; the evidence store and ledger are deliberately synchronous and serialized.
-
-## Important Files
-
-| File | Why it matters |
-| --- | --- |
-| `TODO.md` | Authoritative phase contract, live exit gates, and submission boundary. |
-| `package.json` | Node `>=22`, dependency-free ESM package, and the active test command. |
-| `src/phase1/contract.mjs` | Fixed run schema, secure file loading, answer memory, and source precedence. |
-| `src/phase1/profile.mjs` | Exact applicant-profile schema and alias lookups. |
-| `src/phase1/observer.js` | Page-context normalized DOM observer. |
-| `src/phase1/ledger.mjs` | Observation, diff, resolution, action, and retention contracts. |
-| `src/phase1/audit.mjs` | Final completeness and submission audit. |
-| `src/phase1/evidence.mjs` | Private evidence store and completion finalizer. |
-| `tests/*.test.mjs` | Observable regression contracts for active Phase 1 behavior. |
-| `skills/playwright-cli/SOURCE.json` | Retained Playwright bundle version and recorded hashes. |
-| `schemas/application-decision.schema.json` | Canonical strict per-field decision output contract. |
-| `schemas/control-diagnosis.schema.json` | Canonical read-only control diagnosis output contract. |
-| `schemas/repair-result.schema.json` | Canonical bounded repair result output contract. |
-
-- **Typed delegation:** Before delegating a field, diagnosis, or repair task, load the complete matching schema object from `schemas/` and pass it as the strict per-task `outputSchema`. Path-only `$ref` metadata is not validation.
-
-## Runtime/Tooling Preferences
-
-- Use Node.js 22 or newer and npm. Do not run this package under Bun; production behavior is verified with Node.
-- The package has no runtime dependencies. Do not install Puppeteer/Playwright into this package merely to drive the live browser; the retained skill guides observation, while the OMP `browser` tool on the visible CMUX browser surface owns ordinary actions, pinned CLI is control-specific fallback, and the OMP `computer` tool is native-UI fallback.
-- Keep browser profiles, screenshots, resumes, answer memory, and evidence under owner-private, git-ignored paths.
-- The secure file implementation assumes POSIX ownership, modes, descriptor flags, and directory `fsync` behavior.
-
-## Testing & QA
-
-- `npm test` runs the active `node:test` suite. Add tests only for observable contracts and plausible regressions; keep fixtures deterministic and private-data free.
-- For observer or browser behavior, a headed live smoke run is required. Record chained observations/diffs, action refs, the field ledger, retry/validation recovery, uploaded-resume identity, final screenshot/audit, and submission evidence.
-- A passing unit suite does not replace the live exit gate. Leave the browser open on the final review boundary and activate the final Submit control only after prepareSubmission authorizes it.
-- Keep test output free of applicant values, resume text, screenshots, authentication state, and raw job payloads.
+Before delegating a field, diagnosis, or repair task, load the complete matching schema object from `schemas/` and pass it as the strict per-task output schema. Path-only reference metadata is not validation.

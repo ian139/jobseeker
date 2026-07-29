@@ -22,6 +22,8 @@ const WRITE_PRIVATE = fsConstants.O_WRONLY
   | NOFOLLOW;
 const DEFAULT_LEASE_SECONDS = 300;
 const SHA256_HEX = /^[0-9a-f]{64}$/u;
+const MODEL_PROVIDERS = new Set(['codex', 'gemini']);
+const DEFAULT_MODEL_PROVIDER = 'codex';
 
 export const QUEUE_PRIORITY = Object.freeze([
   'active_verified',
@@ -59,6 +61,7 @@ const PREFLIGHT_KEYS = Object.freeze([
   'sourceResumePath',
   'resumeUploadPath',
   'answerMemoryPath',
+  'modelProvider',
 ]);
 const PREFLIGHT_KEY_SET = new Set(PREFLIGHT_KEYS);
 const CLAIM_KEY_SET = new Set([
@@ -81,12 +84,9 @@ const WORKSPACE_KEY_SET = new Set([
 const SAFE_ACTIONS = new Set([
   'observe',
   'click',
-  'clear',
-  'fill',
-  'select',
-  'check',
-  'uncheck',
-  'upload',
+  'type_text',
+  'press_key',
+  'upload_file',
   'scroll',
   'wait',
   'review',
@@ -325,6 +325,11 @@ function parseRows(stdout, code) {
   return parsed;
 }
 
+function normalizeModelProvider(value) {
+  const provider = value === undefined ? DEFAULT_MODEL_PROVIDER : value;
+  if (typeof provider !== 'string' || !MODEL_PROVIDERS.has(provider)) fail('E_MODEL_PROVIDER');
+  return provider;
+}
 function normalizePreflightConfig(config) {
   assertExactKeys(config, PREFLIGHT_KEY_SET, 'E_PREFLIGHT');
   const workspaceRoot = requirePath(config.workspaceRoot, 'E_WORKSPACE_ROOT');
@@ -347,12 +352,13 @@ function normalizePreflightConfig(config) {
     sourceResumePath,
     resumeUploadPath,
     answerMemoryPath,
+    modelProvider: normalizeModelProvider(config.modelProvider),
   };
 }
 
 function preflightContract(config) {
   return {
-    schema: 'phase1-run-v1',
+    schema: 'phase1-run-v2',
     application_url: 'https://phase1-preflight.invalid/',
     job_description_path: config.jobDescriptionPath,
     ...(config.applicantProfilePath === undefined
@@ -363,8 +369,9 @@ function preflightContract(config) {
     answer_memory_path: config.answerMemoryPath,
     run_artifact_dir: config.workspaceRoot,
     browser_mode: 'headed',
-    observer: 'playwright_dom_v1',
-    action_driver: 'omp_browser',
+    perception_driver: 'image_agent_v1',
+    action_driver: 'omp_computer',
+    model_provider: config.modelProvider,
     submit_policy: 'omp_agent',
   };
 }
@@ -1224,6 +1231,7 @@ export async function createJobWorkspace(run, options) {
         : { sourceResumePath: normalized.sourceResumePath }),
       resumeUploadPath: normalized.resumeUploadPath,
       answerMemoryPath: normalized.answerMemoryPath,
+      modelProvider: normalized.modelProvider,
     });
   } catch (error) {
     if (error instanceof BacklogRunnerError) throw error;
@@ -1250,7 +1258,7 @@ export async function createJobWorkspace(run, options) {
   await createPrivateDirectory(expectedEvidencePath);
 
   const runContract = {
-    schema: 'phase1-run-v1',
+    schema: 'phase1-run-v2',
     application_url: normalizedRun.applicationUrl,
     job_description_path: preflight.jobDescriptionPath,
     ...(preflight.applicantProfilePath === undefined
@@ -1263,8 +1271,9 @@ export async function createJobWorkspace(run, options) {
     answer_memory_path: preflight.answerMemoryPath,
     run_artifact_dir: expectedEvidencePath,
     browser_mode: 'headed',
-    observer: 'playwright_dom_v1',
-    action_driver: 'omp_browser',
+    perception_driver: 'image_agent_v1',
+    action_driver: 'omp_computer',
+    model_provider: preflight.modelProvider,
     submit_policy: 'omp_agent',
   };
   const jobSnapshot = {
@@ -1292,6 +1301,7 @@ export async function createJobWorkspace(run, options) {
     jobSnapshotPath,
     startedAt: normalized.startedAt,
     resumeArtifactPath: preflight.resumeArtifactPath,
+    modelProvider: preflight.modelProvider,
     resumeArtifactSha256: preflight.resumeArtifactSha256,
     contract: Object.freeze(structuredClone(runContract)),
   });

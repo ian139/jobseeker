@@ -148,6 +148,7 @@ async function fixture(rows) {
       sourceResumePath,
       resumeUploadPath,
       answerMemoryPath,
+      modelProvider: 'codex',
     },
   };
 }
@@ -195,14 +196,15 @@ async function publishCanonicalCompletion({
   const store = new EvidenceStore(evidencePath);
   try {
     store.recordRunMetadata({
-      schema: 'phase1-run-evidence-v1',
+      schema: 'phase1-run-evidence-v2',
       application_url: applicationUrl,
       run_contract_sha256: contractSha256 ?? await sha256File(contractPath),
       resume_upload_path: path.resolve(resumeUploadPath),
       resume_upload_sha256: sha256Bytes(uploadBytes),
       browser_mode: 'headed',
-      observer: 'playwright_dom_v1',
-      action_driver: 'omp_browser',
+      perception_driver: 'image_agent_v1',
+      action_driver: 'omp_computer',
+      model_provider: 'codex',
       submit_policy: 'omp_agent',
       loop_contract: 'safe-batch-observe-act-reobserve',
       started_at: NOW,
@@ -212,7 +214,7 @@ async function publishCanonicalCompletion({
       action_id: 'attempt-1',
       outcome: 'attempted',
       observation_id: 'observation-1',
-      ref: 'final-ref',
+      target_id: 'final-target',
     });
     store.recordAction({
       action: 'final_submit_result',
@@ -221,20 +223,20 @@ async function publishCanonicalCompletion({
       error_code: null,
     });
     const audit = store.recordFinalAudit({
-      schema: 'phase1-audit-v1',
+      schema: 'phase1-audit-v2',
       observation_id: 'observation-1',
       passed: true,
       complete: true,
       blockers: [],
-      stale_refs: [],
+      stale_target_ids: [],
       unresolved_field_ids: [],
       invalid_field_ids: [],
       unretained_field_ids: [],
       revealed_field_ids: [],
-      final_candidate_refs: ['final-ref'],
+      final_candidate_target_ids: ['final-target'],
       final_review_boundary: true,
       submit_action_count: 1,
-      field_count: 0,
+      target_count: 1,
       final: true,
     });
     store.finalize({
@@ -275,6 +277,11 @@ test('preflight accepts profile-only and source-only complete inputs', async () 
     const sourceResult = await preflightBacklogRun(sourceOnly);
     assert.equal(sourceResult.workspaceRoot, path.resolve(value.preflight.workspaceRoot));
     assert.equal(sourceResult.resumeArtifactPath, path.resolve(value.preflight.resumeUploadPath));
+    const geminiResult = await preflightBacklogRun({
+      ...value.preflight,
+      modelProvider: 'gemini',
+    });
+    assert.equal(geminiResult.modelProvider, 'gemini');
     assert.match(sourceResult.resumeArtifactSha256, /^[0-9a-f]{64}$/u);
   } finally {
     await removeFixture(value);
@@ -825,6 +832,11 @@ test('workspace keeps contract and evidence private and distinct', async () => {
     const contract = JSON.parse(await fsp.readFile(workspace.contractPath, 'utf8'));
     assert.equal(contract.run_artifact_dir, workspace.evidencePath);
     assert.equal(contract.application_url, 'https://example.test/jobs/90');
+    assert.equal(contract.schema, 'phase1-run-v2');
+    assert.equal(contract.browser_mode, 'headed');
+    assert.equal(contract.perception_driver, 'image_agent_v1');
+    assert.equal(contract.action_driver, 'omp_computer');
+    assert.equal(contract.model_provider, 'codex');
     assert.equal(Object.hasOwn(contract, 'description'), false);
     assert.equal(Object.hasOwn(contract, 'applicant_name'), false);
     assert.equal((await fsp.readFile(workspace.contractPath, 'utf8')).includes('fixture job description'), false);

@@ -1,19 +1,21 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.invalid/schemas/application-decision.schema.json",
-  "title": "Application decision",
-  "description": "A bounded, evidence-aware decision for one observed application control.",
+  "title": "Visual application decision",
+  "description": "A bounded decision grounded in the current screenshot observation.",
   "type": "object",
   "additionalProperties": false,
   "required": [
     "observationId",
     "fieldId",
-    "controlReference",
+    "targetId",
     "fieldPolicy",
     "proposedAnswer",
     "answerSource",
     "decisionMode",
     "evidenceReferences",
+    "observationScreenshotSha256",
+    "provider",
     "proposedAction",
     "expectedRetainedState",
     "modelTier",
@@ -23,538 +25,103 @@
     "automaticSubmissionEligible"
   ],
   "properties": {
-    "observationId": {
-      "$ref": "#/$defs/identifier"
-    },
-    "fieldId": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/identifier"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "controlReference": {
-      "oneOf": [
-        {
-          "$ref": "#/$defs/identifier"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "fieldPolicy": {
-      "enum": [
-        "subjective",
-        "qualification",
-        "legal",
-        "demographic",
-        "identity",
-        "hard_fact"
-      ]
-    },
-    "proposedAnswer": {
-      "$ref": "#/$defs/jsonValue"
-    },
-    "answerSource": {
-      "enum": [
-        "exact_memory",
-        "profile_evidence",
-        "resume_evidence",
-        "supported_inference",
-        "best_effort_inference",
-        "configured_default",
-        "configured_decline",
-        "require_user"
-      ]
-    },
-    "decisionMode": {
-      "enum": [
-        "exact_memory",
-        "profile_evidence",
-        "resume_evidence",
-        "supported_inference",
-        "best_effort_inference",
-        "configured_default",
-        "configured_decline",
-        "require_user"
-      ]
-    },
+    "observationId": { "$ref": "#/$defs/identifier" },
+    "fieldId": { "oneOf": [{ "$ref": "#/$defs/identifier" }, { "type": "null" }] },
+    "targetId": { "oneOf": [{ "$ref": "#/$defs/identifier" }, { "type": "null" }] },
+    "fieldPolicy": { "enum": ["subjective", "qualification", "legal", "demographic", "identity", "hard_fact"] },
+    "proposedAnswer": { "$ref": "#/$defs/jsonValue" },
+    "answerSource": { "enum": ["exact_memory", "profile_evidence", "resume_evidence", "supported_inference", "best_effort_inference", "configured_default", "configured_decline", "require_user"] },
+    "decisionMode": { "enum": ["exact_memory", "profile_evidence", "resume_evidence", "supported_inference", "best_effort_inference", "configured_default", "configured_decline", "require_user"] },
     "evidenceReferences": {
       "type": "array",
-      "minItems": 0,
       "maxItems": 64,
       "uniqueItems": true,
-      "items": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 512,
-        "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
-      }
+      "items": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\u0000-\\u001f\\u007f]*$" }
     },
-    "inferenceRationaleDigest": {
-      "oneOf": [
-        {
-          "type": "string",
-          "pattern": "^[a-f0-9]{64}$"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "proposedAction": {
-      "enum": [
-        "fill_text",
-        "clear",
-        "select_option",
-        "toggle",
-        "upload_file",
-        "click",
-        "open_dialog",
-        "close_dialog",
-        "navigate",
-        "wait",
-        "reobserve"
-      ]
-    },
-    "expectedRetainedState": {
-      "$ref": "#/$defs/jsonValue"
-    },
-    "modelTier": {
-      "enum": [
-        "cheap",
-        "standard",
-        "strong",
-        "highest"
-      ]
-    },
-    "confidence": {
-      "type": "number",
-      "minimum": 0,
-      "maximum": 1
-    },
-    "reasonCode": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 128,
-      "pattern": "^[a-z][a-z0-9_.-]*$"
-    },
-    "reobservationRequired": {
-      "type": "boolean"
-    },
-    "automaticSubmissionEligible": {
-      "type": "boolean"
-    }
+    "observationScreenshotSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+    "provider": { "enum": ["codex", "gemini"] },
+    "proposedAction": { "enum": ["click", "type_text", "press_key", "scroll", "upload_file"] },
+    "expectedRetainedState": { "$ref": "#/$defs/jsonValue" },
+    "modelTier": { "enum": ["cheap", "standard", "strong", "highest"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "reasonCode": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z][a-z0-9_.-]*$" },
+    "inferenceRationaleDigest": { "oneOf": [{ "type": "string", "pattern": "^[a-f0-9]{64}$" }, { "type": "null" }] },
+    "reobservationRequired": { "type": "boolean" },
+    "automaticSubmissionEligible": { "type": "boolean" }
   },
   "allOf": [
     {
-      "if": {
-        "anyOf": [
-          {
-            "properties": {
-              "decisionMode": {
-                "enum": [
-                  "supported_inference",
-                  "best_effort_inference"
-                ]
-              }
-            }
-          },
-          {
-            "properties": {
-              "answerSource": {
-                "enum": [
-                  "supported_inference",
-                  "best_effort_inference"
-                ]
-              }
-            }
-          }
-        ]
-      },
-      "then": {
-        "required": [
-          "inferenceRationaleDigest"
-        ],
-        "properties": {
-          "inferenceRationaleDigest": {
-            "type": "string",
-            "pattern": "^[a-f0-9]{64}$"
-          }
-        }
-      }
+      "if": { "anyOf": [
+        { "properties": { "decisionMode": { "enum": ["supported_inference", "best_effort_inference"] } } },
+        { "properties": { "answerSource": { "enum": ["supported_inference", "best_effort_inference"] } } }
+      ] },
+      "then": { "required": ["inferenceRationaleDigest"], "properties": { "inferenceRationaleDigest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }, "evidenceReferences": { "minItems": 1 } } }
     },
     {
-      "if": {
-        "properties": {
-          "answerSource": {
-            "const": "exact_memory"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "decisionMode": {
-            "const": "exact_memory"
-          }
-        }
-      }
+      "if": { "properties": { "answerSource": { "const": "exact_memory" } } },
+      "then": { "properties": { "decisionMode": { "const": "exact_memory" } } }
     },
     {
-      "if": {
-        "properties": {
-          "answerSource": {
-            "const": "profile_evidence"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "decisionMode": {
-            "enum": [
-              "profile_evidence",
-              "supported_inference"
-            ]
-          }
-        }
-      }
+      "if": { "properties": { "answerSource": { "const": "profile_evidence" } } },
+      "then": { "properties": { "decisionMode": { "enum": ["profile_evidence", "supported_inference"] } } }
     },
     {
-      "if": {
-        "properties": {
-          "answerSource": {
-            "const": "resume_evidence"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "decisionMode": {
-            "enum": [
-              "resume_evidence",
-              "supported_inference"
-            ]
-          }
-        }
-      }
+      "if": { "properties": { "answerSource": { "const": "resume_evidence" } } },
+      "then": { "properties": { "decisionMode": { "enum": ["resume_evidence", "supported_inference"] } } }
     },
     {
-      "if": {
-        "properties": {
-          "answerSource": {
-            "const": "supported_inference"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "decisionMode": {
-            "const": "supported_inference"
-          }
-        }
-      }
+      "if": { "properties": { "answerSource": { "const": "supported_inference" } } },
+      "then": { "properties": { "decisionMode": { "const": "supported_inference" } } }
     },
     {
-      "if": {
-        "properties": {
-          "answerSource": {
-            "const": "best_effort_inference"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "decisionMode": {
-            "const": "best_effort_inference"
-          }
-        }
-      }
+      "if": { "properties": { "answerSource": { "const": "best_effort_inference" } } },
+      "then": { "properties": { "decisionMode": { "const": "best_effort_inference" } } }
     },
     {
-      "if": {
-        "properties": {
-          "answerSource": {
-            "const": "configured_default"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "decisionMode": {
-            "const": "configured_default"
-          }
-        }
-      }
+      "if": { "properties": { "answerSource": { "const": "configured_default" } } },
+      "then": { "properties": { "decisionMode": { "const": "configured_default" } } }
     },
     {
-      "if": {
-        "properties": {
-          "answerSource": {
-            "const": "configured_decline"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "decisionMode": {
-            "const": "configured_decline"
-          }
-        }
-      }
+      "if": { "properties": { "answerSource": { "const": "configured_decline" } } },
+      "then": { "properties": { "decisionMode": { "const": "configured_decline" } } }
     },
     {
-      "if": {
-        "properties": {
-          "answerSource": {
-            "const": "require_user"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "decisionMode": {
-            "const": "require_user"
-          }
-        }
-      }
+      "if": { "properties": { "answerSource": { "const": "require_user" } } },
+      "then": { "properties": { "decisionMode": { "const": "require_user" } } }
     },
     {
-      "if": {
-        "properties": {
-          "fieldPolicy": {
-            "enum": [
-              "legal",
-              "demographic",
-              "identity",
-              "hard_fact"
-            ]
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "answerSource": {
-            "enum": [
-              "exact_memory",
-              "configured_default",
-              "configured_decline",
-              "require_user"
-            ]
-          },
-          "decisionMode": {
-            "enum": [
-              "exact_memory",
-              "configured_default",
-              "configured_decline",
-              "require_user"
-            ]
-          }
-        }
-      }
+      "if": { "properties": { "fieldPolicy": { "enum": ["legal", "demographic", "identity", "hard_fact"] } } },
+      "then": { "properties": { "answerSource": { "enum": ["exact_memory", "configured_default", "configured_decline", "require_user"] }, "decisionMode": { "enum": ["exact_memory", "configured_default", "configured_decline", "require_user"] } } }
     },
     {
-      "if": {
-        "properties": {
-          "fieldPolicy": {
-            "enum": [
-              "legal",
-              "demographic",
-              "identity"
-            ]
-          }
-        }
-      },
-      "then": {
-        "not": {
-          "anyOf": [
-            {
-              "properties": {
-                "decisionMode": {
-                  "enum": [
-                    "supported_inference",
-                    "best_effort_inference"
-                  ]
-                }
-              }
-            },
-            {
-              "properties": {
-                "answerSource": {
-                  "enum": [
-                    "supported_inference",
-                    "best_effort_inference"
-                  ]
-                }
-              }
-            }
-          ]
-        }
-      }
+      "if": { "properties": { "proposedAction": { "enum": ["click", "type_text", "upload_file"] } } },
+      "then": { "properties": { "targetId": { "$ref": "#/$defs/identifier" } } }
     },
     {
-      "if": {
-        "properties": {
-          "proposedAction": {
-            "enum": [
-              "fill_text",
-              "clear",
-              "select_option",
-              "toggle",
-              "upload_file",
-              "click",
-              "open_dialog"
-            ]
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "fieldId": {
-            "$ref": "#/$defs/identifier"
-          },
-          "controlReference": {
-            "$ref": "#/$defs/identifier"
-          }
-        }
-      }
+      "if": { "anyOf": [
+        { "properties": { "decisionMode": { "enum": ["exact_memory", "profile_evidence", "resume_evidence", "supported_inference", "best_effort_inference"] } } },
+        { "properties": { "answerSource": { "enum": ["exact_memory", "profile_evidence", "resume_evidence", "supported_inference", "best_effort_inference"] } } }
+      ] },
+      "then": { "properties": { "evidenceReferences": { "minItems": 1 } } }
     },
     {
-      "if": {
-        "properties": {
-          "proposedAction": {
-            "enum": [
-              "close_dialog",
-              "navigate",
-              "wait",
-              "reobserve"
-            ]
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "fieldId": {
-            "type": "null"
-          },
-          "controlReference": {
-            "type": "null"
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "anyOf": [
-          {
-            "properties": {
-              "decisionMode": {
-                "enum": [
-                  "exact_memory",
-                  "profile_evidence",
-                  "resume_evidence",
-                  "supported_inference",
-                  "best_effort_inference"
-                ]
-              }
-            }
-          },
-          {
-            "properties": {
-              "answerSource": {
-                "enum": [
-                  "exact_memory",
-                  "profile_evidence",
-                  "resume_evidence",
-                  "supported_inference",
-                  "best_effort_inference"
-                ]
-              }
-            }
-          }
-        ]
-      },
-      "then": {
-        "properties": {
-          "evidenceReferences": {
-            "minItems": 1
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "anyOf": [
-          {
-            "properties": {
-              "decisionMode": {
-                "const": "best_effort_inference"
-              }
-            }
-          },
-          {
-            "properties": {
-              "answerSource": {
-                "const": "best_effort_inference"
-              }
-            }
-          }
-        ]
-      },
-      "then": {
-        "properties": {
-          "modelTier": {
-            "const": "highest"
-          }
-        }
-      }
+      "if": { "anyOf": [
+        { "properties": { "decisionMode": { "const": "best_effort_inference" } } },
+        { "properties": { "answerSource": { "const": "best_effort_inference" } } }
+      ] },
+      "then": { "properties": { "modelTier": { "const": "highest" } } }
     }
   ],
   "$defs": {
-    "identifier": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 512,
-      "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
-    },
+    "identifier": { "type": "string", "minLength": 1, "maxLength": 512, "pattern": "^[^\\u0000-\\u001f\\u007f]*$" },
     "jsonValue": {
       "oneOf": [
-        {
-          "type": "null"
-        },
-        {
-          "type": "string",
-          "maxLength": 65536,
-          "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
-        },
-        {
-          "type": "boolean"
-        },
-        {
-          "type": "number"
-        },
-        {
-          "type": "array",
-          "maxItems": 128,
-          "items": {
-            "$ref": "#/$defs/jsonValue"
-          }
-        },
-        {
-          "type": "object",
-          "maxProperties": 128,
-          "propertyNames": {
-            "minLength": 1,
-            "maxLength": 512,
-            "pattern": "^[^\\u0000-\\u001f\\u007f]*$"
-          },
-          "additionalProperties": {
-            "$ref": "#/$defs/jsonValue"
-          }
-        }
+        { "type": "null" },
+        { "type": "string", "maxLength": 65536, "pattern": "^[^\\u0000-\\u001f\\u007f]*$" },
+        { "type": "boolean" },
+        { "type": "number" },
+        { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/jsonValue" } },
+        { "type": "object", "maxProperties": 128, "propertyNames": { "minLength": 1, "maxLength": 512, "pattern": "^[^\\u0000-\\u001f\\u007f]*$" }, "additionalProperties": { "$ref": "#/$defs/jsonValue" } }
       ]
     }
   }

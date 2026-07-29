@@ -1,309 +1,248 @@
 # Jobs Automation Rebuild
 
-This is the execution roadmap for the fresh implementation. `PROJECT_HANDOFF.md` is design history and evidence; this file defines the new build order and acceptance gates.
+This roadmap is the active scope and safety authority. `PROJECT_HANDOFF.md` is historical context only. `skills/application-prep/SKILL.md` is the canonical operating procedure for an application run. A backlog authorization permits supervised operation, but it does not satisfy an unchecked live gate.
 
-**Current phase:** Phase 3 backlog processing is active by explicit user authorization. Phase 2 generator proof and the durable Phase 3 lifecycle repair are complete, as verified by the lifecycle work record and current SQLite state. The remaining Phase 1 headed live-submission checklist entries stay evidence-gated and are not marked complete by this authorization. Process exactly one active job at a time through the persistent OMP session and do not mark unchecked live gates complete without direct evidence.
+**Current posture:** Phase 2 resume generation and the durable Phase 3 lifecycle repair are historical implementation evidence. Phase 1 visual computer use is the active cutover contract. No live Phase 1 or Phase 3 submission gate is complete until a current headed session produces the required screenshot identities, visual observations, retention proofs, audited submission journal, and post-submit evidence. Process exactly one active job at a time.
 
-## How an OMP agent must use this file
+## How to use this file
 
-1. For implementation or contract changes, read the active phase and consult `PROJECT_HANDOFF.md` only for unresolved history. For routine Phase 3 application startup, use the canonical application skill and active durable run record instead of rereading this roadmap or historical handoffs.
-2. Turn every unchecked item in that phase into an execution plan. Do not reinterpret the phase into a smaller scaffold.
-3. Work through the phase end to end. A fixture, unit test, mocked browser, or CLI success is not a substitute for the phase's live proof.
-4. Keep OMP as the operator and reasoning loop. Deterministic libraries may expose narrow tools, but a custom CLI, daemon, RPC coordinator, or policy engine must not become the product loop.
-5. Do not declare a phase complete until every exit-gate item for that phase has been directly observed, except where this roadmap explicitly records a user-authorized deferral or activation. The explicit Phase 3 activation permits supervised backlog operation while unchecked live gates remain completion evidence to obtain.
-6. Preserve private applicant data locally. Do not place profile values, resume claims, field answers, or application screenshots in public logs or summaries.
+1. Read the active phase and the application skill before changing implementation or starting a run.
+2. Treat every unchecked item as work or evidence still required. Do not infer live completion from source code, a fixture, a unit test, a mocked surface, a private historical report, or backlog authorization.
+3. Preserve applicant data, answer values, screenshots, resume text, job payloads, and authentication state under owner-private paths. Public notes contain only bounded IDs, digests, basenames, and outcomes.
+4. Keep OMP as the operator and reasoning loop. Deterministic modules may expose narrow contracts, but a custom daemon, RPC coordinator, policy engine, or alternate interaction stack must not become the product loop.
+5. Keep the one-active-run invariant across claims, leases, recovery, and submission. A `needs_user` run remains active and resumable.
+6. Record the exact observation and action evidence required by the run-v2 contract. Never mark a live gate complete without direct current proof.
 
 ## Product end state
 
 ```text
 job source
   -> normalized SQLite backlog
-  -> deterministic one-page LaTeX resume
-  -> persistent OMP agent in a supervised cmux workspace
-  -> headed browser application session
-  -> every user-facing application field resolved and verified
-  -> OMP agent reviews and submits after the completeness audit passes
+  -> deterministic one-page source-backed resume
+  -> persistent supervised OMP session with one active run
+  -> phase1-run-v2 private inputs
+  -> fresh screenshot of the current visible headed browser
+  -> Codex or Gemini visual analysis
+  -> visual target ledger and truthful answer resolution
+  -> coordinate/keyboard computer actions
+  -> fresh screenshot after every mutation
+  -> image-based retention and completeness audit
+  -> two-phase audited final submission
+  -> private evidence and durable outcome
 ```
 
-The system prepares complete applications and performs final submission after the completeness audit passes.
+The application target is one concrete job per run. The run continues through non-final navigation, validation repair, and newly revealed targets until it is complete, needs a truthful user fact, reaches an external access boundary, or has explicit evidence that the posting is unavailable.
 
 ## Decisions that apply to every phase
 
-- **One job per application run.** Phase 1 takes one agent-selected target from the run input or backlog. Starting preparation never requires separate per-job permission; the backlog itself does not exist until Phase 3.
-- **No early handoff.** An error, an optional field, or a sensitive field is not a reason to declare the application ready. The agent continues observing, resolving, filling, and validating until the completion audit passes.
-- **Every field means every user-facing application control.** Required and optional text fields, text areas, selects, comboboxes, radios, checkboxes, dates, uploads, and conditional controls must receive a deliberate, verified value or state. Hidden framework inputs, honeypots, disabled controls that cannot become active, and the final Submit control are not application questions; the final Submit control is handled only through `prepareSubmission`.
-- **Sensitive fields are answerable, not automatically blocked.** If the local profile or answer memory contains a truthful stored answer, use it without asking again. If a personal, legal, demographic, financial, medical, work-authorization, or other factual answer is missing, ask the user one precise question, save the answer locally, and resume the same run. Never invent a personal fact.
-- **Truth is the only content restriction.** At least one applicant-evidence input is required: a structured profile JSON, a source resume, or both. When both exist, stored profile values take precedence and the resume supplies supporting evidence. A job description supplies job context, never evidence that the applicant has a skill or fact.
-- **Agent inference is the default.** When exact answer memory and profile aliases do not resolve a field, OMP may generate an answer from applicant facts in the source resume plus wording and requirements in the job description. `agent_inference` is an allowed answer source for every field shape, but each inferred answer must carry a rationale digest and the verified resume/job-description evidence digests and must be marked separately in the private ledger/evidence. Inference may transform supported facts but must never supply identity, dates, credentials, work authorization, protected-class answers, salary or compensation, or any other sensitive personal, legal, financial, or medical fact.
-- **Final submission is automated by OMP after `prepareSubmission` authorizes it.** OMP identifies the final control, runs the completeness audit via `prepareSubmission`, durably begins the attempt with `beginFinalSubmit`, clicks the returned ref, and records the observed outcome with `completeFinalSubmit`. This is programmatic audit authorization and requires no human approval.
-- **Direct browser operation replaces the old guarded applier.** Do not reactivate the archived Puppeteer/Python protocol, route allowlist, sensitive-field blocker, safety-policy stack, application RPC service, detached-browser recovery system, or handoff-on-uncertainty behavior. Reuse lessons, not that implementation.
-- **Playwright observes; OMP acts.** The Playwright navigation skill and DOM observer describe the current page and verify retained state. The OMP `browser` tool on the visible CMUX browser surface is the primary action driver for clicking application-entry controls, filling, selecting, uploading, scrolling, and non-final navigation. Pinned Playwright CLI is control-specific fallback; the OMP `computer` tool is the last-resort native browser/OS fallback when available. Re-observe after every meaningful mutation.
-- **Solve CAPTCHAs automatically.** Detect and complete CAPTCHA challenges using the OMP `browser` or `computer` tool on the visible CMUX browser surface. Re-ground with a fresh observer result and browser snapshot before and after each CAPTCHA interaction. CAPTCHA alone must never trigger user escalation, a `needs_user` outcome, or a blocked run. Record the CAPTCHA detection, resolution method, and outcome in the private ledger.
-- **Live evidence must match the claim.** Browser success requires a real headed browser run on the selected application. Resume success requires a real compiled and inspected PDF. Pipeline success requires the persistent OMP loop to consume a real SQLite row.
+- **One job per application run.** Phase 1 receives one direct URL or one atomically claimed backlog job. Starting preparation does not require a separate per-job approval.
+- **Screenshot-first state.** A fresh desktop screenshot containing the current visible browser is captured before each visual decision. The screenshot is analyzed by the configured Codex or Gemini provider and bound to a surface identity and SHA-256.
+- **Single action driver.** `action_driver` is fixed to `omp_computer`. Permitted operations are `click`, `type_text`, `press_key`, `scroll`, and `upload_file`, performed from screenshot coordinates or deliberate keyboard input. There is no alternate action path.
+- **Fresh image after mutation.** After every computer action, including an error or timeout, capture a new screenshot and obtain a chained visual observation before another action, diagnosis, or retry.
+- **Visual target ledger.** Bind plans and evidence to `target_id`, `targetId`, and `finalTargetId`. Do not use stale target identities after a new observation. Keep the ledger immutable and preserve diffs and action history.
+- **Truthful answers only.** Resolve in order `memory -> profile -> resume -> agent_inference -> user`. Inference may transform source-backed non-sensitive facts only. Never infer identity, authorization, protected-class, salary or compensation, dates, credentials, medical, legal, or other sensitive facts.
+- **No early handoff.** Optional fields, validation failures, or an unresolved target are not success. Continue when recoverable; ask one precise question for a missing truthful fact, save it to private answer memory, and resume the same run.
+- **Two-phase final submission.** The current visual `final_candidate` must pass completeness and image-based retention audit. `prepareSubmission(session, { finalTargetId })` authorizes that exact target; `beginFinalSubmit` records the attempt before the computer click; a fresh image follows; `completeFinalSubmit` resolves the attempt exactly once. A retry needs a new observation and new authorization.
+- **Evidence is private and bounded.** Store screenshot identities, observation IDs, target IDs, action IDs, SHA-256 digests, file basenames, source classes, and outcomes. Never store raw applicant values in evidence.
+- **Live evidence must match the claim.** Resume success requires a real compiled and inspected PDF. Application success requires a real headed screenshot chain and audited post-submit evidence. Pipeline success requires the persistent OMP loop to process a real SQLite row.
 
 ## Assets to retain
 
-These are the canonical resume baseline and must not be deleted while the new implementation is built:
+These resume assets are unrelated to the application interaction cutover and remain canonical:
 
-- `Archive/resume_generator.py` — deterministic selector, renderer, compile/measure loop, and artifact publisher.
-- `Archive/resume_generator_command.py` — existing invocation and job-selection adapter; useful as reference, not necessarily the final runtime surface.
+- `Archive/resume_generator.py` — deterministic resume selector, renderer, compile/measure loop, and artifact publisher.
+- `Archive/resume_generator_command.py` — existing invocation and job-selection adapter used as reference.
 - `Archive/resume_advisor.py` — optional advisory ranking limited to known evidence IDs.
-- `Archive/resume/generator/SKILL.md` — governing resume policy; preserve its behavior and fingerprinting role.
+- `Archive/resume/generator/SKILL.md` — governing resume policy and fingerprinting role.
 - `Archive/resume/generator/profile.json` — structured applicant evidence catalog; private.
 - `Archive/resume/generator/Resume.tex` — current LaTeX form and style.
-- `Archive/resume/Main_Resume.pdf` — visual reference for the form; private.
+- `Archive/resume/Main_Resume.pdf` — private visual reference for the form.
 
-`Archive/resume.py` and `Archive/resume_artifacts.py` belong to the incompatible second resume implementation. Do not activate or merge them into the canonical generator merely to connect the pipeline.
-
-- `skills/playwright-cli/SKILL.md`, its complete `references/` directory, and `SOURCE.json` — exact Playwright CLI skill bundle retained from Playwright 1.60.0 in the sibling `../Jobs` project. `SOURCE.json` records the original package-relative path and SHA-256 for every retained source file. Read the skill before Phase 1 and keep the bundle together.
+`Archive/resume.py` and `Archive/resume_artifacts.py` belong to an incompatible second resume implementation. Do not merge it into the canonical generator.
 
 ---
 
-# Phase 1 — Complete and submit one application in a headed browser
+# Phase 1 — Screenshot-first application run
 
 ## Goal
 
-Given one application URL, a read-only job-description snapshot, and at least one applicant-evidence input (a local profile JSON, a source resume, or both), an OMP agent uses Playwright-backed DOM observation plus OMP `browser` tool actions on the visible CMUX browser surface to complete every user-facing field across the application flow, upload the configured resume, resolve validation errors and dynamically added controls, and stop only when the application is submitted.
+Given one application URL, a read-only job-description snapshot, and at least one applicant-evidence input, an OMP agent uses a fresh screenshot of the current visible headed browser, Codex or Gemini visual analysis, and coordinate/keyboard computer actions to complete every reachable application target, upload the configured resume, repair validation, and submit only through the audited two-phase boundary.
 
-The target is one concrete application, not a reusable ATS platform and not a backlog worker.
+## Required run parameters
 
-## Required inputs and parameters
+The owner-private run contract is machine-readable and contains:
 
-The implementation may choose its file layout, but it must expose one machine-readable run contract containing these values:
+| Parameter | Required value or meaning |
+| --- | --- |
+| `schema` | Fixed to `phase1-run-v2`. |
+| `application_url` | One application URL selected directly or from the backlog. |
+| `job_description_path` | Read-only local job snapshot; context only, never applicant evidence. |
+| `applicant_profile_path` | Optional private profile with reusable facts and verified answers. |
+| `source_resume_path` | Optional source resume used as applicant evidence. |
+| `resume_upload_path` | Canonical PDF path to upload during this run. |
+| `answer_memory_path` | Private appendable verified-answer memory. |
+| `run_artifact_dir` | Private destination for screenshot identities, ledger, journal, and evidence. |
+| `browser_mode` | Fixed to `headed`; use the current visible browser surface. |
+| `perception_driver` | Fixed to `image_agent_v1`. |
+| `action_driver` | Fixed to `omp_computer`. |
+| `model_provider` | Required `codex` or `gemini`; examples use `codex`. |
+| `submit_policy` | Fixed to `omp_agent`. |
 
-| Parameter | Meaning |
-|---|---|
-| `application_url` | The single application page selected for this run from direct input or the backlog; no separate permission prompt is required. |
-| `job_description_path` | Local read-only snapshot of the listing text, captured from the supplied job or provided by the user; it may guide wording but is never applicant evidence. |
-| `applicant_profile_path` | Optional local JSON containing reusable facts, preferences, and stored answers; required only when no source resume is supplied. |
-| `source_resume_path` | Optional current resume used as applicant evidence; required only when no profile JSON is supplied. |
-| `resume_upload_path` | The exact PDF to upload during Phase 1. It may initially equal the source resume. |
-| `answer_memory_path` | Local, appendable record of verified answers and field aliases learned during prior or current runs. |
-| `run_artifact_dir` | Private location for observations, field ledger, screenshots, and completion evidence. |
-| `browser_mode` | Headed and visible; the same session remains available for OMP review and submission. |
-| `observer` | Playwright/DOM observer that emits a normalized snapshot without deciding answers. |
-| `action_driver` | OMP `browser` tool on the visible CMUX browser surface, with pinned CLI and the OMP `computer` tool only as ordered fallbacks; never an autonomous Playwright form-filler. |
-| `submit_policy` | Fixed to `omp_agent`. Submission is automated after audit. |
+At least one of `applicant_profile_path` and `source_resume_path` is required. `resume_upload_path` may point to the source resume, but it must be canonicalized and privately verified before use. Do not add a legacy observer, action driver, or loop parameter to this contract.
 
-At least one of `applicant_profile_path` or `source_resume_path` is required; both are allowed. `resume_upload_path` remains separately required and may point to the same file as `source_resume_path`.
+## Visual observation contract
 
-When a profile JSON is used, it must be able to represent at least contact details, address, links, education, employment, skills, availability, location/relocation preferences, compensation preferences, work authorization and sponsorship, voluntary demographic choices, reusable yes/no answers, and user-authored explanations. Values remain local and may be omitted until a page actually asks for them.
+Every accepted image analysis uses `schema: phase1-visual-observation-v1` and these top-level keys:
 
-## Browser authority
+```text
+schema
+observation_id
+previous_observation_id
+observed_at
+surface
+agent
+targets
+blockers
+```
 
-OMP acts by default, without per-job or per-action permission, to:
+`surface` is:
 
-- inspect the page, DOM/ARIA state, labels, descriptions, options, validation messages, frames, and current values;
-- click clearly identified application-entry controls, fill, select, scroll, check/uncheck, upload the configured resume, and activate non-final continuation controls;
-- revise a field when page feedback shows that the prior value was rejected or semantically wrong;
-- move through all non-final pages belonging to the same application;
-- ask the user only for one missing factual answer or a required third-party access-control interaction, persist any factual answer, and continue the current browser session.
+```text
+{ surface_id, url, title, screenshot_sha256, viewport: { width, height } }
+```
 
-Bypassing an external access control remains the only permanent browser boundary for this phase.
+`agent` is `{ provider, model }`; provider must equal the run's `model_provider`. Every target is:
 
-## Field completion contract
+```text
+{
+  target_id, field_id, group_id, kind, label, description, bounds,
+  visible, enabled, required, readonly, value_state, checked, selected,
+  options, validation, file, candidate, confidence
+}
+```
 
-A field is complete only when all of the following are true:
+Use integer screenshot-pixel `bounds` with positive width and height wholly inside the declared viewport. `value_state` is one of `blank`, `present`, `selected`, or `unknown`. `validation` is `{ valid, message_present }` with nullable `valid`; `file` is null or `{ present, file_name }` where `file_name` is a nullable basename. `candidate` is `{ class, reason }` and its class is `field`, `non_final_navigation`, `final_candidate`, or `unknown`. The observation contains no raw applicant values or hidden interface metadata.
 
-1. It has a deliberate answer or state derived through the resolution order below.
-2. The page accepted the interaction and retained the value after blur/change.
-3. The control is not currently reporting a validation error.
-4. Any dependent fields revealed by that answer have been added to the field ledger and completed.
-5. The answer source is recorded as profile, resume, prior stored answer, evidence-backed agent inference, or direct user answer.
+The transport owns the visible surface and exposes only `captureView`, `analyzeView`, and `performAction`. The action set is exactly:
 
-For checkboxes, radios, and toggles, “complete” means an intentional verified state; it does not mean blindly enabling every option. For optional questions, blank is not a deliberate state unless the UI offers and the profile or answer memory supports “prefer not to answer,” “not applicable,” or an equivalent choice.
+- `click`, using coordinates inside a current target's bounds;
+- `type_text`, using deliberate text input into the current target;
+- `press_key`, using an explicit key on the current surface;
+- `scroll`, using a bounded visual scroll action;
+- `upload_file`, using the privately verified canonical file path.
 
-## Answer resolution order
+## Answer and target policy
 
-Resolve each field in this order:
+Resolve every target from the exact precedence `memory -> profile -> resume -> agent_inference -> user`. Store each supplied user answer in owner-private answer memory before continuing. An inferred answer must carry private rationale and source-evidence digests. Never infer restricted personal, legal, financial, medical, demographic, authorization, credential, date, or compensation facts. Ask only for a missing truthful fact or an external authentication/access-control interaction.
 
-1. exact verified answer already stored for that question or site alias;
-2. stored value or preference in the applicant profile;
-3. unambiguous fact in the source resume;
-4. evidence-backed agent inference generated from applicant facts in the source resume and wording or requirements in the job description;
-5. one targeted user question only when the factual answer remains unknowable or inference is prohibited for that fact.
+A target is complete only when it has a deliberate state, the current image shows that state retained, the current target is visible and valid or intentionally blank, and all dependent targets revealed by it are inventoried and resolved. For an upload, retain only the action ID, screenshot identity, and verified file basename/hash; do not persist file contents or applicant values in public evidence. Optional targets still require a deliberate retained state when reachable.
 
-After step 5, persist the user's answer and immediately resume the loop. Do not convert an unknown answer into a generic handoff or mark the run complete.
+## Required visual loop
 
-## Required observe–infer–act loop
-
-1. Open the supplied or agent-selected URL in a headed browser and wait for the page to stabilize.
-2. Observe the current DOM. Inventory all visible/enabled user-facing controls, their labels, types, options, required state, current value, validation state, frame, and whether a control could be final submission.
-3. Merge the observation into a field ledger. Preserve completed fields and add newly revealed fields.
-4. Call `selectSafeApplicationBatch` for the latest observation. It may select up to three independent ordinary text controls; invalid/retry work, newly revealed or dependency-marked fields, uploads, custom widgets, choices/toggles, navigation, and final submission are always single-action units.
-5. Resolve every planned answer using the precedence above before mutation. A multi-field batch proceeds only when every answer resolves deterministically from memory, profile, or resume. Agent inference, missing restricted facts, and user escalation return to single mode.
-6. Map every planned field to one exact live control on the visible CMUX OMP `browser` surface and perform the interactions in order. Stop on the first non-success or unexpected browser state. Use pinned CLI only for a control-specific fallback and computer input only for a remaining native browser/OS interaction.
-7. Publish all actually attempted routine fills atomically through `recordActionBatch`; publish a lone or hazardous action through `recordAction`. Evidence recording remains inside coordinator APIs.
-8. Re-observe immediately after the batch or single action. Confirm every attempted value was retained, capture validation feedback, and detect DOM changes. Diagnose and retry only the failed/stale field.
-9. When the current page has no unresolved fields, activate only the non-final Next/Continue control as a single action, then repeat from step 2.
-10. At the final page, run a full completion audit across the ledger and current DOM. Stop only when every reachable application field is complete and the final Submit control is ready.
-11. Leave the headed browser open, capture the completion report, and proceed through the audited submission protocol.
-
-The loop must handle at least ordinary text inputs, textareas, native and custom selects, combobox/autocomplete widgets, radios, checkboxes, date/phone/address controls, file uploads, validation messages, conditional questions, and non-final multi-page navigation encountered by the chosen application.
-
-## Minimal run evidence
-
-Keep this intentionally smaller than the previous artifact/RPC system:
-
-- application URL and start time;
-- observation snapshots or normalized diffs sufficient to explain each action;
-- field ledger with answer source and final verified state;
-- exact uploaded-resume path and SHA-256;
-- validation/retry notes;
-- final screenshot and completion audit;
-- explicit evidence of the submission action and outcome.
-
-Do not build a database, event-sourcing layer, custom browser protocol, or distributed lifecycle for Phase 1.
+1. Recover an existing active run before claiming anything new. Enforce `max_active_jobs = 1`.
+2. Validate the exact job, private profile/memory, job snapshot, and resume-upload identity. Keep the headed browser visible on the current application surface.
+3. Capture a fresh desktop screenshot containing the current visible browser. Bind its SHA-256 and surface identity to the observation request.
+4. Ask the configured Codex or Gemini provider for a bounded `phase1-visual-observation-v1`. Validate provider, schema, bounds, image identity, and privacy before accepting it.
+5. Merge the observation and diff into the immutable visual target ledger. Preserve prior evidence while replacing only the current visual state.
+6. Resolve answers and choose a conservative plan. Batch only independent routine targets; use a single action for newly revealed/dependent targets, invalid or retry work, uploads, choices, widgets, navigation, blockers, and final submission.
+7. Record the action intent against the current `observation_id` and `target_id`, then call `performAction` once. Stop immediately on an unexpected result.
+8. Capture a fresh screenshot after every action, including failures and timeouts. Analyze it as the chained next observation, update the ledger, and verify image-based retention with `{ action_id, visually_confirmed, file_name? }` for every attempted target.
+9. Retry only a failed or stale target after the fresh observation. Newly revealed targets become historical ledger obligations and must be completed before further navigation.
+10. When no unresolved field target remains, activate one current `non_final_navigation` candidate and return to step 3. Never treat an ambiguous or unknown candidate as navigation authority.
+11. On the final surface, capture a final fresh screenshot, accept its visual observation, verify every reachable target and retention proof, and require exactly one current `final_candidate`.
+12. Call `prepareSubmission(session, { finalTargetId })` for that current candidate. Require authorization and matching current observation/target identity.
+13. Call `beginFinalSubmit` before any submit action. Require its returned target binding to equal the authorized `finalTargetId`, then perform the authorized coordinate click through `omp_computer`.
+14. Capture and analyze a fresh post-action screenshot even when the computer action reports an error. Call `completeFinalSubmit` exactly once with the observed outcome. A failure returns to step 3 and requires a new audit and authorization.
+15. After one successful completion, publish private post-submit screenshot identity and completion evidence, finalize the run, persist its terminal outcome, and inspect the backlog again.
 
 ## Work checklist
 
-- [x] Read and verify the retained Playwright CLI skill bundle and its recorded hashes before browser work.
-- [x] Define the local application-profile and answer-memory formats around the existing private profile/resume data.
-- [x] Select one real application URL as the sole Phase 1 target.
-- [x] Implement a normalized Playwright DOM observer for the controls actually present on that application.
-- [x] Expose observation data to the OMP agent without embedding answer policy in the observer.
-- [x] Drive all field interactions through the OMP `browser` tool on the visible CMUX browser surface, with pinned CLI and the OMP `computer` tool as ordered fallbacks.
-- [x] Implement the field ledger and answer-source precedence.
-- [x] Implement re-observation, DOM diffing, value-retention checks, and validation-error recovery.
-- [x] Handle dynamically revealed fields and all non-final pages encountered by the selected application.
-- [x] Upload the configured resume and verify the page retained the file.
-- [x] Implement the completion auditor that includes optional and sensitive questions.
-- [x] Submit the application and capture post-submit evidence.
-- [x] Perform the live exit-gate run below.
+Implementation and live proof are distinct. Keep every unobserved live item unchecked:
+
+- [ ] Implement and verify the phase1-run-v2 contract and fixed values.
+- [ ] Implement screenshot capture and SHA-256 surface binding for the current visible headed browser.
+- [ ] Implement Codex/Gemini visual observation validation and immutable target ledger updates.
+- [ ] Implement coordinate/keyboard computer actions and the exact five-action adapter boundary.
+- [ ] Implement fresh-image-after-action retention proofs without raw applicant values.
+- [ ] Implement conservative visual planning, answer precedence, retry, and one-active-run recovery.
+- [ ] Implement the completeness audit and current visual final-candidate binding.
+- [ ] Implement and exercise `prepareSubmission -> beginFinalSubmit -> performAction -> fresh image -> completeFinalSubmit`.
+- [ ] Publish private post-submit evidence and durable terminal persistence.
+- [ ] Demonstrate one complete real application run below.
+
+## Phase 1 live exit gate
+
+Phase 1 is complete only when one current headed live run directly demonstrates every item below. None of these items is complete from a test, fixture, historical artifact, or backlog authorization:
+
+- [ ] The run uses `schema: phase1-run-v2`, `browser_mode: headed`, `perception_driver: image_agent_v1`, `action_driver: omp_computer`, `model_provider: codex|gemini`, and `submit_policy: omp_agent`.
+- [ ] The exact job and private evidence inputs are bound to one run, and one active run is enforced.
+- [ ] A fresh screenshot of the current visible browser is captured before each visual decision and each screenshot identity validates.
+- [ ] A Codex or Gemini observation validates as `phase1-visual-observation-v1` with valid surface, viewport, target bounds, blockers, and no raw applicant values.
+- [ ] Every reachable application target, including optional and evidence-supported sensitive targets, has a deliberate, valid, visually retained state.
+- [ ] Dynamic targets and non-final navigation encountered during the run are completed with a fresh image after every mutation.
+- [ ] The configured resume upload succeeds and private evidence records its verified basename/hash and retention proof.
+- [ ] The latest image contains exactly the current final candidate authorized by `prepareSubmission(session, { finalTargetId })`.
+- [ ] `beginFinalSubmit` records the authorized attempt before the computer click; `completeFinalSubmit` resolves that same attempt exactly once.
+- [ ] Post-submit screenshot identity, completion evidence, and the paired submission-attempt journal record exactly one success.
+- [ ] The headed browser remains available long enough to capture post-submit evidence, and the run finalizes only from that evidence.
+
+No current live proof is recorded here. The prior private preparation report predates run-v2 visual observation and audited submission, so it cannot satisfy this gate.
 
 ## Explicitly out of scope
 
-- scraping, TheirStack, feeds, job ranking, SQLite, or a backlog;
-- resume tailoring or LaTeX generation;
-- generalized Greenhouse/Lever adapters or broad cross-site compatibility;
-- an application CLI as the primary operator;
-- a persistent daemon, RPC service, or browser subprocess protocol;
-- circumventing authentication, assessment, anti-bot, or access controls (completing presented CAPTCHA challenges through normal browser/computer interaction is required, not circumvention).
+- scraping, job ranking, or broad cross-site compatibility;
+- resume tailoring outside the canonical generator;
+- a custom application CLI, daemon, RPC service, or second orchestrator;
+- bypassing authentication, assessments, anti-bot challenges, or access controls;
+- storing raw applicant values in public evidence;
+- multiple active application runs before sequential recovery and ownership are proven.
 
-## Live exit gate
+## Phase 1 kickoff prompt
 
-Phase 1 is complete only when one headed live run demonstrates all of these:
-
-- [x] One real application is opened from an agent-selected or directly supplied URL without a separate permission prompt.
-- [x] Every reachable user-facing field, including optional and evidence-supported sensitive fields, has a deliberate value/state.
-- [x] Dynamic fields and non-final pages encountered in that application are completed.
-- [x] The configured resume is uploaded and its identity is recorded.
-- [x] No completed field has an outstanding validation error.
-- [x] A final observation confirms values were retained.
-- [ ] A concrete final Submit control ref appears in the latest observation, `prepareSubmission(session, { finalRef })` authorizes that exact ref, and `beginFinalSubmit(session)` durably records the attempt before OMP clicks its returned ref.
-- [ ] `completeFinalSubmit` resolves every begun attempt; post-submit evidence records the screenshot and full paired submission-attempt journal with exactly one success.
-
-The 2026-07-24 private run predates the automated-submission contract. Its
-immutable report at
-`private/phase1/vast-4696685006/strict-live/evidence/completion.json` proves the
-33-field preparation audit only; it does not satisfy the current submission
-exit gate. The current Node suite is the contract-level evidence until a new
-headed live run captures post-submit evidence.
-
-## OMP kickoff prompt
-
-> Use `skills/application-prep/SKILL.md` as the canonical Phase 1 operating procedure. Start or recover the private run coordinator, then use `selectSafeApplicationBatch` to fill conservative independent routine text fields from one observation and retain them after one fresh chained observation. Keep newly revealed/dependency fields, invalid/retry work, uploads, widgets, choices, navigation, and submission single-action. Use the OMP `browser` tool on the visible CMUX surface; consult pinned CLI guidance only after the exact browser helper fails. Submit only through `prepareSubmission -> beginFinalSubmit -> browser click -> fresh observation -> completeFinalSubmit -> finalizeRun`.
+> Read `skills/application-prep/SKILL.md` and the active private run record. Recover the existing run first or claim one queued job with `max_active_jobs = 1`. Use `phase1-run-v2`: capture a fresh screenshot of the current visible headed browser, ask the configured Codex or Gemini provider for `phase1-visual-observation-v1`, resolve truthful answers into the visual target ledger, and use only `omp_computer` coordinate/keyboard actions. Capture and analyze a fresh image after every action, retain every target with image proof, and submit only through `prepareSubmission({ finalTargetId }) -> beginFinalSubmit -> performAction -> fresh image -> completeFinalSubmit`. Finalize private evidence before inspecting the backlog again.
 
 ---
 
-# Phase 2 — Finalize the canonical one-page LaTeX resume generator
+# Phase 2 — Canonical one-page resume generator
 
 ## Goal
 
-Given a job description, the structured facts about the applicant, and the current resume, generate the strongest truthful job-specific resume that preserves the current LaTeX form and visual style, compiles to exactly one page, fills the page densely without overflow, and remains reproducible from its inputs.
+Given a job description, structured applicant facts, and the current resume, generate the strongest truthful job-specific resume that preserves the current LaTeX form, compiles to exactly one page, fills the page densely, and remains reproducible from its inputs.
 
-Phase 2 makes the existing deterministic generator active and reliable. It does not connect it to a backlog or browser.
+## Canonical decisions
 
-The remaining Phase 1 live submission proof is explicitly deferred and does not block this phase. Phase 2 must still satisfy every generator checklist and live-generation item before Phase 3 begins.
+- Promote `Archive/resume_generator.py`; do not activate the incompatible second JSON-to-PDF generator.
+- Keep the structured profile as the source of candidate claims. Reconcile facts from the source resume deliberately; job text supplies context, never applicant evidence.
+- Preserve `Archive/resume/generator/Resume.tex` structure, typography, margins, section styling, and markers.
+- Preserve `Archive/resume/generator/SKILL.md` as governing policy and include its digest in each generation identity.
+- Keep deterministic ranking and the resume selector as the baseline. Optional model advice may rank only known evidence IDs.
+- Enforce one page by compiling, measuring the PDF, and trimming or expanding supported material in deterministic order.
+- Preserve source IDs and provenance for every selected claim. Never invent or inflate a skill, employer, title, date, metric, impact, or responsibility.
+- Publish the private five-file bundle: `resume.tex`, `resume.pdf`, `optimization.json`, `job_description.txt`, and `manifest.json`.
 
-## Required inputs and parameters
+## Phase 2 live gate
 
-| Parameter | Meaning |
-|---|---|
-| `job_title`, `company`, `job_description` | Direct job snapshot; no SQLite dependency in this phase. |
-| `profile_path` | Structured, source-backed applicant evidence catalog. |
-| `source_resume_path` | Current resume used to reconcile facts and verify preserved content. |
-| `template_path` | The retained `Resume.tex`, which defines the exact form and styling. |
-| `skill_path` | The retained resume `SKILL.md`, loaded and fingerprinted on every generation. |
-| `compiler` | Tectonic, `pdflatex`, or another explicitly identified compatible compiler. |
-| `output_root` | Private destination for immutable generated artifacts. |
-
-## Canonical implementation decisions
-
-- Promote the deterministic baseline in `Archive/resume_generator.py`; do not replace it with the second JSON-to-PDF generator.
-- Keep the structured profile as the source of candidate claims. Reconcile facts from the source resume into that catalog deliberately; do not treat freeform job text as candidate evidence.
-- Preserve `Archive/resume/generator/Resume.tex` structure, typography, margins, section styling, and markers. Content selection may change; the resume's form must not drift.
-- Preserve `Archive/resume/generator/SKILL.md` as the governing policy and include its digest in the generation identity. Any later policy change must be intentional and versioned.
-- Keep deterministic ranking and selection as the baseline. Optional model/OMP advice may rank only known evidence IDs; generation must still succeed without it.
-- Enforce one page by compiling, measuring the actual PDF, removing lower-value supported material in deterministic order when overfull, and adding the next-best supported material when sparse.
-- Preserve source IDs/provenance for every selected claim. Do not invent or inflate a skill, employer, title, date, metric, impact, or responsibility.
-- Publish the canonical five-file bundle: `resume.tex`, `resume.pdf`, `optimization.json`, `job_description.txt`, and `manifest.json`.
-- Expose generation as a callable library/tool contract suitable for an OMP skill. A CLI may remain a diagnostic entry point, but it is not the future product loop.
-
-## Work checklist
-
-- [x] Promote the canonical generator, advisor, profile, template, and resume skill into one active implementation without merging the second generator.
-- [x] Add a direct job-snapshot input path so Phase 2 accepts a job description without requiring the Phase 3 backlog.
-- [x] Reconcile the current source resume and structured profile while preserving provenance and explicit open questions.
-- [x] Verify deterministic role/requirement extraction, evidence ranking, and coherent section selection against a real target job description.
-- [x] Preserve the exact LaTeX template form while inserting only selected source-backed content.
-- [x] Verify bounded compiler invocation, PDF text extraction, and the deterministic compile–measure–trim/expand loop.
-- [x] Verify fingerprints include the job, profile, source resume or its reconciled evidence identity, template, skill, compiler, and algorithm/advisor identity.
-- [x] Publish and validate the immutable five-file artifact bundle.
-- [x] Expose the generator through the retained resume skill/tool contract for later OMP use.
-- [x] Perform the live exit-gate generation below.
-
-## Explicitly out of scope
-
-- SQLite backlog mutation or job claiming;
-- browser automation, resume upload, or application state;
-- a second rendering pipeline;
-- model-authored unsupported claims;
-- changing the current resume's visual form;
-- application submission.
-
-## Live exit gate
-
-Phase 2 is complete only when a real generation demonstrates all of these:
-
-- [x] A real job description and the local applicant evidence produce editable LaTeX and a compiled PDF.
+- [x] A real job description and local applicant evidence produce editable LaTeX and a compiled PDF.
 - [x] The PDF has exactly one page and extractable text.
-- [x] The output preserves the current resume's template, style, and section form.
-- [x] The selected content is denser and job-relevant while every claim remains traceable to applicant evidence.
-- [x] Re-running identical inputs reuses or reproduces the same validated fingerprinted result.
-- [x] Changing a material input creates a distinct artifact identity.
-- [x] Exactly the five canonical private artifacts are published and their hashes validate.
+- [x] The output preserves the current resume form and style.
+- [x] Selected content is denser and job-relevant while every claim remains traceable.
+- [x] Identical inputs reproduce the same validated fingerprinted result.
+- [x] Material input changes create a distinct artifact identity.
+- [x] Exactly the five canonical private artifacts are published and hashed.
 
-## OMP kickoff prompt
-
-> Read `PROJECT_HANDOFF.md` resume-generation section and `TODO.md` Phase 2. Execute Phase 2 now; the remaining Phase 1 live submission proof is explicitly deferred and is not a prerequisite. Retain the deterministic generator, `Resume.tex`, structured profile, and resume `SKILL.md`; do not merge the incompatible second generator. Make generation accept a direct real job description, optimize only source-backed applicant facts, preserve the current resume form, and prove the result by compiling and inspecting an exactly one-page PDF. The OMP/model role is advisory over known evidence, not a source of claims. Finish with the validated five-file artifact bundle and direct evidence from a real generation.
+These checks concern resume generation only and do not prove Phase 1 application completion.
 
 ---
 
-# Phase 3 — Add the SQLite backlog and persistent OMP application loop
+# Phase 3 — SQLite backlog and persistent visual application loop
 
 ## Goal
 
-Ingest normalized jobs from a selectable source into SQLite, keep a persistent OMP agent watching the backlog, atomically take one queued job at a time through the proven Phase 1 application workflow, and then insert the proven Phase 2 resume generator before browser filling so each application receives its verified job-specific resume.
-
-Phase 3 has two ordered integration steps. Step A connects sourcing/backlog to Phase 1 with the existing resume. Step B adds Phase 2 resume generation. Do not combine both steps before Step A works.
-
-**Active operating authority:** A persistent supervised OMP session may inspect, recover, claim, prepare, audit, and submit backlog applications one at a time. It must use the durable owner/lease lifecycle, job-specific preflight and resume binding, canonical Phase 1 evidence, and automated submission boundary. No separate per-job or per-action permission is required. Missing non-inferable facts and third-party access controls remain the only user-interaction boundaries.
-
-## Source decision
-
-The source is intentionally deferred until Phase 3. Implement one normalized adapter boundary, then choose the first real adapter based on available access:
-
-1. TheirStack API, using the working concepts described in `PROJECT_HANDOFF.md`;
-2. a user-owned scraper;
-3. another explicitly selected source;
-4. a manual/JSON seed adapter for controlled operation, not as proof that an external source works.
-
-The source choice must not alter the backlog or application-worker contract.
+Ingest normalized jobs into SQLite, keep a persistent supervised OMP session watching the backlog, atomically claim one queued job, generate or reuse its verified resume, execute the Phase 1 screenshot-first workflow, and persist the canonical outcome before inspecting the backlog again.
 
 ## Minimal SQLite contract
 
-Keep ingestion, resume artifacts, and application runs separate. Do not recreate the prior oversized schema.
+Keep ingestion, resume artifacts, and application runs separate.
 
 ### `jobs`
 
@@ -311,119 +250,106 @@ At minimum: stable ID, source, source job ID, canonical application URL, title, 
 
 ### `application_runs`
 
-At minimum: run ID, job ID, claim owner/time, lifecycle state, current field-ledger/evidence path, selected resume artifact identity, last progress time, and concise failure or targeted-input state. This table owns application lifecycle; do not overload the job row with browser details.
+At minimum: run ID, job ID, claim owner/time, lifecycle state, current visual ledger/evidence path, selected resume artifact identity, last progress time, and concise failure or targeted-input state. This table owns application lifecycle.
 
 ### `resume_artifacts`
 
-At minimum: job ID, generator fingerprint, PDF path/hash, manifest path/hash, and creation time. The artifact row points to the canonical Phase 2 bundle; it is not a second generator lifecycle.
+At minimum: job ID, generator fingerprint, PDF path/hash, manifest path/hash, and creation time. The row points to the canonical Phase 2 bundle.
 
-### Required lifecycle
+## Required lifecycle
 
 ```text
 queued
   -> claimed
   -> applying
   -> needs_input      (run remains active; exact user fact or external challenge only)
-  -> completed        (audit passed; OMP submission succeeded and is recorded)
+  -> completed        (audit passed; audited submission succeeded and is recorded)
      or skipped
 ```
 
-Operational failures remain active/retryable until diagnosed. An error or sensitive field must not be relabeled `completed`. Claims and status transitions must be atomic so restarts do not duplicate an application run.
+Operational failures remain active and retryable until diagnosed. Claims and status transitions are atomic so restarts cannot duplicate a run. `completed` requires validated post-submit visual evidence.
 
-## Step A — Source, backlog, and Phase 1 worker
+## Persistent OMP operating model
 
-- [ ] Define one normalized job contract independent of the source adapter.
-- [ ] Select and implement the first real source adapter; retain manual/JSON seeding only for controlled diagnosis.
-- [ ] Create the minimal SQLite schema and migrations for jobs and application runs.
-- [ ] Normalize URLs and deduplicate repeated source records without losing the private raw payload.
-- [ ] Implement atomic claim/release/recovery semantics for one queued job at a time.
-- [ ] Feed the claimed job's application URL, description, available applicant evidence (profile JSON, source resume, or both), upload resume, and run directory into the unchanged Phase 1 contract.
-- [ ] Persist only enough progress for OMP to resume after interruption without marking incomplete fields as complete.
-- [ ] Mark `completed` only after OMP performs an authorized successful `final_submit` and publishes post-submit evidence.
-- [ ] Demonstrate the persistent OMP loop noticing and processing a newly queued real job.
+OMP is the long-running orchestrator. A supervised workspace may contain:
 
-## Step B — Insert the Phase 2 resume generator
+- a control pane with the active contract, job ID, and loop state;
+- the headed browser pane owned by the current run;
+- a concise SQLite/run inspection pane with private artifact paths;
+- a review workspace for a completed pre-submit surface, never mistaken for an active fill loop.
 
-- [ ] Before opening the browser, generate or reuse the canonical resume for the claimed job description.
-- [ ] Validate the generator manifest, one-page PDF, and hashes before use.
-- [ ] Record the canonical artifact identity in `resume_artifacts` and bind that identity to the application run.
-- [ ] Stage one owned copy of the verified PDF for browser upload; do not create another resume format or renderer.
-- [ ] Pass the staged job-specific PDF as `resume_upload_path` to the unchanged Phase 1 workflow.
-- [ ] Verify from run evidence that the uploaded file hash matches the selected canonical artifact.
-- [ ] Demonstrate the complete source-to-backlog-to-resume-to-browser flow on a real queued job.
+Start with `max_active_jobs = 1`. `recoverOrClaimBacklogRun` recovers an existing active run first and claims a new job only when no active run exists. Scripts may provide deterministic source, database, resume, screenshot, or observation operations; they do not own the loop.
 
-## Persistent OMP and CMUX operating model
-
-OMP—not a custom CLI daemon—is the long-running orchestrator.
-
-Recommended supervised layout:
-
-- **Control pane:** the persistent OMP session, active phase contract, current job ID, and loop state.
-- **Browser pane/tab:** the headed application session owned by the current run and driven primarily through the OMP `browser` tool on its visible CMUX browser surface, with the OMP `computer` tool available only as native-UI fallback.
-- **Inspection pane:** concise SQLite/job/run status and private artifact paths when diagnosis is needed.
-- **Review workspace:** a completed pre-submit browser may be parked for OMP review without being mistaken for a failed or active fill loop.
-
-Start with `max_active_jobs = 1`. Increase concurrency only after one-at-a-time recovery and browser ownership are proven. Separate CMUX workspaces may isolate later concurrent jobs, but SQLite remains the source of durable claim ownership.
-
-The persistent agent loop is:
+The persistent loop is:
 
 ```text
 recover-or-claim
-  -> validate the exact job and resume binding
-  -> observe the headed application
-  -> resolve and execute a safe batch of independent routine fields
-  -> re-observe, retain, and repair
-  -> audit
-  -> begin/click/complete submission
-  -> persist the canonical outcome
-  -> inspect the backlog again
+  -> validate exact job and resume binding
+  -> capture/analyze fresh current-browser screenshot
+  -> resolve visual targets and perform conservative computer actions
+  -> capture/analyze fresh image, retain, and repair
+  -> audit current final candidate
+  -> begin/click/complete audited submission
+  -> persist private evidence and canonical outcome
+  -> inspect backlog again
 ```
 
-`recoverOrClaimBacklogRun` owns startup ordering: recover an existing active run first; only when none exists may it preflight and atomically claim one prepared job. `selectSafeApplicationBatch` may batch only conservative independent routine controls. Newly revealed/dependency controls, validation recovery, uploads, widgets, choices, navigation, and submission remain single-action units.
+If no work exists, the session waits for a bounded interval or explicit wake signal. A `needs_input` run remains bound to its workspace and resumes after the required user fact or narrow external interaction.
 
-If no work exists, the OMP session waits and checks again using a configured interval or an explicit wake signal. Scripts may provide deterministic source, database, resume, or observation operations to the agent; they do not own the loop.
+## Phase 3 runtime parameters
 
-## Runtime parameters
-
-| Parameter | Initial value/meaning |
-|---|---|
+| Parameter | Meaning |
+| --- | --- |
 | `db_path` | Local SQLite database. |
 | `source_adapter` | Selected Phase 3 source implementation. |
-| `source_credentials` | Private source-specific credentials, if required. |
-| `applicant_profile_path` | Optional shared local application profile and verified stored answers; at least one application evidence input is required. |
-| `source_resume_path` | Optional source resume used as application evidence; at least one application evidence input is required. |
+| `source_credentials` | Private source credentials, if required. |
+| `applicant_profile_path` | Optional private application profile and verified answers. |
+| `source_resume_path` | Optional source resume; at least one evidence input is required. |
 | `resume_profile_path` | Canonical structured resume evidence. |
 | `resume_template_path` | Retained `Resume.tex`. |
-| `resume_skill_path` | Retained resume `SKILL.md`. |
-| `playwright_skill_path` | Retained Playwright CLI skill bundle. |
+| `resume_skill_path` | Retained resume policy skill. |
 | `artifact_root` | Private per-job resume and application evidence root. |
-| `poll_interval_seconds` | Bounded idle wait before checking the queue again. |
-| `max_active_jobs` | `1` until sequential end-to-end behavior is proven. |
-| `submit_policy` | Always `omp_agent`. |
+| `poll_interval_seconds` | Bounded idle wait before queue inspection. |
+| `max_active_jobs` | Fixed to `1` until sequential recovery is proven. |
+| `schema` | `phase1-run-v2` for each application run. |
+| `browser_mode` | `headed`. |
+| `perception_driver` | `image_agent_v1`. |
+| `action_driver` | `omp_computer`. |
+| `model_provider` | `codex` or `gemini`. |
+| `submit_policy` | `omp_agent`. |
 
-## Explicitly out of scope
+## Phase 3 work checklist
 
-- bypassing source fees, site access controls, or assessments;
-- reviving the old RPC/OMP coordinator or custom browser protocol;
-- multiple authoritative resume generators;
-- broad concurrency before sequential recovery works;
-- selecting every possible job source in the first implementation.
+- [ ] Define one normalized job contract independent of the source adapter.
+- [ ] Select and implement the first real source adapter.
+- [ ] Create minimal SQLite migrations for jobs, resume artifacts, and application runs.
+- [ ] Normalize URLs and deduplicate source records without exposing the private payload.
+- [ ] Implement atomic claim, release, lease, and recovery semantics for one queued job.
+- [ ] Bind the claimed job, private evidence, verified resume, and phase1-run-v2 contract to one workspace.
+- [ ] Generate or reuse a verified one-page resume before application actions.
+- [ ] Execute the screenshot-first visual loop and persist progress after fresh-image retention.
+- [ ] Mark `completed` only after the audited two-phase submission succeeds and post-submit evidence validates.
+- [ ] Demonstrate the source-to-backlog-to-resume-to-application flow on one real queued job.
 
-## Live exit gate
+## Phase 3 live exit gate
 
-Phase 3 is complete only when the persistent supervised system demonstrates all of these:
+Keep every item unchecked until a current supervised run directly proves it:
 
 - [ ] A real source inserts normalized, deduplicated jobs into SQLite.
-- [ ] A running OMP loop notices a newly queued job without being manually invoked as a one-shot CLI command.
-- [ ] The job is atomically claimed once and its durable state survives an intentional loop restart.
-- [ ] The canonical generator creates or reuses a verified one-page resume for that exact job description.
-- [ ] The application browser uploads the PDF whose hash matches the selected manifest.
-- [ ] The Phase 1 loop completes and verifies every reachable application field before submission.
-- [ ] `prepareSubmission(session, { finalRef })` authorizes the exact current final candidate ref, then `beginFinalSubmit(session)` durably records the attempt before the browser click.
-- [ ] OMP clicks the returned ref, `completeFinalSubmit` records the observed outcome, canonical evidence is validated against that job, and SQLite derives `completed` plus the actual attempt count.
-- [ ] The headed browser remains available in the CMUX workspace long enough for OMP to capture the submission outcome.
-- [ ] OMP returns to backlog inspection after persistence succeeds.
+- [ ] A persistent OMP loop notices a newly queued job without a one-shot command.
+- [ ] The job is claimed exactly once and its durable state survives an intentional restart.
+- [ ] The canonical generator creates or reuses a verified one-page resume for that job.
+- [ ] The application run uses the exact phase1-run-v2 values and one active workspace.
+- [ ] Fresh current-browser screenshots, Codex or Gemini observations, target identities, and SHA-256 bindings are recorded throughout.
+- [ ] Every reachable target is deliberate, valid, and visually retained after each mutation.
+- [ ] The upload basename/hash and image-based retention proof match the selected private artifact.
+- [ ] The current visual final candidate is authorized by `prepareSubmission({ finalTargetId })`.
+- [ ] `beginFinalSubmit` records the attempt before the authorized computer click, and `completeFinalSubmit` resolves it exactly once.
+- [ ] Private post-submit image evidence validates, SQLite derives `completed`, and the actual attempt count is persisted.
+- [ ] The headed browser remains available for post-submit evidence and OMP returns to backlog inspection.
 
-## OMP kickoff prompt
+No item above is satisfied by historical records, source code, tests, or backlog authorization alone.
 
-> Use `skills/application-prep/SKILL.md` as the canonical operational procedure and the active durable run record as current state. Call `recoverOrClaimBacklogRun` with `max_active_jobs = 1`, then follow its safe-batch observe/act/re-observe loop through audited submission and durable persistence. Do not reread historical handoffs or expand a per-job checklist unless a concrete blocker or defect requires diagnosis.
+## Phase 3 kickoff prompt
+
+> Use `skills/application-prep/SKILL.md` as the canonical procedure and the active durable run record as state. Call `recoverOrClaimBacklogRun` with `max_active_jobs = 1`; use the exact phase1-run-v2 parameters; capture a fresh screenshot of the current visible headed browser; ask Codex or Gemini for visual observation; act only through `omp_computer`; capture a fresh image after every mutation; retain with image proof; and complete `prepareSubmission({ finalTargetId }) -> beginFinalSubmit -> click -> fresh image -> completeFinalSubmit` before persisting the canonical outcome. Do not mark any unchecked live gate complete without current evidence.

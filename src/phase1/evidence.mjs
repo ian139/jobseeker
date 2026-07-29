@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 
-export const EVIDENCE_SCHEMA_VERSION = 'phase1-evidence-v1';
+export const EVIDENCE_SCHEMA_VERSION = 'phase1-evidence-v2';
 export const DEFAULT_MAX_CANONICAL_JSON_BYTES = 1024 * 1024;
 export const DEFAULT_MAX_INPUT_BYTES = 256 * 1024 * 1024;
 
@@ -29,26 +29,27 @@ const RECORD_PREFIXES = new Set([
   'screenshot',
   'upload',
 ]);
-const FINAL_AUDIT_SCHEMA_VERSION = 'phase1-audit-v1';
+const FINAL_AUDIT_SCHEMA_VERSION = 'phase1-audit-v2';
 const FINAL_AUDIT_KEYS = new Set([
   'schema',
   'observation_id',
   'passed',
   'complete',
   'blockers',
-  'stale_refs',
+  'stale_target_ids',
   'unresolved_field_ids',
   'invalid_field_ids',
   'unretained_field_ids',
   'revealed_field_ids',
-  'final_candidate_refs',
+  'final_candidate_target_ids',
   'final_review_boundary',
   'submit_action_count',
   'field_count',
+  'target_count',
   'final',
 ]);
 const FINAL_AUDIT_ARRAY_KEYS = new Set([
-  'stale_refs',
+  'stale_target_ids',
   'unresolved_field_ids',
   'invalid_field_ids',
   'unretained_field_ids',
@@ -351,7 +352,25 @@ function readExternalIdentity(filePath, maxInputBytes) {
 function validateFinalAudit(value) {
   if (!isPlainObject(value)) fail('FINAL_AUDIT_REQUIRED');
   const keys = Object.keys(value);
-  if (keys.length !== FINAL_AUDIT_KEYS.size || keys.some((key) => !FINAL_AUDIT_KEYS.has(key))) {
+  const required = [
+    'schema',
+    'observation_id',
+    'passed',
+    'complete',
+    'blockers',
+    'stale_target_ids',
+    'unresolved_field_ids',
+    'invalid_field_ids',
+    'unretained_field_ids',
+    'revealed_field_ids',
+    'final_candidate_target_ids',
+    'final_review_boundary',
+    'submit_action_count',
+    'final',
+  ];
+  if (keys.some((key) => !FINAL_AUDIT_KEYS.has(key))
+    || required.some((key) => !Object.hasOwn(value, key))
+    || (!Object.hasOwn(value, 'field_count') && !Object.hasOwn(value, 'target_count'))) {
     fail('FINAL_AUDIT_REQUIRED');
   }
   if (value.schema !== FINAL_AUDIT_SCHEMA_VERSION) fail('FINAL_AUDIT_REQUIRED');
@@ -362,25 +381,44 @@ function validateFinalAudit(value) {
   }
   if (value.passed !== true || value.complete !== true || value.final !== true) fail('FINAL_AUDIT_REQUIRED');
   if (!Number.isSafeInteger(value.submit_action_count) || value.submit_action_count < 0) fail('FINAL_AUDIT_REQUIRED');
-  if (!Number.isSafeInteger(value.field_count) || value.field_count < 0 || value.field_count > MAX_FINAL_AUDIT_FIELD_COUNT) {
+  for (const countKey of ['field_count', 'target_count']) {
+    if (Object.hasOwn(value, countKey)
+      && (!Number.isSafeInteger(value[countKey]) || value[countKey] < 0 || value[countKey] > MAX_FINAL_AUDIT_FIELD_COUNT)) {
+      fail('FINAL_AUDIT_REQUIRED');
+    }
+  }
+  if (Object.hasOwn(value, 'field_count') && Object.hasOwn(value, 'target_count')
+    && value.field_count !== value.target_count) {
     fail('FINAL_AUDIT_REQUIRED');
   }
   if (!Array.isArray(value.blockers) || value.blockers.length !== 0) fail('FINAL_AUDIT_REQUIRED');
   for (const key of FINAL_AUDIT_ARRAY_KEYS) {
     if (!Array.isArray(value[key]) || value[key].length !== 0) fail('FINAL_AUDIT_REQUIRED');
+    const seen = new Set();
+    for (const item of value[key]) {
+      if (typeof item !== 'string'
+        || item.length === 0
+        || Buffer.byteLength(item, 'utf8') > MAX_FINAL_AUDIT_REF_BYTES
+        || seen.has(item)) fail('FINAL_AUDIT_REQUIRED');
+      seen.add(item);
+    }
   }
-  if (!Array.isArray(value.final_candidate_refs) || value.final_candidate_refs.length > MAX_FINAL_AUDIT_REFS) {
+  if (!Array.isArray(value.final_candidate_target_ids)
+    || value.final_candidate_target_ids.length > MAX_FINAL_AUDIT_REFS) {
     fail('FINAL_AUDIT_REQUIRED');
   }
-  const seen = new Set();
-  for (const ref of value.final_candidate_refs) {
-    if (typeof ref !== 'string' || !ref || Buffer.byteLength(ref, 'utf8') > MAX_FINAL_AUDIT_REF_BYTES || seen.has(ref)) {
-      fail('FINAL_AUDIT_REQUIRED');
-    }
-    seen.add(ref);
+  const candidates = new Set();
+  for (const targetId of value.final_candidate_target_ids) {
+    if (typeof targetId !== 'string'
+      || !targetId
+      || Buffer.byteLength(targetId, 'utf8') > MAX_FINAL_AUDIT_REF_BYTES
+      || candidates.has(targetId)) fail('FINAL_AUDIT_REQUIRED');
+    candidates.add(targetId);
   }
   if (typeof value.final_review_boundary !== 'boolean') fail('FINAL_AUDIT_REQUIRED');
-  if (value.final_candidate_refs.length === 0 && value.final_review_boundary !== true) fail('FINAL_AUDIT_REQUIRED');
+  if (value.final_candidate_target_ids.length === 0 && value.final_review_boundary !== true) {
+    fail('FINAL_AUDIT_REQUIRED');
+  }
   return value;
 }
 function requireExactKeys(value, allowed, code) {
@@ -417,7 +455,11 @@ function validateFinalSubmitJournal(journal) {
       actionIds.add(entry.action_id);
     }
     if (entry.action === 'final_submit') {
-      if (entry.outcome !== 'attempted' || !validActionId(entry.action_id) || beginsById.has(entry.action_id)) {
+      if (entry.outcome !== 'attempted'
+        || !validActionId(entry.action_id)
+        || typeof entry.target_id !== 'string'
+        || !validActionId(entry.target_id)
+        || beginsById.has(entry.action_id)) {
         fail('SUBMISSION_EVIDENCE');
       }
       beginsById.set(entry.action_id, entry);
@@ -512,7 +554,7 @@ function validateCompletionReportShape(report) {
   return report;
 }
 
-const RUN_METADATA_SCHEMA_VERSION = 'phase1-run-evidence-v1';
+const RUN_METADATA_SCHEMA_VERSION = 'phase1-run-evidence-v2';
 const RUN_LOOP_CONTRACTS = new Set([
   'safe-batch-observe-act-reobserve',
   'one-field-observe-act-reobserve',
@@ -524,8 +566,9 @@ const RUN_METADATA_KEYS = new Set([
   'resume_upload_path',
   'resume_upload_sha256',
   'browser_mode',
-  'observer',
+  'perception_driver',
   'action_driver',
+  'model_provider',
   'submit_policy',
   'loop_contract',
   'started_at',
@@ -539,8 +582,9 @@ function normalizeRunMetadata(metadata) {
   }
   if (metadata.schema !== RUN_METADATA_SCHEMA_VERSION
     || metadata.browser_mode !== 'headed'
-    || metadata.observer !== 'playwright_dom_v1'
-    || metadata.action_driver !== 'omp_browser'
+    || metadata.perception_driver !== 'image_agent_v1'
+    || metadata.action_driver !== 'omp_computer'
+    || !['codex', 'gemini'].includes(metadata.model_provider)
     || metadata.submit_policy !== 'omp_agent'
     || !RUN_LOOP_CONTRACTS.has(metadata.loop_contract)) {
     fail('PAYLOAD_INVALID');
@@ -1294,7 +1338,7 @@ export class EvidenceStore {
     if (auditRecord.ref.sha256 !== report.final_audit.sha256) fail('ARTIFACT_CORRUPT');
     validateFinalAudit(auditRecord.value);
 
-    const screenshot = this._validateCompletionIdentity('screenshot', report.screenshot);
+    this._validateCompletionIdentity('screenshot', report.screenshot);
     const upload = this._validateCompletionIdentity('upload', report.upload);
     const configuredUpload = this._verifiedResumeIdentity();
     if (!sameIdentityFields(configuredUpload, upload.identity)) fail('IDENTITY_INVALID');

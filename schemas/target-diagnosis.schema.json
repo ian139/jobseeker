@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "target-diagnosis.schema.json",
+  "title": "Visual target diagnosis",
+  "description": "A normalized diagnosis for a target identified from a screenshot.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["observationId", "targetId", "failureClass", "normalizedVisualKind", "recommendedAction", "requiresRepair", "reasonCode"],
+  "properties": {
+    "observationId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "targetId": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "failureClass": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "normalizedVisualKind": { "type": "string", "enum": ["text", "textarea", "email", "phone", "number", "date", "radio_group", "checkbox", "checkbox_group", "native_select", "custom_select", "combobox", "autocomplete", "file_upload", "button", "link", "dialog", "unknown"] },
+    "recommendedAction": { "type": "string", "enum": ["click", "type_text", "press_key", "scroll", "upload_file"] },
+    "requiresRepair": { "type": "boolean" },
+    "reasonCode": { "type": "string", "pattern": "^[a-z0-9_:-]{1,128}$" }
+  }
+}

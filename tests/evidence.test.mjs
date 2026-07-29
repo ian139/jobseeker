@@ -36,14 +36,15 @@ function expectCode(callback, code) {
 
 function runMetadata(resumePath, resumeBytes) {
   return {
-    schema: 'phase1-run-evidence-v1',
+    schema: 'phase1-run-evidence-v2',
     application_url: 'https://example.invalid/app',
     run_contract_sha256: '0'.repeat(64),
     resume_upload_path: path.resolve(resumePath),
     resume_upload_sha256: crypto.createHash('sha256').update(resumeBytes).digest('hex'),
     browser_mode: 'headed',
-    observer: 'playwright_dom_v1',
-    action_driver: 'omp_browser',
+    perception_driver: 'image_agent_v1',
+    action_driver: 'omp_computer',
+    model_provider: 'codex',
     submit_policy: 'omp_agent',
     loop_contract: 'safe-batch-observe-act-reobserve',
     started_at: '2026-01-01T00:00:00Z',
@@ -52,31 +53,36 @@ function runMetadata(resumePath, resumeBytes) {
 
 function finalAudit(observationId = 'obs-1', overrides = {}) {
   return {
-    schema: 'phase1-audit-v1',
+    schema: 'phase1-audit-v2',
     observation_id: observationId,
     passed: true,
     complete: true,
     blockers: [],
-    stale_refs: [],
+    stale_target_ids: [],
     unresolved_field_ids: [],
     invalid_field_ids: [],
     unretained_field_ids: [],
     revealed_field_ids: [],
-    final_candidate_refs: [],
+    final_candidate_target_ids: ['final-target'],
     final_review_boundary: true,
     submit_action_count: 0,
-    field_count: 0,
+    field_count: 1,
+    target_count: 1,
     final: true,
     ...overrides,
   };
 }
 function recordFinalSubmit(store, actionId = 'attempt-1', outcome = 'succeeded') {
   store.recordAction({
-    action: 'final_submit',
     action_id: actionId,
-    outcome: 'attempted',
+    action: 'final_submit',
+    field_id: null,
     observation_id: 'obs-1',
-    ref: 'final-ref',
+    target_id: 'final-target',
+    outcome: 'attempted',
+    retry_of: null,
+    error_code: null,
+    stale_target: false,
   });
   store.recordAction({
     action: 'final_submit_result',
@@ -159,21 +165,55 @@ test('canonical JSON is compact, sorted, and bounded', () => {
   expectCode(() => canonicalJson({ value: 'x'.repeat(200) }, { maxBytes: 32 }), 'PAYLOAD_TOO_LARGE');
 });
 
-test('appends an ordered private action journal', () => withStore(({ root, store }) => {
-  store.appendAction({ kind: 'fill', ref: 'field-1' });
-  store.appendAction({ kind: 'click', ref: 'continue-1' });
+test('appends an ordered private visual action journal', () => withStore(({ root, store }) => {
+  store.appendAction({
+    action_id: 'scroll-1',
+    action: 'scroll',
+    field_id: null,
+    observation_id: 'obs-1',
+    target_id: null,
+    outcome: 'succeeded',
+    retry_of: null,
+    error_code: null,
+    stale_target: false,
+  });
+  store.appendAction({
+    action_id: 'click-1',
+    action: 'click',
+    field_id: 'field-1',
+    observation_id: 'obs-2',
+    target_id: 'target-1',
+    outcome: 'attempted',
+    retry_of: null,
+    error_code: null,
+    stale_target: false,
+  });
   const entries = store.readActionJournal();
   assert.deepEqual(entries.map((entry) => entry.sequence), [1, 2]);
-  assert.deepEqual(entries.map((entry) => entry.kind), ['fill', 'click']);
+  assert.deepEqual(entries.map((entry) => entry.action), ['scroll', 'click']);
   assert.equal(fs.statSync(path.join(root, 'action-journal.jsonl')).mode & 0o777, 0o600);
-  assert.match(fs.readFileSync(path.join(root, 'action-journal.jsonl'), 'utf8'), /^\{"kind":"fill","ref":"field-1","sequence":1\}\n/);
+  assert.match(
+    fs.readFileSync(path.join(root, 'action-journal.jsonl'), 'utf8'),
+    /^\{"action":"scroll","action_id":"scroll-1","error_code":null,"field_id":null,"observation_id":"obs-1","outcome":"succeeded","retry_of":null,"sequence":1,"stale_target":false,"target_id":null\}\n/,
+  );
 }));
 
-test('recordAction publishes both action artifact and journal entry', () => withStore(({ store }) => {
-  const result = store.recordAction({ type: 'fill', ref: 'field-1' });
+test('recordAction publishes both visual action artifact and journal entry', () => withStore(({ store }) => {
+  const action = {
+    action_id: 'action-1',
+    action: 'type_text',
+    field_id: 'field-1',
+    observation_id: 'obs-1',
+    target_id: 'target-1',
+    outcome: 'attempted',
+    retry_of: null,
+    error_code: null,
+    stale_target: false,
+  };
+  const result = store.recordAction(action);
   assert.equal(result.path, 'action-000001.json');
   assert.equal(result.sequence, 1);
-  assert.deepEqual(store.readActionJournal()[0], { ref: 'field-1', sequence: 1, type: 'fill' });
+  assert.deepEqual(store.readActionJournal()[0], { ...action, sequence: 1 });
 }));
 
 test('detects corrupt and missing artifacts instead of treating them as evidence', () => withStore(({ root, store }) => {
@@ -191,7 +231,22 @@ test('finalizes with complete audit, screenshot identity, upload identity, and n
   fs.writeFileSync(uploadPath, Buffer.from('upload'), { mode: 0o600 });
   store.recordRunMetadata(runMetadata(uploadPath, Buffer.from('upload')));
   recordFinalSubmit(store);
-  store.recordObservation({ observation_id: 'obs-1', controls: [], blockers: [] });
+  store.recordObservation({
+    schema: 'phase1-visual-observation-v1',
+    observation_id: 'obs-1',
+    previous_observation_id: null,
+    observed_at: '2026-01-01T00:00:00.000Z',
+    surface: {
+      surface_id: 'surface-1',
+      url: 'https://example.invalid/app',
+      title: 'Application',
+      screenshot_sha256: 'a'.repeat(64),
+      viewport: { width: 1200, height: 800 },
+    },
+    agent: { provider: 'codex', model: 'fixture-model' },
+    targets: [],
+    blockers: [],
+  });
   const audit = finalAudit();
   const auditRef = store.recordFinalAudit(audit);
   const completion = store.finalize({
@@ -297,7 +352,17 @@ test('propagates submit context through nested targets without matching job text
   fs.writeFileSync(screenshotPath, 'screen', { mode: 0o600 });
   fs.writeFileSync(uploadPath, 'upload', { mode: 0o600 });
   store.recordRunMetadata(runMetadata(uploadPath, Buffer.from('upload')));
-  store.recordAction({ type: 'click', target: { role: 'button', name: 'Submit application' } });
+  store.recordAction({
+    action_id: 'action-1',
+    action: 'click',
+    field_id: null,
+    observation_id: 'obs-1',
+    target_id: 'submit-target',
+    outcome: 'succeeded',
+    retry_of: null,
+    error_code: null,
+    stale_target: false,
+  });
   recordFinalSubmit(store);
   const completion = store.finalize({
     audit: finalAudit(),
@@ -315,7 +380,17 @@ test('allows unrelated job text while finalizing a valid run', () => withStore((
   fs.writeFileSync(screenshotPath, 'screen', { mode: 0o600 });
   fs.writeFileSync(uploadPath, 'upload', { mode: 0o600 });
   store.recordRunMetadata(runMetadata(uploadPath, Buffer.from('upload')));
-  store.recordAction({ type: 'fill', target: { role: 'textbox', name: 'Job title' }, value: 'Submit application' });
+  store.recordAction({
+    action_id: 'action-1',
+    action: 'type_text',
+    field_id: 'job-title-field',
+    observation_id: 'obs-1',
+    target_id: 'job-title-target',
+    outcome: 'succeeded',
+    retry_of: null,
+    error_code: null,
+    stale_target: false,
+  });
   recordFinalSubmit(store);
   const completion = store.finalize({
     audit: finalAudit(),
@@ -359,7 +434,7 @@ test('rejects unresolved final submit attempts before publication', () => withSt
 
 test('rejects mutated canonical references and external identities', () => withStore(({ parent, root, store }) => {
   const { completion, auditRef } = publishValidCompletion(parent, store);
-  const mutatedAudit = { ...finalAudit(), field_count: 1 };
+  const mutatedAudit = { ...finalAudit(), target_count: 2 };
   fs.writeFileSync(path.join(root, auditRef.path), canonicalJson(mutatedAudit), { mode: 0o600 });
   expectCode(() => validateCompletionEvidence(root), 'ARTIFACT_CORRUPT');
   fs.writeFileSync(path.join(root, 'completion.json'), canonicalJson({
@@ -417,23 +492,6 @@ test('fails closed when the pinned root is replaced during publication', () => {
   }
 });
 
-test('accepts immutable evidence from the legacy one-field loop contract', async () => {
-  const parent = temporaryDirectory();
-  try {
-    const resumePath = path.join(parent, 'resume.pdf');
-    const resumeBytes = Buffer.from('upload');
-    fs.writeFileSync(resumePath, resumeBytes, { mode: 0o600 });
-    const metadata = {
-      ...runMetadata(resumePath, resumeBytes),
-      loop_contract: 'one-field-observe-act-reobserve',
-    };
-    const evidence = await createEvidenceStore(path.join(parent, 'legacy-run'), metadata);
-    assert.equal(evidence.root, path.join(parent, 'legacy-run'));
-    await evidence.close();
-  } finally {
-    fs.rmSync(parent, { recursive: true, force: true });
-  }
-});
 
 test('async factory records run metadata and returns the narrow coordinator surface', async () => {
   const parent = temporaryDirectory();

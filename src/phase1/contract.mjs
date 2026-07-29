@@ -3,15 +3,17 @@ import * as fs from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 
-export const RUN_SCHEMA = 'phase1-run-v1';
+export const RUN_SCHEMA = 'phase1-run-v2';
 export const ANSWER_SCHEMA = 'phase1-answer-v1';
 export const BROWSER_MODE = 'headed';
-export const OBSERVER = 'playwright_dom_v1';
-export const ACTION_DRIVER = 'omp_browser';
+export const PERCEPTION_DRIVER = 'image_agent_v1';
+export const ACTION_DRIVER = 'omp_computer';
+export const MODEL_PROVIDERS = Object.freeze(['codex', 'gemini']);
+export const DEFAULT_MODEL_PROVIDER = 'codex';
 export const SUBMIT_POLICY = 'omp_agent';
 export const RUN_FIXED_VALUES = Object.freeze({
     browser_mode: BROWSER_MODE,
-    observer: OBSERVER,
+    perception_driver: PERCEPTION_DRIVER,
     action_driver: ACTION_DRIVER,
     submit_policy: SUBMIT_POLICY,
 });
@@ -43,7 +45,6 @@ const MAX_INFERENCE_RATIONALE_LENGTH = 8192;
 const SHA256_HEX = /^[0-9a-f]{64}$/u;
 const INFERENCE_ENTRY_KEYS = new Set(['value', 'rationale', 'evidence']);
 const INFERENCE_EVIDENCE_KEYS = new Set(['resume_sha256', 'job_description_sha256']);
-
 export const RUN_KEYS = Object.freeze([
     'schema',
     'application_url',
@@ -54,8 +55,9 @@ export const RUN_KEYS = Object.freeze([
     'answer_memory_path',
     'run_artifact_dir',
     'browser_mode',
-    'observer',
+    'perception_driver',
     'action_driver',
+    'model_provider',
     'submit_policy',
 ]);
 
@@ -67,8 +69,9 @@ export const REQUIRED_RUN_KEYS = Object.freeze([
     'answer_memory_path',
     'run_artifact_dir',
     'browser_mode',
-    'observer',
+    'perception_driver',
     'action_driver',
+    'model_provider',
     'submit_policy',
 ]);
 
@@ -279,11 +282,14 @@ export function validateRunContract(input) {
     if (run.browser_mode !== BROWSER_MODE) {
         fail('E_RUN_BROWSER_MODE', 'browser_mode');
     }
-    if (run.observer !== OBSERVER) {
-        fail('E_RUN_OBSERVER', 'observer');
+    if (run.perception_driver !== PERCEPTION_DRIVER) {
+        fail('E_RUN_PERCEPTION_DRIVER', 'perception_driver');
     }
     if (run.action_driver !== ACTION_DRIVER) {
         fail('E_RUN_ACTION_DRIVER', 'action_driver');
+    }
+    if (!MODEL_PROVIDERS.includes(run.model_provider)) {
+        fail('E_RUN_MODEL_PROVIDER', 'model_provider');
     }
     if (run.submit_policy !== SUBMIT_POLICY) {
         fail('E_RUN_SUBMIT_POLICY', 'submit_policy');

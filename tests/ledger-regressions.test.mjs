@@ -2,12 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  ANSWER_SOURCES,
   createLedger,
   digestPrivateValue,
-  markFieldSensitive,
+  markTargetSensitive,
   mergeObservation,
   recordActionAttempt,
+  recordActionBatch,
   recordResolution,
   validateLedger,
   validateObservation,
@@ -15,457 +15,175 @@ import {
 } from '../src/phase1/ledger.mjs';
 import { auditCompletion } from '../src/phase1/audit.mjs';
 
-const SNAPSHOT = 'a'.repeat(64);
+const DIGEST = 'a'.repeat(64);
 
-function frame() {
+function visualTarget(targetId, overrides = {}) {
   return {
-    id: 'frame-main',
-    parent_id: null,
-    url: 'https://example.test/app',
-    origin: 'https://example.test',
-    accessible: true,
-  };
-}
-
-function control(stableId, overrides = {}) {
-  return {
-    ref: `ref-${stableId}`,
-    stable_id: stableId,
+    target_id: targetId,
+    field_id: targetId,
     group_id: null,
     kind: 'text',
-    tag: 'input',
-    type: 'text',
-    role: 'textbox',
-    label: `Question ${stableId}`,
-    name: stableId,
+    label: `Question ${targetId}`,
     description: null,
-    locator: null,
-    frame_id: 'frame-main',
+    bounds: { x: 12, y: 18, width: 320, height: 44 },
     visible: true,
     enabled: true,
     required: true,
     readonly: false,
-    disabled: false,
-    value: `value-${stableId}`,
-    value_present: true,
+    value_state: 'present',
     checked: null,
     selected: null,
     options: [],
-    validity: { valid: true, aria_invalid: null, message: null },
+    validation: { valid: true, message_present: false },
     file: null,
-    candidate: { class: 'field', reason: 'visible user-facing field control' },
+    candidate: { class: 'field', reason: 'visible application field' },
+    confidence: 0.99,
     ...overrides,
   };
 }
 
-function finalCandidate() {
-  return control('final-review', {
-    ref: 'ref-final-review',
-    stable_id: 'final-review',
+function finalTarget(targetId = 'final-submit') {
+  return visualTarget(targetId, {
+    field_id: null,
     kind: 'button',
-    tag: 'button',
-    type: 'button',
-    role: 'button',
-    label: 'Review application',
-    name: null,
+    label: 'Submit application',
     required: false,
-    value: null,
-    value_present: false,
-    candidate: { class: 'final_candidate', reason: 'ready for OMP submission' },
+    value_state: 'blank',
+    candidate: { class: 'final_candidate', reason: 'current final action' },
   });
 }
 
-function nonFinalCandidate(id = 'next-page', ref = `ref-${id}`) {
-  return control(id, {
-    ref,
-    stable_id: id,
-    kind: 'button',
-    tag: 'button',
-    type: 'button',
-    role: 'button',
-    label: 'Continue',
-    name: null,
-    required: false,
-    value: null,
-    value_present: false,
-    candidate: { class: 'non_final_navigation', reason: 'continue to the next page' },
-  });
-}
-
-function blocker(code) {
+function visualObservation(observationId, targets, previousObservationId = null, blockers = []) {
   return {
-    code,
-    label: code,
-    frame_id: 'frame-main',
-    visible: true,
-  };
-}
-
-function observation(id, controls, previous = null, blockers = []) {
-  return {
-    schema: 'phase1-observation-v1',
-    observation_id: id,
-    previous_observation_id: previous,
-    observed_at: '2026-07-24T00:00:00.000Z',
-    url: 'https://example.test/app',
-    title: 'Synthetic application',
-    snapshot_sha256: SNAPSHOT,
-    frames: [frame()],
-    controls,
+    schema: 'phase1-visual-observation-v1',
+    observation_id: observationId,
+    previous_observation_id: previousObservationId,
+    observed_at: '2026-07-28T00:00:00.000Z',
+    surface: {
+      surface_id: 'surface-application',
+      url: 'https://example.invalid/apply',
+      title: 'Synthetic application',
+      screenshot_sha256: DIGEST,
+      viewport: { width: 1280, height: 720 },
+    },
+    agent: { provider: 'codex', model: 'vision-test' },
+    targets,
     blockers,
   };
 }
 
-function fieldById(ledger, fieldId) {
-  const field = ledger.fields.find((item) => item.field_id === fieldId);
-  assert.ok(field, `missing field ${fieldId}`);
-  return field;
+function field(ledger, fieldId) {
+  const result = ledger.targets.find((item) => item.field_id === fieldId);
+  assert.ok(result, `missing field ${fieldId}`);
+  return result;
 }
 
-function answer(ledger, fieldId, observationId, ref, value, extra = {}) {
+function deliberateBlank(ledger, fieldId, observationId, targetId, choice = 'none') {
   return recordResolution(ledger, {
     field_id: fieldId,
     observation_id: observationId,
-    ref,
+    target_id: targetId,
     source: 'user',
-    value_digest: digestPrivateValue(value),
+    value_digest: null,
+    semantic_choice: choice,
+  });
+}
+
+function answered(ledger, fieldId, observationId, targetId, source = 'user', extra = {}) {
+  return recordResolution(ledger, {
+    field_id: fieldId,
+    observation_id: observationId,
+    target_id: targetId,
+    source,
+    value_digest: digestPrivateValue(`answer-${fieldId}`),
     ...extra,
   });
 }
 
-function fileControl(id = 'resume-file', overrides = {}) {
-  return control(id, {
-    ref: `ref-${id}`,
-    stable_id: id,
-    kind: 'input',
-    tag: 'input',
-    type: 'file',
-    role: 'button',
-    value: null,
-    value_present: true,
-    file: { accept: ['application/pdf'], count: 1, names: ['resume.pdf'] },
-    ...overrides,
-  });
-}
-
-test('carries the active blocker set across persistent observations', () => {
-  const first = observation('obs-1', [control('alpha'), finalCandidate()], null, [
-    blocker('captcha'),
-    blocker('access_control'),
+test('tracks blocker deltas and candidate targets across chained images', () => {
+  const first = visualObservation('observation-1', [visualTarget('alpha'), finalTarget()], null, [
+    'captcha',
+    { code: 'access-control', message: 'Visible gate', visible: true },
   ]);
   let ledger = createLedger(first);
-  assert.deepEqual(ledger.active_blockers, ['access_control', 'captcha']);
-  assert.deepEqual(ledger.diffs[0].blockers_added, ['access_control', 'captcha']);
-  assert.deepEqual(ledger.diffs[0].blockers_removed, []);
+  assert.deepEqual(ledger.active_blockers, ['access-control', 'captcha']);
 
-  const second = observation('obs-2', [control('alpha'), finalCandidate()], 'obs-1', [blocker('captcha')]);
+  const second = visualObservation('observation-2', [visualTarget('alpha'), finalTarget()], 'observation-1', ['captcha']);
   ledger = mergeObservation(ledger, second);
   assert.deepEqual(ledger.active_blockers, ['captcha']);
-  assert.deepEqual(ledger.diffs[1].blockers_added, []);
-  assert.deepEqual(ledger.diffs[1].blockers_removed, ['access_control']);
+  assert.deepEqual(ledger.diffs[1].blockers_removed, ['access-control']);
 
-  const third = observation('obs-3', [control('alpha'), finalCandidate()], 'obs-2', [
-    blocker('access_control'),
-    blocker('captcha'),
-  ]);
+  const third = visualObservation('observation-3', [visualTarget('alpha')], 'observation-2');
   ledger = mergeObservation(ledger, third);
-  assert.deepEqual(ledger.active_blockers, ['access_control', 'captcha']);
-  assert.deepEqual(ledger.diffs[2].blockers_added, ['access_control']);
-  assert.deepEqual(ledger.diffs[2].blockers_removed, []);
+  assert.deepEqual(ledger.current_candidate_targets, []);
   validateLedger(ledger);
 });
 
-test('persists candidate classes and rejects targetless, stale, and mismatched actions', () => {
-  const first = observation('obs-1', [
-    control('alpha'),
-    nonFinalCandidate(),
-    control('disabled-page', {
-      ref: 'ref-disabled-page',
-      stable_id: 'disabled-page',
-      kind: 'button',
-      tag: 'button',
-      type: 'button',
-      role: 'button',
-      label: 'Disabled continue',
-      name: null,
-      required: false,
-      value: null,
-      value_present: false,
-      disabled: true,
-      candidate: { class: 'non_final_navigation', reason: 'disabled continuation' },
-    }),
-    finalCandidate(),
-  ]);
-  let ledger = createLedger(first);
-  assert.deepEqual(ledger.current_candidate_refs.map((item) => item.class), [
-    'final_candidate',
-    'non_final_navigation',
-  ]);
-  assert.equal(
-    ledger.current_candidate_refs.some((item) => item.stable_id === 'disabled-page'),
-    false,
-  );
+test('accepts only current target bindings and consumes images for mutations', () => {
+  const first = visualObservation('observation-1', [visualTarget('alpha'), visualTarget('beta'), finalTarget()]);
+  const ledger = createLedger(first);
 
   assert.throws(() => recordActionAttempt(ledger, {
-    action: 'fill',
-    observation_id: 'obs-1',
-  }), /field_id and ref/i);
-  assert.throws(() => recordActionAttempt(ledger, {
-    action: 'fill',
+    action: 'type_text',
     field_id: 'alpha',
-    observation_id: 'obs-1',
-  }), /field_id and ref/i);
+    target_id: 'alpha',
+    observation_id: 'observation-1',
+    outcome: 'succeeded',
+    unexpected: true,
+  }), /unknown key/);
   assert.throws(() => recordActionAttempt(ledger, {
-    action: 'fill',
+    action: 'type_text',
     field_id: 'alpha',
-    ref: 'ref-wrong',
-    observation_id: 'obs-1',
-  }), /current|bound|stale/i);
+    target_id: 'old-alpha',
+    observation_id: 'observation-1',
+  }), /stale/i);
   assert.throws(() => recordActionAttempt(ledger, {
-    action: 'non_final_navigation',
-    observation_id: 'obs-1',
-  }), /candidate ref|ref/i);
-  assert.throws(() => recordActionAttempt(ledger, {
-    action: 'non_final_navigation',
-    ref: 'ref-final-review',
-    observation_id: 'obs-1',
-  }), /non-final|candidate/i);
-  assert.throws(() => recordActionAttempt(ledger, {
-    action: 'non_final_navigation',
-    field_id: 'alpha',
-    ref: 'ref-next-page',
-    observation_id: 'obs-1',
-  }), /navigation|field/i);
+    action: 'final_submit',
+    target_id: 'alpha',
+    observation_id: 'observation-1',
+  }), /candidate|stale/i);
 
-  ledger = recordActionAttempt(ledger, {
-    action: 'fill',
+  const mutated = recordActionAttempt(ledger, {
+    action_id: 'type-alpha',
+    action: 'type_text',
     field_id: 'alpha',
-    ref: 'ref-alpha',
-    observation_id: 'obs-1',
-    outcome: 'attempted',
-  });
-  ledger = recordActionAttempt(ledger, {
-    action: 'non_final_navigation',
-    ref: 'ref-next-page',
-    observation_id: 'obs-1',
+    target_id: 'alpha',
+    observation_id: 'observation-1',
     outcome: 'succeeded',
   });
-  ledger = recordActionAttempt(ledger, {
-    action: 'scroll',
-    observation_id: 'obs-1',
-    outcome: 'succeeded',
-  });
-  assert.equal(ledger.action_attempts.at(-1).stale_ref, false);
-
-  const second = observation('obs-2', [
-    control('alpha', { ref: 'ref-alpha-new' }),
-    nonFinalCandidate('next-page', 'ref-next-page-new'),
-    finalCandidate(),
-  ], 'obs-1');
-  ledger = mergeObservation(ledger, second);
-  assert.throws(() => recordActionAttempt(ledger, {
-    action: 'fill',
-    field_id: 'alpha',
-    ref: 'ref-alpha',
-    observation_id: 'obs-1',
-  }), /current|bound|stale/i);
-  assert.throws(() => recordActionAttempt(ledger, {
-    action: 'non_final_navigation',
-    ref: 'ref-next-page',
-    observation_id: 'obs-2',
-  }), /current|candidate|stale/i);
-  validateLedger(ledger);
+  assert.equal(field(mutated, 'alpha').retained, false);
+  assert.throws(() => recordActionAttempt(mutated, {
+    action: 'type_text',
+    field_id: 'beta',
+    target_id: 'beta',
+    observation_id: 'observation-1',
+  }), /consumed|observe again/i);
 });
 
-test('invalidates mutation retention until a newer chained observation verifies it', () => {
-  const first = observation('obs-1', [control('alpha', { value: 'answer' }), finalCandidate()]);
-  let ledger = answer(createLedger(first), 'alpha', 'obs-1', 'ref-alpha', 'answer');
-  let result = verifyRetention(ledger, first);
-  assert.equal(result.ok, true);
-  ledger = result.ledger;
-  assert.equal(fieldById(ledger, 'alpha').retained, true);
-
-  ledger = recordActionAttempt(ledger, {
-    action: 'type',
-    field_id: 'alpha',
-    ref: 'ref-alpha',
-    observation_id: 'obs-1',
-    outcome: 'attempted',
-  });
-  assert.equal(fieldById(ledger, 'alpha').retained, false);
-  assert.equal(fieldById(ledger, 'alpha').valid, false);
-  result = verifyRetention(ledger, first);
-  assert.equal(result.ok, false);
-  assert.ok(result.errors.some((item) => item.code === 'MUTATION_PENDING'));
-
-  const second = observation('obs-2', [control('alpha', { value: 'answer' }), finalCandidate()], 'obs-1');
-  ledger = mergeObservation(ledger, second);
-  result = verifyRetention(ledger, second);
-  assert.equal(result.ok, true);
-  assert.equal(fieldById(result.ledger, 'alpha').retained, true);
-  assert.equal(fieldById(result.ledger, 'alpha').valid, true);
-});
-
-test('requires typed upload proof and rejects injection, ordinary overrides, and disappearance', () => {
-  const first = observation('obs-1', [fileControl(), control('ordinary'), finalCandidate()]);
-  let ledger = createLedger(first);
-  const fileDigest = digestPrivateValue('resolved-resume');
-  ledger = recordActionAttempt(ledger, {
-    action: 'upload',
-    field_id: 'resume-file',
-    ref: 'ref-resume-file',
-    observation_id: 'obs-1',
-    outcome: 'succeeded',
-    action_id: 'upload-1',
-  });
-  ledger = answer(ledger, 'resume-file', 'obs-1', 'ref-resume-file', 'resolved-resume', { source: 'resume' });
-  ledger = answer(ledger, 'ordinary', 'obs-1', 'ref-ordinary', 'value-ordinary');
-
-  const second = observation('obs-2', [fileControl(), control('ordinary'), finalCandidate()], 'obs-1');
-  ledger = mergeObservation(ledger, second);
-  let result = verifyRetention(ledger, second);
-  assert.equal(result.ok, false);
-  assert.ok(result.errors.some((item) => item.code === 'INVALID_PROOF'));
-
-  const validProof = {
-    value_digest: fileDigest,
-    action_id: 'upload-1',
-    file_name: 'resume.pdf',
-  };
-  result = verifyRetention(ledger, second, { 'resume-file': validProof });
-  assert.equal(result.ok, true);
-  ledger = result.ledger;
-  assert.equal(fieldById(ledger, 'resume-file').retained, true);
-
-  assert.throws(() => verifyRetention(ledger, second, {
-    'resume-file': { value_digest: fileDigest },
-  }), /missing key|unknown key/i);
-  result = verifyRetention(ledger, second, {
-    'resume-file': { ...validProof, value_digest: digestPrivateValue('forged') },
-  });
-  assert.equal(result.ok, false);
-  assert.ok(result.errors.some((item) => item.code === 'INVALID_PROOF'));
-  result = verifyRetention(ledger, second, {
-    'resume-file': { ...validProof, action_id: 'ordinary-action' },
-  });
-  assert.equal(result.ok, false);
-  result = verifyRetention(ledger, second, {
-    'resume-file': { ...validProof, file_name: 'other.pdf' },
-  });
-  assert.equal(result.ok, false);
-
-  result = verifyRetention(ledger, second, {
-    ordinary: validProof,
-  });
-  assert.equal(result.ok, false);
-  assert.ok(result.errors.some((item) => item.field_id === 'ordinary' && item.code === 'INVALID_PROOF'));
-
-  const disappeared = observation('obs-3', [fileControl('resume-file', {
-    value_present: false,
-    file: { accept: ['application/pdf'], count: 0, names: [] },
-  }), control('ordinary'), finalCandidate()], 'obs-2');
-  ledger = mergeObservation(ledger, disappeared);
-  assert.equal(fieldById(ledger, 'resume-file').retained, false);
-  result = verifyRetention(ledger, disappeared, { 'resume-file': validProof });
-  assert.equal(result.ok, false);
-  assert.equal(fieldById(result.ledger, 'resume-file').retained, false);
-
-  const removed = observation('obs-4', [control('ordinary'), finalCandidate()], 'obs-3');
-  ledger = mergeObservation(result.ledger, removed);
-  assert.equal(fieldById(ledger, 'resume-file').retained, false);
-  validateLedger(ledger);
-});
-
-test('requires UI-backed deliberate blanks and excludes job wording evidence', () => {
-  assert.deepEqual(ANSWER_SOURCES, [
-    'memory',
-    'profile',
-    'resume',
-    'agent_inference',
-    'user',
+test('publishes bounded action batches atomically and rejects invalid members', () => {
+  const first = visualObservation('observation-1', [visualTarget('alpha'), visualTarget('beta'), visualTarget('gamma'), finalTarget()]);
+  const ledger = createLedger(first);
+  const batch = recordActionBatch(ledger, [
+    { action: 'type_text', field_id: 'alpha', target_id: 'alpha', observation_id: 'observation-1', outcome: 'succeeded' },
+    { action: 'type_text', field_id: 'beta', target_id: 'beta', observation_id: 'observation-1', outcome: 'failed', error_code: 'input-rejected' },
   ]);
-  const text = control('optional-text', {
-    required: false,
-    value: null,
-    value_present: false,
-  });
-  const unchecked = control('optional-check', {
-    kind: 'checkbox',
-    tag: 'input',
-    type: 'checkbox',
-    role: 'checkbox',
-    checked: false,
-    value: false,
-    value_present: false,
-  });
-  const explicit = control('optional-select', {
-    kind: 'select',
-    tag: 'select',
-    type: 'select',
-    role: 'combobox',
-    required: false,
-    value: 'na',
-    value_present: true,
-    selected: ['na'],
-    options: [{ value: 'na', label: 'Not applicable', disabled: false, selected: true }],
-  });
-  const first = observation('obs-1', [text, unchecked, explicit, finalCandidate()]);
-  let ledger = createLedger(first);
-  assert.throws(() => recordResolution(ledger, {
-    field_id: 'optional-text',
-    observation_id: 'obs-1',
-    ref: 'ref-optional-text',
-    source: 'job_wording',
-    value_digest: null,
-    semantic_choice: 'not_applicable',
-  }), /invalid answer source/i);
-  ledger = recordResolution(ledger, {
-    field_id: 'optional-text',
-    observation_id: 'obs-1',
-    ref: 'ref-optional-text',
-    source: 'user',
-    value_digest: null,
-    semantic_choice: 'not_applicable',
-  });
-  ledger = recordResolution(ledger, {
-    field_id: 'optional-check',
-    observation_id: 'obs-1',
-    ref: 'ref-optional-check',
-    source: 'user',
-    value_digest: null,
-    semantic_choice: 'none',
-  });
-  ledger = recordResolution(ledger, {
-    field_id: 'optional-select',
-    observation_id: 'obs-1',
-    ref: 'ref-optional-select',
-    source: 'profile',
-    value_digest: null,
-    semantic_choice: 'not_applicable',
-  });
-  let result = verifyRetention(ledger, first);
-  assert.equal(result.ok, false);
-  assert.ok(result.errors.some((item) => item.field_id === 'optional-text'));
-  assert.equal(fieldById(result.ledger, 'optional-check').retained, true);
-  assert.equal(fieldById(result.ledger, 'optional-select').retained, true);
+  assert.deepEqual(batch.action_attempts.map((item) => item.action_id), ['action-1', 'action-2']);
+  assert.deepEqual(field(batch, 'beta').retry_notes, ['input-rejected']);
+  validateLedger(batch);
 
-  const unsupportedSource = observation('obs-2', [unchecked, finalCandidate()], 'obs-1');
-  let next = mergeObservation(result.ledger, unsupportedSource);
-  next = recordResolution(next, {
-    field_id: 'optional-check',
-    observation_id: 'obs-2',
-    ref: 'ref-optional-check',
-    source: 'resume',
-    value_digest: null,
-    semantic_choice: 'none',
-  });
-  result = verifyRetention(next, unsupportedSource);
-  assert.equal(result.ok, false);
-  assert.ok(result.errors.some((item) => item.field_id === 'optional-check'));
-  validateObservation(first);
+  assert.throws(() => recordActionBatch(ledger, [
+    { action: 'click', field_id: 'alpha', target_id: 'alpha', observation_id: 'observation-1', outcome: 'succeeded' },
+    { action: 'type_text', field_id: 'beta', target_id: 'beta', observation_id: 'observation-1', outcome: 'succeeded' },
+  ]), /type_text only/i);
+  assert.throws(() => recordActionBatch(ledger, [
+    { action: 'type_text', field_id: 'alpha', target_id: 'alpha', observation_id: 'observation-1', outcome: 'succeeded' },
+    { action: 'type_text', field_id: 'alpha', target_id: 'alpha', observation_id: 'observation-1', outcome: 'succeeded' },
+  ]), /distinct/i);
 });
 
-test('requires valid agent inference metadata and clears it on sensitive reclassification', () => {
+test('requires inference evidence and clears derived answers on sensitivity changes', () => {
+  const first = visualObservation('observation-1', [visualTarget('inferred'), visualTarget('sensitive'), finalTarget()]);
+  let ledger = createLedger(first);
   const metadata = {
     inference_rationale_digest: 'b'.repeat(64),
     inference_evidence_digests: {
@@ -473,153 +191,88 @@ test('requires valid agent inference metadata and clears it on sensitive reclass
       job_description_sha256: 'd'.repeat(64),
     },
   };
-  const current = observation('obs-inference', [
-    control('inferred'),
-    control('sensitive-via-resolution'),
-    control('already-sensitive'),
-    finalCandidate(),
-  ]);
-  let ledger = createLedger(current);
-  const resolution = (fieldId, extra = {}) => ({
-    field_id: fieldId,
-    observation_id: 'obs-inference',
-    ref: `ref-${fieldId}`,
-    source: 'agent_inference',
-    value_digest: digestPrivateValue(`inferred-${fieldId}`),
-    ...metadata,
-    ...extra,
-  });
+  assert.throws(() => answered(ledger, 'inferred', 'observation-1', 'inferred', 'agent_inference'), /inference metadata required/i);
+  ledger = answered(ledger, 'inferred', 'observation-1', 'inferred', 'agent_inference', metadata);
+  assert.equal(field(ledger, 'inferred').answer_source, 'agent_inference');
+  ledger = markTargetSensitive(ledger, 'sensitive');
+  assert.throws(() => answered(ledger, 'sensitive', 'observation-1', 'sensitive', 'agent_inference', metadata), /prohibited for sensitive/i);
 
-  const withoutMetadata = resolution('inferred');
-  delete withoutMetadata.inference_rationale_digest;
-  delete withoutMetadata.inference_evidence_digests;
-  assert.throws(
-    () => recordResolution(ledger, withoutMetadata),
-    /agent_inference requires inference metadata/i,
-  );
-
-  for (const malformed of [
-    { ...metadata, inference_rationale_digest: 'not-a-digest' },
-    {
-      ...metadata,
-      inference_evidence_digests: {
-        ...metadata.inference_evidence_digests,
-        resume_sha256: 'not-a-digest',
-      },
-    },
-    {
-      ...metadata,
-      inference_evidence_digests: {
-        ...metadata.inference_evidence_digests,
-        job_description_sha256: 'not-a-digest',
-      },
-    },
-  ]) {
-    assert.throws(
-      () => recordResolution(ledger, resolution('inferred', malformed)),
-      /digest/i,
-    );
-  }
-
-  assert.throws(
-    () => recordResolution(ledger, resolution('inferred', { source: 'profile' })),
-    /inference metadata is restricted to agent_inference/i,
-  );
-
-  ledger = recordResolution(ledger, resolution('inferred'));
-  const inferred = fieldById(ledger, 'inferred');
-  assert.equal(inferred.answer_source, 'agent_inference');
-  assert.equal(inferred.inference_rationale_digest, metadata.inference_rationale_digest);
-  assert.deepEqual(inferred.inference_evidence_digests, metadata.inference_evidence_digests);
-
-  assert.throws(
-    () => recordResolution(
-      ledger,
-      resolution('sensitive-via-resolution', { sensitive: true }),
-    ),
-    /agent_inference is prohibited for sensitive fields/i,
-  );
-  ledger = markFieldSensitive(ledger, 'already-sensitive');
-  assert.throws(
-    () => recordResolution(ledger, resolution('already-sensitive')),
-    /agent_inference is prohibited for sensitive fields/i,
-  );
-
-  ledger = markFieldSensitive(ledger, 'inferred');
-  const reclassified = fieldById(ledger, 'inferred');
-  assert.equal(reclassified.sensitive, true);
-  assert.equal(reclassified.answer_state, 'unresolved');
-  assert.equal(reclassified.answer_source, null);
-  assert.equal(reclassified.value_digest, null);
-  assert.equal(reclassified.inference_rationale_digest, null);
-  assert.equal(reclassified.inference_evidence_digests, null);
+  ledger = markTargetSensitive(ledger, 'inferred');
+  assert.equal(field(ledger, 'inferred').sensitive, true);
+  assert.equal(field(ledger, 'inferred').answer_state, 'unresolved');
+  assert.equal(field(ledger, 'inferred').value_digest, null);
+  assert.equal(field(ledger, 'inferred').inference_evidence_digests, null);
 });
 
-test('requires observer-normalized checkbox validity and rejects custom errors', () => {
-  const checked = control('source-a', {
-    group_id: 'source-group',
-    kind: 'checkbox',
-    tag: 'input',
-    type: 'checkbox',
-    role: 'checkbox',
-    name: 'source[]',
-    checked: true,
-    value: true,
-    value_present: true,
-    validity: { valid: true, aria_invalid: false, message: null },
-  });
-  const normalizedUnchecked = control('source-b', {
-    group_id: 'source-group',
-    kind: 'checkbox',
-    tag: 'input',
-    type: 'checkbox',
-    role: 'checkbox',
-    name: 'source[]',
+test('retains a selected radio group while preserving invalid visual states', () => {
+  const radioA = visualTarget('radio-a', {
+    kind: 'radio',
+    group_id: 'work-mode',
+    value_state: 'blank',
     checked: false,
-    value: false,
-    value_present: false,
-    validity: { valid: true, aria_invalid: false, message: null },
   });
-  const resolveGroup = (current) => {
-    let ledger = createLedger(current);
-    ledger = recordResolution(ledger, {
-      field_id: 'source-a',
-      observation_id: current.observation_id,
-      ref: current.controls[0].ref,
-      source: 'profile',
-      value_digest: digestPrivateValue(true),
-    });
-    return recordResolution(ledger, {
-      field_id: 'source-b',
-      observation_id: current.observation_id,
-      ref: current.controls[1].ref,
-      source: 'profile',
-      value_digest: null,
-      semantic_choice: 'none',
-    });
-  };
-
-  const normalized = observation('obs-1', [checked, normalizedUnchecked, finalCandidate()]);
-  const retained = verifyRetention(resolveGroup(normalized), normalized);
+  const radioB = visualTarget('radio-b', {
+    kind: 'radio',
+    group_id: 'work-mode',
+    value_state: 'selected',
+    checked: true,
+    label: 'On-site',
+  });
+  const first = visualObservation('observation-1', [radioA, radioB, finalTarget()]);
+  let ledger = deliberateBlank(createLedger(first), 'radio-b', 'observation-1', 'radio-b');
+  let retained = verifyRetention(ledger, first);
   assert.equal(retained.ok, true);
-  assert.equal(auditCompletion(retained.ledger, normalized).passed, true);
+  ledger = retained.ledger;
+  assert.equal(auditCompletion(ledger, first).complete, true);
 
-  const customError = observation('obs-2', [
-    { ...checked, ref: 'ref-source-a-custom' },
-    {
-      ...normalizedUnchecked,
-      ref: 'ref-source-b-custom',
-      validity: {
-        valid: false,
-        aria_invalid: false,
-        message: 'Select at least two checkboxes',
-      },
-    },
-    finalCandidate(),
+  const invalid = visualObservation('observation-2', [
+    visualTarget('radio-a', { kind: 'radio', group_id: 'work-mode', value_state: 'blank', checked: false }),
+    visualTarget('radio-b', {
+      kind: 'radio',
+      group_id: 'work-mode',
+      value_state: 'selected',
+      checked: true,
+      validation: { valid: false, message_present: true },
+    }),
+    finalTarget(),
+  ], 'observation-1');
+  ledger = mergeObservation(ledger, invalid);
+  retained = verifyRetention(ledger, invalid);
+  assert.equal(retained.ok, false);
+  const audit = auditCompletion(retained.ledger, invalid);
+  assert.equal(audit.complete, false);
+  assert.ok(audit.invalid_field_ids.includes('radio-b'));
+});
+
+test('keeps dynamic targets bounded and blocks hidden or unknown actions', () => {
+  const current = visualObservation('observation-1', [
+    visualTarget('alpha'),
+    visualTarget('hidden', { visible: false }),
+    visualTarget('disabled', { enabled: false }),
+    visualTarget('honeypot', { candidate: { class: 'field', reason: 'honeypot trap field' } }),
+    visualTarget('unknown-action', {
+      field_id: null,
+      kind: 'button',
+      required: false,
+      value_state: 'blank',
+      candidate: { class: 'unknown', reason: 'unclassified control' },
+    }),
+    finalTarget(),
   ]);
-  const rejected = verifyRetention(resolveGroup(customError), customError);
-  assert.equal(rejected.ok, false);
-  assert.ok(rejected.errors.some((item) =>
-    item.code === 'INVALID_FIELD' && item.field_id === 'source-b'));
-  assert.equal(auditCompletion(rejected.ledger, customError).passed, false);
+  const ledger = createLedger(current);
+  assert.deepEqual(ledger.unknown_targets, [{
+    target_id: 'unknown-action',
+    observation_id: 'observation-1',
+    reason: 'unclassified control',
+  }]);
+  assert.equal(ledger.current_candidate_targets.length, 1);
+  const audit = auditCompletion(ledger, current);
+  assert.equal(audit.complete, false);
+  assert.ok(audit.blockers.some((item) => item.code === 'unknown-target'));
+  assert.equal(audit.blockers.some((item) => item.target_id === 'honeypot'), false);
+
+  assert.throws(() => validateObservation({
+    ...current,
+    targets: [visualTarget('alpha', { confidence: Number.NaN }), finalTarget()],
+  }), /confidence/);
 });

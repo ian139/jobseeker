@@ -1,33 +1,27 @@
 import {
   ANSWER_SOURCES,
-  isHoneypotControl,
-  isReachableFieldControl,
+  isHoneypotTarget,
+  isReachableTarget,
   validateLedger,
   validateObservation,
 } from './ledger.mjs';
 
-export const AUDIT_SCHEMA = 'phase1-audit-v1';
+export const AUDIT_SCHEMA = 'phase1-audit-v2';
 
-const ANSWER_SOURCE_SET = new Set(ANSWER_SOURCES);
-const OPTIONS = new Set(['final_review_boundary']);
-
-function isRecord(value) {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
+const SOURCES = new Set(ANSWER_SOURCES);
+const OPTIONS = new Set(['final_review_boundary', 'final']);
 
 function clone(value) {
   if (Array.isArray(value)) return value.map(clone);
-  if (isRecord(value)) {
-    const result = {};
-    for (const [key, item] of Object.entries(value)) result[key] = clone(item);
-    return result;
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, clone(item)]));
   }
   return value;
 }
 
 function freeze(value) {
-  if (isRecord(value) || Array.isArray(value)) {
-    for (const item of Object.values(value)) freeze(item);
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) freeze(child);
     Object.freeze(value);
   }
   return value;
@@ -37,300 +31,220 @@ function immutable(value) {
   return freeze(clone(value));
 }
 
-function blocker(code, message, fieldId = null, ref = null) {
-  return { code, message, field_id: fieldId, ref };
-}
-
-function reachable(control) {
-  return isReachableFieldControl(control) && !isHoneypotControl(control);
-}
-
-function currentFieldControls(observation) {
-  return observation.controls.filter((control) => reachable(control));
-}
-
-function groupKey(control) {
-  if (control.role !== 'radio') return null;
-  if (control.group_id != null) return `radio-group:${control.group_id}`;
-  if (control.name != null) return `radio-name:${control.frame_id || ''}:${control.name}`;
-  return null;
-}
-
-function deliberate(field) {
-  if (field.answer_state === 'answered') {
-    return field.answer_source !== null && field.value_digest !== null;
-  }
-  if (field.answer_state === 'blank') {
-    return field.answer_source !== null && field.semantic_choice !== null;
-  }
-  return false;
-}
-
-function validSource(field) {
-  return field.answer_source === null || ANSWER_SOURCE_SET.has(field.answer_source);
-}
-function isFileField(field) {
-  const file = isRecord(field.latest_state) && field.latest_state.file;
-  return isRecord(file) && file.accept !== null;
-}
-
-function isObservedFileControl(control) {
-  return control.type === 'file' && isRecord(control.file) && control.file.accept !== null;
-}
-
-function priorFieldIssueSet(field) {
-  return {
-    unresolved: !deliberate(field),
-    invalid: !field.valid || !validSource(field),
-    unretained: !field.retained,
-    missingFile: isFileField(field) && field.answer_state === 'answered',
-  };
-}
-
-
-function parseOptions(options) {
-  if (options === undefined) return { final_review_boundary: false };
-  if (!isRecord(options)) throw new TypeError('audit options must be an object');
-  for (const key of Object.keys(options)) {
+function optionsFor(input) {
+  if (input === undefined || input === null) return { final_review_boundary: false, final: false };
+  if (typeof input !== 'object' || Array.isArray(input)) throw new TypeError('audit options must be an object');
+  for (const key of Object.keys(input)) {
     if (!OPTIONS.has(key)) throw new TypeError(`audit options.${key}: unknown key`);
   }
-  if (options.final_review_boundary !== undefined && typeof options.final_review_boundary !== 'boolean') {
-    throw new TypeError('audit options.final_review_boundary: expected boolean');
+  if (input.final_review_boundary !== undefined && typeof input.final_review_boundary !== 'boolean') {
+    throw new TypeError('audit options.final_review_boundary must be boolean');
   }
-  return { final_review_boundary: options.final_review_boundary === true };
-}
-
-function fieldIssueSet(field, control, currentObservationId) {
-  const unresolved = !deliberate(field);
-  const invalid = !field.valid || !control.validity.valid || control.validity.aria_invalid;
-  const unretained = !field.retained;
-  const stale = field.latest_observation_id !== currentObservationId || field.latest_ref !== control.ref;
-  return { unresolved, invalid, unretained, stale };
-}
-
-function actionEvidence(ledger) {
-  const finalAttempts = ledger.action_attempts.filter((attempt) =>
-    attempt.action === 'submit' || attempt.action === 'final_submit',
-  );
-  const staleAttempts = ledger.action_attempts.filter((attempt) => attempt.stale_ref);
-  return { finalAttempts, staleAttempts };
-}
-function auditRadioGroup(group, unresolved, invalid, unretained, revealed, staleRefs) {
-  if (group.length < 2) return;
-  const selected = group.filter((field) =>
-    field.latest_state.checked === true || field.latest_state.selected === true);
-  if (selected.length !== 1) return;
-  const selectedField = selected[0];
-  const selectedStateValid = selectedField.latest_state.validity.valid &&
-    selectedField.latest_state.validity.aria_invalid !== true;
-  if (!deliberate(selectedField) || !selectedField.retained ||
-      !selectedField.valid || !selectedStateValid) {
-    return;
+  if (input.final !== undefined && typeof input.final !== 'boolean') {
+    throw new TypeError('audit options.final must be boolean');
   }
-  for (const field of group) {
-    if (field.field_id === selectedField.field_id) continue;
-    unresolved.delete(field.field_id);
-    unretained.delete(field.field_id);
-    revealed.delete(field.field_id);
-    staleRefs.delete(field.field_id);
-    if (field.latest_state.validity.valid &&
-        field.latest_state.validity.aria_invalid !== true) {
-      invalid.delete(field.field_id);
-    }
-  }
-}
-
-function radioGroupComponents(group) {
-  const parents = group.map((_, index) => index);
-  const find = (index) => {
-    let root = index;
-    while (parents[root] !== root) root = parents[root];
-    while (parents[index] !== index) {
-      const next = parents[index];
-      parents[index] = root;
-      index = next;
-    }
-    return root;
+  return {
+    final_review_boundary: input.final_review_boundary === true,
+    final: input.final === true,
   };
-  const union = (left, right) => {
-    const leftRoot = find(left);
-    const rightRoot = find(right);
-    if (leftRoot !== rightRoot) parents[rightRoot] = leftRoot;
+}
+
+function targetBlocker(code, message, target = null, fieldId = null) {
+  return {
+    code,
+    message,
+    field_id: fieldId ?? target?.field_id ?? null,
+    target_id: target?.target_id ?? null,
   };
-  const firstByObservation = new Map();
-  group.forEach((field, index) => {
-    for (const ref of field.ref_history) {
-      const first = firstByObservation.get(ref.observation_id);
-      if (first === undefined) firstByObservation.set(ref.observation_id, index);
-      else union(first, index);
-    }
-  });
-  const components = new Map();
-  group.forEach((field, index) => {
-    const root = find(index);
-    const component = components.get(root) ?? [];
-    component.push(field);
-    components.set(root, component);
-  });
-  return [...components.values()];
 }
-
-function auditRadioGroups(
-  fields,
-  unresolved,
-  invalid,
-  unretained,
-  revealed,
-  staleRefs,
-) {
-  const groups = new Map();
-  for (const field of fields) {
-    if (field.role !== 'radio') continue;
-    const key = groupKey(field);
-    if (key === null) continue;
-    const group = groups.get(key) ?? [];
-    group.push(field);
-    groups.set(key, group);
-  }
-  for (const group of groups.values()) {
-    for (const component of radioGroupComponents(group)) {
-      auditRadioGroup(component, unresolved, invalid, unretained, revealed, staleRefs);
-    }
-  }
-}
-
 
 function sortedUnique(values) {
   return [...new Set(values)].sort();
 }
 
+function isReachableField(target) {
+  return isReachableTarget(target) && target.field_id !== null;
+}
+
+function isFileTarget(target) {
+  return target.kind === 'file_upload' || target.file !== null;
+}
+
+function validTargetState(target) {
+  return target.latest_state.validation.valid === true
+    && target.latest_state.validation.message_present !== true;
+}
+
+function deliberate(target) {
+  return target.answer_state === 'answered' || target.answer_state === 'blank';
+}
+
+function currentTargetMap(observation) {
+  return new Map(observation.targets.map((target) => [target.target_id, target]));
+}
+
+function groupKey(target) {
+  if (target.kind !== 'radio' || target.group_id === null) return null;
+  return target.group_id;
+}
+
+function auditRadioGroups(currentFields, byField, unresolved, invalid, unretained, revealed) {
+  const groups = new Map();
+  for (const target of currentFields) {
+    const key = groupKey(target);
+    if (key === null) continue;
+    const group = groups.get(key) ?? [];
+    group.push(target);
+    groups.set(key, group);
+  }
+  for (const group of groups.values()) {
+    const selected = group.filter((target) =>
+      target.checked === true || target.selected !== null || target.value_state === 'selected');
+    const selectedFields = selected
+      .map((target) => byField.get(target.field_id))
+      .filter((target) => target !== undefined);
+    const complete = selectedFields.some((target) =>
+      deliberate(target) && target.retained && target.valid && validTargetState(target));
+    if (complete) {
+      for (const target of group) {
+        unresolved.delete(target.field_id);
+        invalid.delete(target.field_id);
+        unretained.delete(target.field_id);
+        revealed.delete(target.field_id);
+      }
+    }
+  }
+}
+
+function historicalIssue(target, currentTarget) {
+  if (target.answer_state === 'unresolved' && target.revealed_observation_id !== null) return 'unresolved';
+  if (!deliberate(target)) return null;
+  if (!target.valid || !target.retained) return target.retained ? 'invalid' : 'unretained';
+  if (isFileTarget(target) && currentTarget === undefined) return 'unresolved';
+  return null;
+}
+
 export function auditCompletion(ledger, observation, options = undefined) {
   validateLedger(ledger);
   validateObservation(observation);
-  const parsedOptions = parseOptions(options);
-  const fieldsById = new Map(ledger.fields.map((field) => [field.field_id, field]));
-  const activeControls = currentFieldControls(observation);
-  const activeFieldIds = new Set(activeControls.map((control) => control.stable_id));
+  const parsed = optionsFor(options);
+  const byField = new Map(ledger.targets.map((target) => [target.field_id, target]));
+  const currentByTarget = currentTargetMap(observation);
+  const currentFields = observation.targets.filter(isReachableField);
+  const currentFieldIds = new Set(currentFields.map((target) => target.field_id));
   const unresolved = new Set();
   const invalid = new Set();
   const unretained = new Set();
   const revealed = new Set();
-  const staleRefs = new Set();
+  const staleTargets = new Set();
   const blockers = [];
-  const finalCandidates = observation.controls.filter((control) =>
-    control.candidate.class === 'final_candidate' && control.visible && control.enabled && !isHoneypotControl(control),
+  const finalCandidates = observation.targets.filter((target) =>
+    target.candidate.class === 'final_candidate'
+      && target.visible
+      && target.enabled
+      && !isHoneypotTarget(target),
   );
 
   if (ledger.latest_observation_id !== observation.observation_id) {
-    blockers.push(blocker(
-      'stale-observation',
-      'audit observation is not the ledger latest observation',
-    ));
+    blockers.push(targetBlocker('stale-observation', 'audit image is not the ledger latest observation'));
   }
   for (const item of observation.blockers) {
-    blockers.push(blocker(`observation-blocker:${item.code}`, 'observation reported a blocker'));
+    const code = typeof item === 'string' ? item : item.code;
+    blockers.push(targetBlocker(`observation-blocker:${code}`, 'observation reported a blocker'));
   }
-  for (const control of observation.controls) {
-    if (control.candidate.class === 'unknown' && control.visible && control.enabled && !isHoneypotControl(control)) {
-      blockers.push(blocker('unknown-control', 'visible control has no safe candidate classification', control.stable_id, control.ref));
+  for (const target of observation.targets) {
+    if (target.candidate.class === 'unknown' && target.visible && target.enabled && !isHoneypotTarget(target)) {
+      blockers.push(targetBlocker('unknown-target', 'visible target has no safe candidate classification', target));
     }
   }
-  if (finalCandidates.length === 0 && !parsedOptions.final_review_boundary) {
-    blockers.push(blocker('no-final-boundary', 'a final candidate or explicit final-review boundary is required'));
+
+  if (finalCandidates.length === 0 && !parsed.final_review_boundary) {
+    blockers.push(targetBlocker('no-final-boundary', 'a final candidate or explicit final-review boundary is required'));
+  } else if (finalCandidates.length > 1 && !parsed.final_review_boundary) {
+    blockers.push(targetBlocker('multiple-final-candidates', 'more than one final candidate is visible'));
   }
 
-  for (const control of activeControls) {
-    const field = fieldsById.get(control.stable_id);
-    if (!field) {
-      unresolved.add(control.stable_id);
-      revealed.add(control.stable_id);
-      blockers.push(blocker('revealed-field', 'reachable field is absent from the ledger', control.stable_id, control.ref));
+  for (const visual of currentFields) {
+    const target = byField.get(visual.field_id);
+    if (target === undefined) {
+      unresolved.add(visual.field_id);
+      revealed.add(visual.field_id);
+      blockers.push(targetBlocker('revealed-field', 'reachable target is absent from the ledger', visual));
       continue;
     }
-    const issues = fieldIssueSet(field, control, observation.observation_id);
-    if (isFileField(field) && !isObservedFileControl(control)) {
-      unresolved.add(field.field_id);
-      blockers.push(blocker('missing-file-field', 'file field is not observable in the current observation', field.field_id, control.ref));
+    if (target.latest_observation_id !== observation.observation_id
+      || target.target_id !== visual.target_id
+      || !target.present_in_latest_observation) {
+      staleTargets.add(visual.target_id);
+      blockers.push(targetBlocker('stale-target', 'target identity is not current for this image', visual, visual.field_id));
     }
-    if (issues.unresolved) unresolved.add(field.field_id);
-    if (issues.invalid) invalid.add(field.field_id);
-    if (issues.unretained) unretained.add(field.field_id);
-    if (issues.stale) staleRefs.add(field.field_id);
-    if (field.last_revealed_observation_id === observation.observation_id &&
-        (issues.unresolved || issues.invalid || issues.unretained || issues.stale)) {
-      revealed.add(field.field_id);
+    if (target.answer_state === 'unresolved') unresolved.add(target.field_id);
+    if (!target.valid || !validTargetState(target)) invalid.add(target.field_id);
+    if (!target.retained) unretained.add(target.field_id);
+    if (target.revealed_observation_id === observation.observation_id
+      && (target.answer_state === 'unresolved' || !target.valid || !target.retained)) {
+      revealed.add(target.field_id);
     }
-    if (!validSource(field)) {
-      invalid.add(field.field_id);
-      blockers.push(blocker('invalid-answer-source', 'field answer source is not allowed', field.field_id, control.ref));
+    if (target.answer_source !== null && !SOURCES.has(target.answer_source)) {
+      invalid.add(target.field_id);
+      blockers.push(targetBlocker('invalid-answer-source', 'target answer source is not allowed', visual, target.field_id));
     }
-    if (issues.stale) {
-      blockers.push(blocker('stale-ref', 'field reference is not current for this observation', field.field_id, control.ref));
-    }
-  }
-  for (const field of ledger.fields) {
-    if (activeFieldIds.has(field.field_id) || field.revealed_observation_id === null) continue;
-    const issues = priorFieldIssueSet(field);
-    if (issues.unresolved || issues.missingFile) unresolved.add(field.field_id);
-    if (issues.invalid) invalid.add(field.field_id);
-    if (issues.unretained) unretained.add(field.field_id);
-    if (!validSource(field)) {
-      blockers.push(blocker('invalid-answer-source', 'field answer source is not allowed', field.field_id, field.latest_ref ?? null));
-    }
-    if (issues.missingFile) {
-      blockers.push(blocker('missing-file-field', 'answered file field is absent from the current observation', field.field_id, field.latest_ref ?? null));
+    if (isFileTarget(visual) && visual.file === null) {
+      unresolved.add(target.field_id);
+      blockers.push(targetBlocker('missing-file-target', 'file target is not observable in the current image', visual, target.field_id));
     }
   }
 
-
-  auditRadioGroups(
-    ledger.fields,
-    unresolved,
-    invalid,
-    unretained,
-    revealed,
-    staleRefs,
-  );
-
-  for (const fieldId of unresolved) {
-    blockers.push(blocker('unresolved-field', 'reachable field has no deliberate answer or state', fieldId, fieldsById.get(fieldId)?.latest_ref ?? null));
-  }
-  for (const fieldId of invalid) {
-    blockers.push(blocker('invalid-field', 'reachable field is invalid or has an invalid answer source', fieldId, fieldsById.get(fieldId)?.latest_ref ?? null));
-  }
-  for (const fieldId of unretained) {
-    blockers.push(blocker('unretained-field', 'reachable field did not retain its deliberate value or state', fieldId, fieldsById.get(fieldId)?.latest_ref ?? null));
-  }
-  for (const fieldId of revealed) {
-    blockers.push(blocker('revealed-field', 'newly revealed field is not verified complete', fieldId, fieldsById.get(fieldId)?.latest_ref ?? null));
+  for (const target of ledger.targets) {
+    if (currentFieldIds.has(target.field_id)) continue;
+    const current = target.target_id === undefined ? undefined : currentByTarget.get(target.target_id);
+    const issue = historicalIssue(target, current);
+    if (issue === 'unresolved') unresolved.add(target.field_id);
+    if (issue === 'invalid') invalid.add(target.field_id);
+    if (issue === 'unretained') unretained.add(target.field_id);
+    if (issue !== null && isFileTarget(target) && current === undefined) {
+      blockers.push(targetBlocker('missing-file-target', 'answered file target is absent from the current image', null, target.field_id));
+    }
   }
 
-  const evidence = actionEvidence(ledger);
-  for (const attempt of evidence.staleAttempts) {
-    blockers.push(blocker('stale-action-ref', 'action evidence contains a stale control reference', attempt.field_id, attempt.ref));
+  auditRadioGroups(currentFields, byField, unresolved, invalid, unretained, revealed);
+  for (const action of ledger.action_attempts) {
+    if (action.stale_target === true && action.target_id !== null) {
+      staleTargets.add(action.target_id);
+      blockers.push(targetBlocker('stale-action-target', 'action evidence contains a stale target', null, action.field_id));
+    }
   }
+
   const unresolvedIds = sortedUnique([...unresolved]);
   const invalidIds = sortedUnique([...invalid]);
   const unretainedIds = sortedUnique([...unretained]);
   const revealedIds = sortedUnique([...revealed]);
-  const staleIds = sortedUnique([...staleRefs]);
-  const pass = blockers.length === 0 && unresolvedIds.length === 0 && invalidIds.length === 0 &&
-    unretainedIds.length === 0 && revealedIds.length === 0 && staleIds.length === 0;
+  const staleIds = sortedUnique([...staleTargets]);
+  const candidateIds = sortedUnique(finalCandidates.map((target) => target.target_id));
+  const complete = blockers.length === 0
+    && unresolvedIds.length === 0
+    && invalidIds.length === 0
+    && unretainedIds.length === 0
+    && revealedIds.length === 0
+    && staleIds.length === 0;
+
   return immutable({
     schema: AUDIT_SCHEMA,
     observation_id: observation.observation_id,
-    passed: pass,
-    complete: pass,
+    passed: complete,
+    complete,
     blockers,
-    stale_refs: staleIds,
+    stale_target_ids: staleIds,
     unresolved_field_ids: unresolvedIds,
     invalid_field_ids: invalidIds,
     unretained_field_ids: unretainedIds,
     revealed_field_ids: revealedIds,
-    final_candidate_refs: finalCandidates.map((control) => control.ref).sort(),
-    final_review_boundary: parsedOptions.final_review_boundary,
+    final_candidate_target_ids: candidateIds,
+    final_review_boundary: parsed.final_review_boundary,
     submit_action_count: ledger.submit_action_count,
-    field_count: activeControls.length,
+    field_count: currentFields.length,
+    target_count: currentFields.length,
+    final: parsed.final,
   });
 }
 

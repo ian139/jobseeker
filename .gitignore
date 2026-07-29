@@ -9,7 +9,6 @@ node_modules/
 data/
 private/
 .omp/
-.playwright-cli/
 .tmp-*
 .env
 .DS_Store

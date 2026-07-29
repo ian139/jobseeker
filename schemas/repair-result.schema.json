@@ -1,7 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "repair-result.schema.json",
-  "title": "ATS repair result",
+  "title": "Application repair result",
+  "description": "A bounded result for repairing an application workflow failure.",
   "type": "object",
   "additionalProperties": false,
   "required": ["failureClass", "changedFiles", "testsAdded", "verification", "resumeCurrentRun", "reasonCode"],

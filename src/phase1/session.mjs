@@ -171,7 +171,7 @@ function identityProseIsSensitive(field) {
 }
 
 function isSensitiveInferenceField(alias, field) {
-  const keyText = `${normalizeClassificationText(alias)} ${normalizeClassificationText(field.name)}`;
+  const keyText = `${normalizeClassificationText(alias)} ${normalizeClassificationText(field.label)}`;
   if (INFERENCE_SENSITIVE_PATTERNS[0].test(keyText) || identityProseIsSensitive(field)) return true;
   const text = `${keyText} ${normalizeClassificationText(field.label)} ${normalizeClassificationText(field.description)}`;
   for (const pattern of INFERENCE_SENSITIVE_PATTERNS.slice(1)) {
@@ -220,7 +220,7 @@ function hasPendingFinalSubmit(state) {
 function invalidateSubmissionPreparation(state) {
   if (state.submissionSucceeded) return;
   state.submissionAuthorized = false;
-  state.authorizedFinalRef = null;
+  state.authorizedFinalTargetId = null;
   state.authorizedObservationId = null;
   if (!hasPendingFinalSubmit(state)) state.preSubmitAuditRef = null;
 }
@@ -269,14 +269,15 @@ export async function startRun(runPath, options = {}) {
 
   await ensurePrivateDirectory(run.run_artifact_dir, { create: true });
   const runMetadata = {
-    schema: 'phase1-run-evidence-v1',
+    schema: 'phase1-run-evidence-v2',
     application_url: run.application_url,
     run_contract_sha256: runIdentity.sha256,
     resume_upload_path: resumeIdentity.path,
     resume_upload_sha256: resumeIdentity.sha256,
     browser_mode: run.browser_mode,
-    observer: run.observer,
+    perception_driver: run.perception_driver,
     action_driver: run.action_driver,
+    model_provider: run.model_provider,
     submit_policy: run.submit_policy,
     loop_contract: 'safe-batch-observe-act-reobserve',
     started_at: new Date(startedAt).toISOString(),
@@ -326,7 +327,7 @@ export async function startRun(runPath, options = {}) {
     faulted: false,
     busy: false,
     submissionAuthorized: false,
-    authorizedFinalRef: null,
+    authorizedFinalTargetId: null,
     authorizedObservationId: null,
     preSubmitAuditRef: null,
     submissionSucceeded: false,
@@ -361,6 +362,7 @@ export async function resolveField(session, options) {
   const input = dataSnapshot(options, 'options');
   assertExactKeys(input, new Set([
     'field_id',
+    'target_id',
     'alias',
     'user',
     'deliberate_blank',
@@ -374,8 +376,8 @@ export async function resolveField(session, options) {
     if (state.submissionSucceeded) {
       throw new TypeError('field resolution is unavailable after final submission succeeds');
     }
-    if (typeof input.field_id !== 'string' || typeof input.alias !== 'string') {
-      throw new TypeError('options.field_id and options.alias must be strings');
+    if (typeof input.field_id !== 'string' || typeof input.target_id !== 'string' || typeof input.alias !== 'string') {
+      throw new TypeError('options.field_id, options.target_id, and options.alias must be strings');
     }
     if (input.alias.length === 0
       || input.alias.length > MAX_ALIAS_LENGTH
@@ -416,8 +418,9 @@ export async function resolveField(session, options) {
     if (!deliberateBlank && input.semantic_choice !== undefined) {
       throw new TypeError('options.semantic_choice requires deliberate_blank');
     }
-    const field = state.ledger.fields.find((item) => item.field_id === input.field_id);
+    const field = state.ledger.targets.find((item) => item.field_id === input.field_id);
     if (!field
+      || field.target_id !== input.target_id
       || !field.present_in_latest_observation
       || !field.reachable
       || field.final
@@ -431,7 +434,7 @@ export async function resolveField(session, options) {
     const workingLedger = input.sensitive === true || classifiedSensitive
       ? markFieldSensitive(state.ledger, field.field_id)
       : state.ledger;
-    const workingField = workingLedger.fields.find((item) => item.field_id === field.field_id);
+    const workingField = workingLedger.targets.find((item) => item.field_id === field.field_id);
     const sensitive = workingField.sensitive === true;
     const allowAgentInference = !sensitive;
     const answer = resolveAnswer({
@@ -465,7 +468,7 @@ export async function resolveField(session, options) {
     const resolution = {
       field_id: workingField.field_id,
       observation_id: workingLedger.latest_observation_id,
-      ref: workingField.latest_ref,
+      target_id: workingField.target_id,
       source: answer.source,
       value_digest: deliberateBlank ? null : digestObservedValue(workingField, answer.value),
       inference_rationale_digest: answer.source === 'agent_inference' ? answer.inference_rationale_digest ?? null : null,
@@ -499,6 +502,10 @@ export async function recordAction(session, attempt) {
     const normalized = Object.hasOwn(input, 'observation_id')
       ? { ...input }
       : { ...input, observation_id: state.ledger.latest_observation_id };
+    if (Object.hasOwn(normalized, 'targetId')) {
+      normalized.target_id = normalized.targetId;
+      delete normalized.targetId;
+    }
     if (normalized.action === 'final_submit') {
       throw new TypeError('final_submit must use beginFinalSubmit and completeFinalSubmit');
     }
@@ -508,8 +515,8 @@ export async function recordAction(session, attempt) {
     const fieldId = normalized.field_id ?? null;
     const field = fieldId === null
       ? null
-      : state.ledger.fields.find((item) => item.field_id === fieldId) ?? null;
-    if (field !== null && normalized.ref === undefined) normalized.ref = field.latest_ref;
+      : state.ledger.targets.find((item) => item.field_id === fieldId) ?? null;
+    if (field !== null && normalized.target_id === undefined) normalized.target_id = field.target_id;
     const nextLedger = recordActionAttempt(state.ledger, normalized);
     if (requiresReobservation(state.ledger)) {
       throw new TypeError('latest observation was consumed by a field mutation; accept a fresh observation');
@@ -534,14 +541,18 @@ export async function recordActionBatch(session, attempts) {
     requireObservationState(state);
     const normalizedAttempts = input.map((attempt) => {
       const normalized = { ...attempt };
+      if (Object.hasOwn(normalized, 'targetId')) {
+        normalized.target_id = normalized.targetId;
+        delete normalized.targetId;
+      }
       if (!Object.hasOwn(normalized, 'observation_id')) {
         normalized.observation_id = state.ledger.latest_observation_id;
       }
       const fieldId = normalized.field_id ?? null;
       const field = fieldId === null
         ? null
-        : state.ledger.fields.find((item) => item.field_id === fieldId) ?? null;
-      if (field !== null && normalized.ref === undefined) normalized.ref = field.latest_ref;
+        : state.ledger.targets.find((item) => item.field_id === fieldId) ?? null;
+      if (field !== null && normalized.target_id === undefined) normalized.target_id = field.target_id;
       return normalized;
     });
     const nextLedger = recordLedgerActionBatch(state.ledger, normalizedAttempts);
@@ -604,7 +615,7 @@ export async function beginFinalSubmit(session) {
       action_id: nextFinalSubmitActionId(state.ledger),
       action: 'final_submit',
       observation_id: state.authorizedObservationId,
-      ref: state.authorizedFinalRef,
+      target_id: state.authorizedFinalTargetId,
       outcome: 'attempted',
     });
     const action = nextLedger.action_attempts.at(-1);
@@ -615,11 +626,12 @@ export async function beginFinalSubmit(session) {
     state.ledger = nextLedger;
     state.lastFinalAttemptObservationId = action.observation_id;
     state.submissionAuthorized = false;
-    state.authorizedFinalRef = null;
+    state.authorizedFinalTargetId = null;
     state.authorizedObservationId = null;
     return Object.freeze({
       attemptId: action.action_id,
-      ref: action.ref,
+      targetId: action.target_id,
+      finalTargetId: action.target_id,
       observationId: action.observation_id,
       action,
       actionRef,
@@ -645,6 +657,9 @@ export async function completeFinalSubmit(session, options) {
 
   return transact(session, async (state, markPublished) => {
     requireObservationState(state);
+    if (state.ledger.latest_observation_id === state.lastFinalAttemptObservationId) {
+      throw new TypeError('accept a fresh visual observation before completing final submission');
+    }
     const nextLedger = resolveFinalSubmitAttempt(state.ledger, {
       action_id: input.attemptId,
       outcome: input.outcome,
@@ -662,7 +677,7 @@ export async function completeFinalSubmit(session, options) {
     const ledgerRef = await state.evidence.recordLedger(nextLedger);
     state.ledger = nextLedger;
     state.submissionAuthorized = false;
-    state.authorizedFinalRef = null;
+    state.authorizedFinalTargetId = null;
     state.authorizedObservationId = null;
     if (input.outcome === 'succeeded') {
       state.submissionSucceeded = true;
@@ -697,9 +712,9 @@ export async function verifyRetention(session, proofs = undefined) {
 }
 export async function prepareSubmission(session, options) {
   const input = dataSnapshot(options, 'options');
-  assertExactKeys(input, new Set(['finalRef']), 'options');
-  if (typeof input.finalRef !== 'string' || input.finalRef.length === 0) {
-    throw new TypeError('options.finalRef must be a non-empty string');
+  assertExactKeys(input, new Set(['finalTargetId']), 'options');
+  if (typeof input.finalTargetId !== 'string' || input.finalTargetId.length === 0) {
+    throw new TypeError('options.finalTargetId must be a non-empty string');
   }
 
   return transact(session, async (state, markPublished) => {
@@ -726,11 +741,11 @@ export async function prepareSubmission(session, options) {
       const auditRef = await state.evidence.recordAudit(audit);
       return Object.freeze({ authorized: false, retention, audit, ledgerRef, auditRef });
     }
-    if (!audit.final_candidate_refs.includes(input.finalRef)) {
+    if (!audit.final_candidate_target_ids.includes(input.finalTargetId)) {
       const auditRef = await state.evidence.recordAudit(audit, { final: true });
       return Object.freeze({
         authorized: false,
-        reason: 'selected final ref is not an audited final candidate',
+        reason: 'selected final target is not an audited final candidate',
         retention,
         audit,
         ledgerRef,
@@ -738,7 +753,7 @@ export async function prepareSubmission(session, options) {
       });
     }
     state.submissionAuthorized = true;
-    state.authorizedFinalRef = input.finalRef;
+    state.authorizedFinalTargetId = input.finalTargetId;
     state.authorizedObservationId = audit.observation_id;
     const auditRef = await state.evidence.recordAudit(audit, { final: true });
     state.preSubmitAuditRef = auditRef;
@@ -747,8 +762,8 @@ export async function prepareSubmission(session, options) {
       retention,
       audit,
       ledgerRef,
-      auditRef,
-      authorizedFinalRef: state.authorizedFinalRef,
+      authorizedFinalTargetId: state.authorizedFinalTargetId,
+      finalTargetId: state.authorizedFinalTargetId,
       authorizedObservationId: state.authorizedObservationId,
     });
   });

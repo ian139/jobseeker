@@ -4,7 +4,8 @@ import { promises as fsp } from 'node:fs';
 import path from 'node:path';
 
 export const RUN_SCHEMA = 'phase1-run-v1';
-export const ANSWER_SCHEMA = 'phase1-answer-v1';
+export const ANSWER_SCHEMA = 'phase1-answer-v2';
+export const LEGACY_ANSWER_SCHEMA = 'phase1-answer-v1';
 export const BROWSER_MODE = 'headed';
 export const OBSERVER = 'playwright_dom_v1';
 export const ACTION_DRIVER = 'omp_browser';
@@ -78,10 +79,29 @@ export const ANSWER_KEYS = Object.freeze([
     'value',
     'source',
     'approved_at',
+    'approval_context',
+    'approval_context_sha256',
 ]);
+
+const LEGACY_ANSWER_KEYS = Object.freeze([
+    'schema',
+    'alias',
+    'value',
+    'source',
+    'approved_at',
+]);
+
+const APPROVAL_CONTEXT_KEYS = Object.freeze([
+    'run_contract_sha256',
+    'observation_id',
+    'field_id',
+    'alias',
+]);
+const APPROVAL_CONTEXT_KEY_SET = new Set(APPROVAL_CONTEXT_KEYS);
 
 const RUN_KEY_SET = new Set(RUN_KEYS);
 const ANSWER_KEY_SET = new Set(ANSWER_KEYS);
+const LEGACY_ANSWER_KEY_SET = new Set(LEGACY_ANSWER_KEYS);
 const NOFOLLOW = fs.constants.O_NOFOLLOW ?? 0;
 const READ_ONLY = fs.constants.O_RDONLY;
 
@@ -95,6 +115,21 @@ export class ValidationError extends Error {
     }
 }
 
+
+function deepFreeze(value, seen = new Set()) {
+    if (value === null || typeof value !== 'object' || seen.has(value)) {
+        return value;
+    }
+    seen.add(value);
+    for (const nested of Object.values(value)) {
+        deepFreeze(nested, seen);
+    }
+    return Object.freeze(value);
+}
+
+function frozenClone(value) {
+    return deepFreeze(structuredClone(value));
+}
 function fail(code, location = '') {
     throw new ValidationError(code, location);
 }
@@ -198,6 +233,50 @@ export function canonicalJson(value) {
         fail('E_JSON_VALUE');
     }
     return encoded;
+}
+
+function validateApprovalContext(input) {
+    const context = requirePlainObject(input, 'approval_context');
+    rejectUnknownKeys(context, APPROVAL_CONTEXT_KEY_SET, 'approval_context');
+    for (const key of APPROVAL_CONTEXT_KEYS) {
+        requirePresent(context, key, 'approval_context');
+    }
+    const ownKeys = Reflect.ownKeys(context);
+    if (ownKeys.length !== APPROVAL_CONTEXT_KEYS.length
+        || ownKeys.some((key) => typeof key !== 'string' || !APPROVAL_CONTEXT_KEY_SET.has(key))) {
+        fail('E_ANSWER_APPROVAL_CONTEXT', 'approval_context');
+    }
+    for (const key of APPROVAL_CONTEXT_KEYS) {
+        const descriptor = Object.getOwnPropertyDescriptor(context, key);
+        if (descriptor === undefined
+            || descriptor.enumerable !== true
+            || !Object.hasOwn(descriptor, 'value')) {
+            fail('E_ANSWER_APPROVAL_CONTEXT', `approval_context.${key}`);
+        }
+    }
+    requireString(
+        context.run_contract_sha256,
+        'E_ANSWER_APPROVAL_CONTEXT',
+        'approval_context.run_contract_sha256',
+        { max: 64 },
+    );
+    if (!SHA256_HEX.test(context.run_contract_sha256)) {
+        fail('E_ANSWER_APPROVAL_CONTEXT', 'approval_context.run_contract_sha256');
+    }
+    requireString(context.observation_id, 'E_ANSWER_APPROVAL_CONTEXT', 'approval_context.observation_id');
+    requireString(context.field_id, 'E_ANSWER_APPROVAL_CONTEXT', 'approval_context.field_id');
+    requireAlias(context.alias, 'approval_context.alias');
+    return {
+        run_contract_sha256: context.run_contract_sha256,
+        observation_id: context.observation_id,
+        field_id: context.field_id,
+        alias: context.alias,
+    };
+}
+
+export function approvalContextSha256(input) {
+    const context = validateApprovalContext(input);
+    return crypto.createHash('sha256').update(canonicalJson(context), 'utf8').digest('hex');
 }
 
 function pathString(value, location) {
@@ -644,13 +723,18 @@ function requireIsoDate(value, location) {
     return value;
 }
 
-export function validateAnswerRecord(input) {
+function validateStoredAnswerRecord(input, {
+    schema,
+    keys,
+    keySet,
+    requireApprovalContext,
+} = {}) {
     const record = requirePlainObject(input, '$');
-    rejectUnknownKeys(record, ANSWER_KEY_SET, '$');
-    for (const key of ANSWER_KEYS) {
+    rejectUnknownKeys(record, keySet, '$');
+    for (const key of keys) {
         requirePresent(record, key, '$');
     }
-    if (record.schema !== ANSWER_SCHEMA) {
+    if (record.schema !== schema) {
         fail('E_ANSWER_SCHEMA', 'schema');
     }
     requireAlias(record.alias, 'alias');
@@ -659,30 +743,78 @@ export function validateAnswerRecord(input) {
     }
     assertJsonValue(record.value, 'value');
     requireIsoDate(record.approved_at, 'approved_at');
+    if (requireApprovalContext) {
+        const context = validateApprovalContext(record.approval_context);
+        if (context.alias !== record.alias) {
+            fail('E_ANSWER_APPROVAL_CONTEXT_ALIAS', 'approval_context.alias');
+        }
+        requireString(
+            record.approval_context_sha256,
+            'E_ANSWER_APPROVAL_CONTEXT_SHA256',
+            'approval_context_sha256',
+            { max: 64 },
+        );
+        if (!SHA256_HEX.test(record.approval_context_sha256)
+            || approvalContextSha256(context) !== record.approval_context_sha256) {
+            fail('E_ANSWER_APPROVAL_CONTEXT_SHA256', 'approval_context_sha256');
+        }
+    }
     const encoded = canonicalJson(record);
     if (Buffer.byteLength(encoded, 'utf8') > MAX_ANSWER_RECORD_BYTES) {
         fail('E_JSON_OVERSIZE', 'answer');
     }
-    return structuredClone(record);
+    return frozenClone(record);
 }
+
+export function validateAnswerRecord(input) {
+    return validateStoredAnswerRecord(input, {
+        schema: ANSWER_SCHEMA,
+        keys: ANSWER_KEYS,
+        keySet: ANSWER_KEY_SET,
+        requireApprovalContext: true,
+    });
+}
+
+function validateLegacyAnswerRecord(input) {
+    return validateStoredAnswerRecord(input, {
+        schema: LEGACY_ANSWER_SCHEMA,
+        keys: LEGACY_ANSWER_KEYS,
+        keySet: LEGACY_ANSWER_KEY_SET,
+        requireApprovalContext: false,
+    });
+}
+
+function quarantinedMetadata(record, line) {
+    return frozenClone({
+        line,
+        schema: record.schema,
+        alias: record.alias,
+        source: record.source,
+        approved_at: record.approved_at,
+        reason: 'legacy_schema',
+    });
+}
+
 
 function parseMemoryText(text) {
     if (text.length === 0) {
-        return [];
+        return { active: [], quarantined: [] };
     }
     if (!text.endsWith('\n')) {
         fail('E_JSONL_MALFORMED', 'answer_memory.trailing_newline');
     }
     const lines = text.split('\n');
     lines.pop();
-    const records = [];
+    const active = [];
+    const quarantined = [];
     for (let index = 0; index < lines.length; index += 1) {
         const line = lines[index];
         const lineLocation = `answer_memory.line_${index + 1}`;
         if (line.length === 0 || line.endsWith('\r')) {
             fail('E_JSONL_MALFORMED', lineLocation);
         }
-        if (Buffer.byteLength(line, 'utf8') > MAX_ANSWER_RECORD_BYTES) {
+        const lineBytes = Buffer.byteLength(line, 'utf8');
+        if (lineBytes > MAX_ANSWER_RECORD_BYTES) {
             fail('E_JSON_OVERSIZE', lineLocation);
         }
         let parsed;
@@ -691,13 +823,19 @@ function parseMemoryText(text) {
         } catch {
             fail('E_JSONL_MALFORMED', lineLocation);
         }
-        const record = validateAnswerRecord(parsed);
+        const record = parsed?.schema === LEGACY_ANSWER_SCHEMA
+            ? validateLegacyAnswerRecord(parsed)
+            : validateAnswerRecord(parsed);
         if (canonicalJson(record) !== line) {
             fail('E_JSONL_NON_CANONICAL', lineLocation);
         }
-        records.push(record);
+        if (record.schema === LEGACY_ANSWER_SCHEMA) {
+            quarantined.push(quarantinedMetadata(record, index + 1));
+        } else {
+            active.push(record);
+        }
     }
-    return records;
+    return { active, quarantined };
 }
 
 async function memoryParent(memoryPath, { create = false } = {}) {
@@ -706,7 +844,7 @@ async function memoryParent(memoryPath, { create = false } = {}) {
     return parent;
 }
 
-export async function loadAnswerMemory(memoryPath) {
+async function readAnswerMemoryText(memoryPath) {
     const value = pathString(memoryPath, 'answer_memory_path');
     await memoryParent(value);
     const status = await lstatOrFail(value, 'answer_memory_path', { optional: true });
@@ -718,13 +856,25 @@ export async function loadAnswerMemory(memoryPath) {
         ownerOnly: true,
         optional: true,
     });
-    if (bytes === null) {
-        return [];
-    }
-    const text = decodeUtf8(bytes, 'answer_memory_path');
-    return parseMemoryText(text);
+    return bytes === null ? null : decodeUtf8(bytes, 'answer_memory_path');
 }
 
+export async function loadAnswerMemoryInventory(memoryPath) {
+    const text = await readAnswerMemoryText(memoryPath);
+    if (text === null) {
+        return deepFreeze({ active: [], quarantined: [] });
+    }
+    const parsed = parseMemoryText(text);
+    return deepFreeze({
+        active: parsed.active,
+        quarantined: parsed.quarantined,
+    });
+}
+
+export async function loadAnswerMemory(memoryPath) {
+    const inventory = await loadAnswerMemoryInventory(memoryPath);
+    return inventory.active;
+}
 
 export const readAnswerMemory = loadAnswerMemory;
 
@@ -785,13 +935,29 @@ export async function appendAnswerRecord(memoryPath, input) {
 
 export const appendAnswer = appendAnswerRecord;
 
-export function createAnswerRecord(alias, value, approvedAt = new Date().toISOString()) {
+export function createAnswerRecord(input) {
+    if (arguments.length !== 1) {
+        throw new TypeError('createAnswerRecord requires one object argument');
+    }
+    const record = requirePlainObject(input, 'answer');
+    rejectUnknownKeys(
+        record,
+        new Set(['alias', 'value', 'approved_at', 'approval_context', 'approval_context_sha256']),
+        'answer',
+    );
+    for (const key of ['alias', 'value', 'approval_context', 'approval_context_sha256']) {
+        requirePresent(record, key, 'answer');
+    }
     return validateAnswerRecord({
         schema: ANSWER_SCHEMA,
-        alias,
-        value,
+        alias: record.alias,
+        value: record.value,
         source: 'user',
-        approved_at: approvedAt,
+        approved_at: Object.hasOwn(record, 'approved_at')
+            ? record.approved_at
+            : new Date().toISOString(),
+        approval_context: record.approval_context,
+        approval_context_sha256: record.approval_context_sha256,
     });
 }
 
@@ -991,12 +1157,27 @@ function profileValue(profile, alias) {
 function memoryValue(memory, alias) {
     if (Array.isArray(memory)) {
         for (let index = memory.length - 1; index >= 0; index -= 1) {
-            const record = validateAnswerRecord(memory[index]);
+            const candidate = memory[index];
+            if (isPlainObject(candidate) && candidate.schema === LEGACY_ANSWER_SCHEMA) {
+                validateLegacyAnswerRecord(candidate);
+                continue;
+            }
+            const record = validateAnswerRecord(candidate);
             if (record.alias === alias) {
                 return { found: true, value: record.value };
             }
         }
         return { found: false };
+    }
+    if (isPlainObject(memory) && memory.schema === LEGACY_ANSWER_SCHEMA) {
+        validateLegacyAnswerRecord(memory);
+        return { found: false };
+    }
+    if (isPlainObject(memory) && memory.schema === ANSWER_SCHEMA) {
+        const record = validateAnswerRecord(memory);
+        return record.alias === alias
+            ? { found: true, value: record.value }
+            : { found: false };
     }
     return candidateValue(memory, alias);
 }

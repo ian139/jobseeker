@@ -2,6 +2,7 @@ import {
   MAX_RESUME_BYTES,
   MAX_ALIAS_LENGTH,
   appendAnswerRecord,
+  approvalContextSha256,
   createAnswerRecord,
   ensurePrivateDirectory,
   loadRunInputs,
@@ -390,13 +391,6 @@ export async function resolveField(session, options) {
       throw new TypeError('options.remember must be boolean');
     }
     const remember = input.remember === true;
-    if (input.approved_at !== undefined) {
-      try {
-        createAnswerRecord(input.alias, null, input.approved_at);
-      } catch {
-        throw new TypeError('options.approved_at must be an exact ISO date string');
-      }
-    }
     if (remember && input.approved_at === undefined) {
       throw new TypeError('remembered answers require options.approved_at');
     }
@@ -434,6 +428,26 @@ export async function resolveField(session, options) {
     const workingField = workingLedger.fields.find((item) => item.field_id === field.field_id);
     const sensitive = workingField.sensitive === true;
     const allowAgentInference = !sensitive;
+    const approvalContext = {
+      run_contract_sha256: state.runMetadata.run_contract_sha256,
+      observation_id: workingLedger.latest_observation_id,
+      field_id: workingField.field_id,
+      alias: input.alias,
+    };
+    const approvalContextDigest = approvalContextSha256(approvalContext);
+    if (input.approved_at !== undefined) {
+      try {
+        createAnswerRecord({
+          alias: input.alias,
+          value: null,
+          approved_at: input.approved_at,
+          approval_context: approvalContext,
+          approval_context_sha256: approvalContextDigest,
+        });
+      } catch {
+        throw new TypeError('options.approved_at must be an exact ISO date string');
+      }
+    }
     const answer = resolveAnswer({
       alias: input.alias,
       memory: state.memory,
@@ -475,16 +489,22 @@ export async function resolveField(session, options) {
     if (sensitive || input.sensitive !== undefined) resolution.sensitive = sensitive;
     const nextLedger = recordResolution(workingLedger, resolution);
     const memoryRecord = remember
-      ? createAnswerRecord(input.alias, answer.value, input.approved_at)
+      ? createAnswerRecord({
+        alias: input.alias,
+        value: answer.value,
+        approved_at: input.approved_at,
+        approval_context: approvalContext,
+        approval_context_sha256: approvalContextDigest,
+      })
       : null;
     let nextMemory = state.memory;
 
     markPublished();
+    const ledgerRef = await state.evidence.recordLedger(nextLedger);
     if (memoryRecord !== null) {
       await appendAnswerRecord(state.run.answer_memory_path, memoryRecord);
       nextMemory = frozenClone(await loadAnswerMemory(state.run.answer_memory_path));
     }
-    const ledgerRef = await state.evidence.recordLedger(nextLedger);
     invalidateSubmissionPreparation(state);
     state.memory = nextMemory;
     state.ledger = nextLedger;

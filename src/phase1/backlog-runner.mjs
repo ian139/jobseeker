@@ -3,6 +3,8 @@ import { constants as fsConstants, promises as fsp } from 'node:fs';
 import path from 'node:path';
 
 import {
+  ANSWER_SCHEMA,
+  approvalContextSha256,
   loadAnswerMemory,
   loadRunContractSnapshot,
   loadRunInputs,
@@ -926,10 +928,27 @@ async function verifyPersistedQuestionAnswer(database, runId, ownerId, browserSe
     || row.browser_session_id !== browserSessionId
     || typeof row.blocker_alias !== 'string'
     || row.blocker_alias.length === 0
+    || typeof row.workspace_path !== 'string'
     || typeof row.answer_memory_path !== 'string') {
     fail('E_RUN_NOT_NEEDS_USER');
   }
+  const workspacePath = requireStoredPath(row.workspace_path, 'E_WORKSPACE_PATH');
   const memoryPath = requireStoredPath(row.answer_memory_path, 'E_ANSWER_MEMORY');
+  let contractSnapshot;
+  try {
+    contractSnapshot = await loadRunContractSnapshot(
+      path.join(workspacePath, 'contract.json'),
+      { local: false },
+    );
+  } catch (error) {
+    if (typeof error?.code === 'string') fail(error.code);
+    fail('E_RUN_CONTRACT');
+  }
+  if (contractSnapshot.run.application_url !== row.application_url
+    || contractSnapshot.run.answer_memory_path !== memoryPath
+    || contractSnapshot.run.run_artifact_dir !== path.join(workspacePath, 'evidence')) {
+    fail('E_RUN_CONTRACT');
+  }
   let records;
   try {
     records = await loadAnswerMemory(memoryPath);
@@ -937,9 +956,26 @@ async function verifyPersistedQuestionAnswer(database, runId, ownerId, browserSe
     if (typeof error?.code === 'string') fail(error.code);
     fail('E_ANSWER_MEMORY');
   }
-  if (!records.some((record) => record.alias === row.blocker_alias)) {
-    fail('E_ANSWER_REQUIRED');
+  let hasAnswer = false;
+  for (const record of records) {
+    if (record.schema !== ANSWER_SCHEMA
+      || record.alias !== row.blocker_alias
+      || record.approval_context?.alias !== row.blocker_alias
+      || record.approval_context?.run_contract_sha256 !== contractSnapshot.identity.sha256) {
+      continue;
+    }
+    let digest;
+    try {
+      digest = approvalContextSha256(record.approval_context);
+    } catch {
+      fail('E_ANSWER_CONTEXT');
+    }
+    if (record.approval_context_sha256 === digest) {
+      hasAnswer = true;
+      break;
+    }
   }
+  if (!hasAnswer) fail('E_ANSWER_REQUIRED');
 }
 
 /** Resume a paused run in place; never creates a second run row. */

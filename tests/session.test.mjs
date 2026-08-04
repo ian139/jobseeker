@@ -17,6 +17,7 @@ import {
   startRun,
   verifyRetention,
 } from '../src/phase1/session.mjs';
+import { approvalContextSha256 } from '../src/phase1/contract.mjs';
 import { digestPrivateValue } from '../src/phase1/ledger.mjs';
 
 function privateFile(root, name, contents) {
@@ -817,6 +818,20 @@ test('approved user answers persist for same-run and fresh-run private reuse', a
   });
   assert.equal(approved.answer.source, 'user');
   assert.equal(first.memory.length, 1);
+  const remembered = first.memory[0];
+  assert.equal(remembered.schema, 'phase1-answer-v2');
+  assert.equal(Object.isFrozen(remembered), true);
+  const approval_context = {
+    run_contract_sha256: first.runMetadata.run_contract_sha256,
+    observation_id: 'obs-1',
+    field_id: 'field',
+    alias: 'remembered',
+  };
+  assert.deepEqual(remembered.approval_context, approval_context);
+  assert.equal(
+    remembered.approval_context_sha256,
+    approvalContextSha256(approval_context),
+  );
   await recordAction(first, { action: 'fill', field_id: 'field', outcome: 'succeeded' });
   await acceptObservation(
     first,

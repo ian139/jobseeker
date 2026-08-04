@@ -6,7 +6,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { appendAnswerRecord, createAnswerRecord } from '../src/phase1/contract.mjs';
+import {
+  appendAnswerRecord,
+  approvalContextSha256,
+  createAnswerRecord,
+  loadRunContractSnapshot,
+} from '../src/phase1/contract.mjs';
 
 import { EvidenceStore } from '../src/phase1/evidence.mjs';
 import {
@@ -727,8 +732,15 @@ test('resumeNeedsUserRun resumes the same row only after the persisted blocker a
   const value = await fixture([{ id: 80 }]);
   try {
     const claimed = await claimNextQueuedJob(value.database, claimOptions(value));
-    await createWorkspace(value, claimed);
+    const workspace = await createWorkspace(value, claimed);
+    const contractSnapshot = await loadRunContractSnapshot(workspace.contractPath, { local: false });
     const blockerAlias = 'work_authorization';
+    const approval_context = {
+      run_contract_sha256: contractSnapshot.identity.sha256,
+      observation_id: 'fixture-observation',
+      field_id: 'fixture-field',
+      alias: blockerAlias,
+    };
     await pauseRunForUser(value.database, claimed.runId, {
       ownerId: claimed.ownerId,
       browserSessionId: claimed.browserSessionId,
@@ -750,7 +762,13 @@ test('resumeNeedsUserRun resumes the same row only after the persisted blocker a
 
     await appendAnswerRecord(
       value.preflight.answerMemoryPath,
-      createAnswerRecord(blockerAlias, 'fixture-authorized', '2026-07-26T00:00:15.000Z'),
+      createAnswerRecord({
+        alias: blockerAlias,
+        value: 'fixture-authorized',
+        approved_at: '2026-07-26T00:00:15.000Z',
+        approval_context,
+        approval_context_sha256: approvalContextSha256(approval_context),
+      }),
     );
     const resumed = await resumeNeedsUserRun(value.database, claimed.runId, resumeOptions);
     assertRunIdentity(resumed, claimed);

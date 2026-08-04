@@ -8,12 +8,15 @@ import test from 'node:test';
 import {
     ANSWER_SOURCES,
     ANSWER_SCHEMA,
+    LEGACY_ANSWER_SCHEMA,
     MAX_ANSWER_RECORD_BYTES,
     RUN_SCHEMA,
     appendAnswerRecord,
+    approvalContextSha256,
     canonicalJson,
     createAnswerRecord,
     loadAnswerMemory,
+    loadAnswerMemoryInventory,
     readRegularFile,
     resolveAnswer,
     validateAnswerRecord,
@@ -40,6 +43,28 @@ async function privateFixture(t) {
 async function privateFile(filePath, contents, mode = 0o600) {
     await fs.writeFile(filePath, contents, { encoding: 'utf8', mode });
     await fs.chmod(filePath, mode);
+}
+
+const TEST_RUN_CONTRACT_SHA256 = 'a'.repeat(64);
+
+function testApprovalContext(alias) {
+    return {
+        run_contract_sha256: TEST_RUN_CONTRACT_SHA256,
+        observation_id: 'test-observation',
+        field_id: 'test-field',
+        alias,
+    };
+}
+
+function testAnswerRecord(alias, value, approved_at = '2026-01-01T00:00:00.000Z') {
+    const approval_context = testApprovalContext(alias);
+    return createAnswerRecord({
+        alias,
+        value,
+        approved_at,
+        approval_context,
+        approval_context_sha256: approvalContextSha256(approval_context),
+    });
 }
 
 function minimalProfile() {
@@ -111,17 +136,94 @@ test('valid run, profile, and append-only memory round-trip', async (t) => {
     assert.deepEqual(validateRunContract(run), run);
     assert.deepEqual(await validateRunContractLocal(run), run);
 
-    const record = createAnswerRecord('work-authorized', true, '2026-01-01T00:00:00.000Z');
+    const approval_context = testApprovalContext('work-authorized');
+    const record = createAnswerRecord({
+        alias: 'work-authorized',
+        value: true,
+        approved_at: '2026-01-01T00:00:00.000Z',
+        approval_context,
+        approval_context_sha256: approvalContextSha256(approval_context),
+    });
     assert.deepEqual(record, {
         schema: ANSWER_SCHEMA,
         alias: 'work-authorized',
         value: true,
         source: 'user',
         approved_at: '2026-01-01T00:00:00.000Z',
+        approval_context,
+        approval_context_sha256: approvalContextSha256(approval_context),
     });
     await appendAnswerRecord(memoryPath, record);
-    assert.deepEqual(await loadAnswerMemory(memoryPath), [record]);
+    const loaded = await loadAnswerMemory(memoryPath);
+    assert.deepEqual(loaded, [record]);
+    assert.equal(Object.isFrozen(loaded), true);
+    assert.equal(Object.isFrozen(loaded[0]), true);
     assert.equal((await fs.readFile(memoryPath, 'utf8')), `${canonicalJson(record)}\n`);
+});
+
+test('legacy answer bytes stay quarantined and v2 is the only active memory', async (t) => {
+    const root = await privateFixture(t);
+    const memoryDirectory = path.join(root, 'memory');
+    await fs.mkdir(memoryDirectory, { mode: 0o700 });
+    await fs.chmod(memoryDirectory, 0o700);
+    const memoryPath = path.join(memoryDirectory, 'answers.jsonl');
+    const legacy = {
+        schema: LEGACY_ANSWER_SCHEMA,
+        alias: 'legacy-question',
+        value: 'quarantined-secret',
+        source: 'user',
+        approved_at: '2026-01-01T00:00:00.000Z',
+    };
+    assert.throws(() => validateAnswerRecord(legacy), /E_SCHEMA/);
+    const legacyBytes = `${canonicalJson(legacy)}\n`;
+    await privateFile(memoryPath, legacyBytes);
+
+    const inventory = await loadAnswerMemoryInventory(memoryPath);
+    assert.deepEqual(inventory.active, []);
+    assert.equal(inventory.quarantined.length, 1);
+    assert.deepEqual(inventory.quarantined[0], {
+        line: 1,
+        schema: LEGACY_ANSWER_SCHEMA,
+        alias: 'legacy-question',
+        source: 'user',
+        approved_at: '2026-01-01T00:00:00.000Z',
+        reason: 'legacy_schema',
+    });
+    assert.equal(Object.hasOwn(inventory.quarantined[0], 'value'), false);
+    assert.doesNotMatch(JSON.stringify(inventory.quarantined[0]), /quarantined-secret/);
+    assert.equal(Object.isFrozen(inventory), true);
+    assert.equal(Object.hasOwn(inventory.quarantined[0], 'byte_length'), false);
+    assert.equal(Object.hasOwn(inventory.quarantined[0], 'record_sha256'), false);
+    assert.equal(Object.isFrozen(inventory.active), true);
+    assert.equal(Object.isFrozen(inventory.quarantined), true);
+    assert.equal(Object.isFrozen(inventory.quarantined[0]), true);
+
+    const beforeLoad = await fs.readFile(memoryPath, 'utf8');
+    assert.equal(beforeLoad, legacyBytes);
+    assert.deepEqual(await loadAnswerMemory(memoryPath), []);
+    assert.equal(await fs.readFile(memoryPath, 'utf8'), beforeLoad);
+    assert.deepEqual(
+        resolveAnswer({
+            alias: 'legacy-question',
+            memory: [legacy],
+            user: { answers: { 'legacy-question': 'user fallback' } },
+        }),
+        {
+            alias: 'legacy-question',
+            source: 'user',
+            value: 'user fallback',
+            missing: false,
+        },
+    );
+
+    const active = testAnswerRecord('legacy-question', 'active-answer', '2026-01-02T00:00:00.000Z');
+    await appendAnswerRecord(memoryPath, active);
+    const afterAppend = await fs.readFile(memoryPath, 'utf8');
+    assert.ok(afterAppend.startsWith(legacyBytes));
+    assert.deepEqual(await loadAnswerMemory(memoryPath), [active]);
+    const finalInventory = await loadAnswerMemoryInventory(memoryPath);
+    assert.deepEqual(finalInventory.active, [active]);
+    assert.equal(finalInventory.quarantined.length, 1);
 });
 
 test('profile values remain optional until a field is asked', () => {
@@ -207,7 +309,7 @@ test('unknown keys, fixed enum changes, and missing evidence fail closed', () =>
 test('memory outranks every lower source and aliases are exact', () => {
     const result = resolveAnswer({
         alias: 'Question-ID',
-        memory: [createAnswerRecord('Question-ID', 'memory', '2026-01-01T00:00:00.000Z')],
+        memory: [testAnswerRecord('Question-ID', 'memory', '2026-01-01T00:00:00.000Z')],
         profile: { answers: { 'Question-ID': 'profile' } },
         resume: { 'Question-ID': 'resume' },
         jobWording: { 'Question-ID': 'job' },
@@ -242,7 +344,7 @@ test('memory outranks every lower source and aliases are exact', () => {
     assert.equal(
         resolveAnswer({
             alias: 'profile.address.country',
-            memory: [createAnswerRecord(
+            memory: [testAnswerRecord(
                 'profile.address.country',
                 'Remembered Country',
                 '2026-01-01T00:00:00.000Z',
@@ -313,7 +415,7 @@ test('exact agent inference returns digests and malformed inference fails closed
     for (const candidate of [
         {
             alias: 'memory-question',
-            memory: [createAnswerRecord('memory-question', 'memory', '2026-01-01T00:00:00.000Z')],
+            memory: [testAnswerRecord('memory-question', 'memory', '2026-01-01T00:00:00.000Z')],
             source: 'memory',
             value: 'memory',
         },
@@ -438,7 +540,7 @@ test('resolveAnswer maps novel status questions to canonical user-backed profile
     const exactAlias = 'Are you legally permitted to work in the United States?';
     assert.equal(resolveAnswer({
         alias: exactAlias,
-        memory: [createAnswerRecord(exactAlias, false, '2026-01-01T00:00:00.000Z')],
+        memory: [testAnswerRecord(exactAlias, false, '2026-01-01T00:00:00.000Z')],
         profile,
     }).source, 'memory');
 });
@@ -459,6 +561,7 @@ test('non-user answer sources and malformed or oversized JSONL fail closed', asy
     const memoryDirectory = path.join(root, 'memory');
     await fs.mkdir(memoryDirectory, { mode: 0o700 });
     await fs.chmod(memoryDirectory, 0o700);
+    const approval_context = testApprovalContext('x');
     const memoryPath = path.join(memoryDirectory, 'answers.jsonl');
     assert.throws(() => validateAnswerRecord({
         schema: ANSWER_SCHEMA,
@@ -466,7 +569,11 @@ test('non-user answer sources and malformed or oversized JSONL fail closed', asy
         value: true,
         source: 'profile',
         approved_at: '2026-01-01T00:00:00.000Z',
+        approval_context,
+        approval_context_sha256: approvalContextSha256(approval_context),
     }), /E_ANSWER_SOURCE/);
+    assert.throws(() => createAnswerRecord({ alias: 'x', value: true }), /E_SCHEMA_REQUIRED/);
+    assert.throws(() => createAnswerRecord('x', true), /one object argument/);
     await privateFile(memoryPath, '{not-json}\n');
     await assert.rejects(loadAnswerMemory(memoryPath), /E_JSONL_MALFORMED/);
     await privateFile(memoryPath, `${'x'.repeat(MAX_ANSWER_RECORD_BYTES + 10)}\n`);
@@ -508,7 +615,7 @@ test('symlink and unsafe permissions are rejected by local memory helpers', asyn
     await fs.chmod(privateDirectory, 0o700);
     const target = path.join(privateDirectory, 'target.jsonl');
     const link = path.join(privateDirectory, 'link.jsonl');
-    const record = createAnswerRecord('x', false, '2026-01-01T00:00:00.000Z');
+    const record = testAnswerRecord('x', false, '2026-01-01T00:00:00.000Z');
     await privateFile(target, `${canonicalJson(record)}\n`);
     await fs.symlink(target, link);
     await assert.rejects(loadAnswerMemory(link), /E_PATH_SYMLINK/);

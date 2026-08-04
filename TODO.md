@@ -2,7 +2,7 @@
 
 This file remains authoritative for the established Phase 1–3 contracts and evidence gates. `.omp/work-context/20260803T232006Z-full-job-automation-roadmap.md` is the durable authority for the forward production expansion. `PROJECT_HANDOFF.md`, `ComputerUse.md`, and older work records are historical evidence only.
 
-**Current phase:** Expanded-roadmap Phase A baseline reconciliation is active. Existing Phase 3 backlog processing remains authorized: process exactly one active job at a time through the persistent supervised OMP session. The remaining Phase 1 headed live-submission checklist entries stay evidence-gated and are not marked complete by either authorization.
+**Current phase:** Expanded-roadmap Phase B unified job ingestion is active. Phase A baseline reconciliation is complete: Node 24.19.0 is supported, one DOM-first interaction hierarchy and five-source answer contract are authoritative, legacy answer records are quarantined, historical completion evidence is classified, and `data/RealJobs.sqlite` is the sole active database. Existing Phase 3 backlog processing remains authorized: process exactly one active job at a time through the persistent supervised OMP session. The remaining Phase 1 headed live-submission checklist entries stay evidence-gated and are not marked complete by either authorization.
 
 ## How an OMP agent must use this file
 

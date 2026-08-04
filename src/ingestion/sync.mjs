@@ -575,10 +575,12 @@ function jobParams(job, groupId, now, existing) {
     now,
   ];
 }
-
 function upsertJob(database, job, groupId, now) {
   const existing = existingJob(database, job);
-  const params = jobParams(job, groupId, now, existing);
+  const storedJob = existing && job.sourceJobId === null && existing.source_job_id !== null
+    ? { ...job, sourceJobId: existing.source_job_id }
+    : job;
+  const params = jobParams(storedJob, groupId, now, existing);
   if (existing) {
     run(database, `UPDATE jobs SET source=?,source_job_id=?,canonical_listing_url=?,canonical_application_url=?,ats_kind=?,ats_identifier=?,title=?,company=?,location=?,workplace_type=?,employment_types_json=?,description=?,description_sha256=?,source_posted_at=?,source_updated_at=?,discovered_at=?,first_seen_at=?,last_seen_at=?,availability_state=?,freshness_state=?,eligibility_state=?,eligibility_reason_codes_json=?,priority=?,dedupe_group_id=?,raw_payload_path=?,raw_payload_sha256=? WHERE id=?`, [...params.slice(0, 26), existing.id]);
     return { id: existing.id, inserted: false, unchanged: existing.raw_payload_sha256 === job.rawPayloadSha256 && existing.discovered_at === job.discoveredAt };

@@ -107,7 +107,14 @@ test('all five canonical sources validate without a second source selector', () 
   }));
   assert.equal(user.answerSource, 'user');
   assert.equal(user.inferenceEvidenceDigests, null);
+  const protectedResume = validateApplicationDecision(decision({
+    fieldPolicy: 'hard_fact',
+    answerSource: 'resume',
+    evidenceReferences: ['resume:sha256:' + DIGEST],
+  }));
+  assert.equal(protectedResume.answerSource, 'resume');
 });
+
 
 test('inference requires both bound digests and is rejected for protected policies', () => {
   assert.throws(

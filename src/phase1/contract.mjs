@@ -1179,7 +1179,7 @@ function memoryValue(memory, alias) {
             ? { found: true, value: record.value }
             : { found: false };
     }
-    return candidateValue(memory, alias);
+    fail('E_ANSWER_MEMORY_SCHEMA', 'memory');
 }
 
 function exactPlainDataObject(value, keys, location) {

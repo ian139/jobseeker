@@ -15,7 +15,7 @@ const ANSWER_SOURCES = Object.freeze([
   'user',
 ]);
 const SUBJECTIVE_ANSWER_SOURCES = ANSWER_SOURCES;
-const PROTECTED_ANSWER_SOURCES = Object.freeze(['memory', 'profile', 'user']);
+const PROTECTED_ANSWER_SOURCES = Object.freeze(['memory', 'profile', 'resume', 'user']);
 const RESUME_ANSWER_SOURCES = Object.freeze(['resume']);
 const ANSWER_SOURCE_SET = new Set(ANSWER_SOURCES);
 const NORMALIZED_ACTIONS = Object.freeze([
@@ -640,9 +640,16 @@ function inferableField(field, policy, config) {
 }
 
 function sourceList(value, defaultSources) {
-  if (!Array.isArray(value)) return [...defaultSources];
-  const filtered = value.filter((source) => ANSWER_SOURCE_SET.has(source));
-  return filtered.length > 0 ? [...filtered] : [...defaultSources];
+  if (value === undefined) return [...defaultSources];
+  if (!Array.isArray(value)
+      || value.length === 0
+      || value.some((source) => !ANSWER_SOURCE_SET.has(source))) {
+    throw new SelectorError(
+      'allowedAnswerSources must contain only canonical answer sources',
+      'E_SELECTOR_POLICY',
+    );
+  }
+  return [...new Set(value)];
 }
 
 function policyMetadata(field, options, control = null) {

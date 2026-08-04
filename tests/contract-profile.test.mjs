@@ -326,6 +326,13 @@ test('memory outranks every lower source and aliases are exact', () => {
         user: { 'Question-ID': 'user' },
     });
     assert.deepEqual(result, { alias: 'Question-ID', source: 'memory', value: 'memory', missing: false });
+    assert.throws(
+        () => resolveAnswer({
+            alias: 'Question-ID',
+            memory: { 'Question-ID': 'unbound legacy value' },
+        }),
+        (error) => error.code === 'E_ANSWER_MEMORY_SCHEMA',
+    );
     assert.equal(resolveAnswer({ alias: 'question-id', profile: { answers: { 'Question-ID': true } } }).missing, true);
     const structuredProfile = {
         schema: PROFILE_SCHEMA,

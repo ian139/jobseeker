@@ -95,10 +95,10 @@ const NO_CONTROL_ACTIONS = new Set(['close_dialog', 'navigate', 'wait', 'reobser
 const POLICY_ALLOWED_SOURCES = Object.freeze({
   subjective: ANSWER_SOURCE_SET,
   qualification: ANSWER_SOURCE_SET,
-  legal: new Set(['memory', 'profile', 'user']),
-  demographic: new Set(['memory', 'profile', 'user']),
-  identity: new Set(['memory', 'profile', 'user']),
-  hard_fact: new Set(['memory', 'profile', 'user']),
+  legal: new Set(['memory', 'profile', 'resume', 'user']),
+  demographic: new Set(['memory', 'profile', 'resume', 'user']),
+  identity: new Set(['memory', 'profile', 'resume', 'user']),
+  hard_fact: new Set(['memory', 'profile', 'resume', 'user']),
 });
 
 export class ApplicationDecisionValidationError extends TypeError {

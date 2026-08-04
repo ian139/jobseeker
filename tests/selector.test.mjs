@@ -90,7 +90,7 @@ test('classifies explicit, protected, subjective, qualification, and conservativ
     'agent_inference',
     'user',
   ]);
-  assert.deepEqual(ANSWER_SOURCES_BY_POLICY.legal, ['memory', 'profile', 'user']);
+  assert.deepEqual(ANSWER_SOURCES_BY_POLICY.legal, ['memory', 'profile', 'resume', 'user']);
 });
 
 test('batches only independent ordinary fields', () => {
@@ -124,6 +124,21 @@ test('batches only independent ordinary fields', () => {
     'reobservationRequired',
     'requiredModelTier',
   ]);
+});
+
+test('rejects non-canonical configured answer sources', () => {
+  assert.throws(
+    () => plan(
+      [control('field-1', { required: true, label: 'Preferred location' })],
+      [field('field-1', 'obs-1', { required: true, policy: 'qualification' })],
+      {
+        fieldPolicies: {
+          'field-1': { allowedAnswerSources: ['configured_default'] },
+        },
+      },
+    ),
+    (error) => error.code === 'E_SELECTOR_POLICY',
+  );
 });
 
 

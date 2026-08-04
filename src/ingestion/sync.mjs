@@ -619,12 +619,10 @@ function addQueue(database, job, jobId, groupId, now) {
       : 'backfill_only';
   const candidate = {
     status: 'queued',
-    status_reason: 'source_sync',
-    dedupe_group_id: groupId,
+    source_rowid: jobId,
+    source_job_id: job.sourceJobId ?? job.canonicalApplicationUrl,
     source_table: 'jobs',
     source_db: 'ingestion',
-    source_rowid: jobId,
-    source_job_id: job.sourceJobId,
     application_url: job.canonicalApplicationUrl,
     eligibility_tier: tier,
     verification_reason: 'source_sync',

@@ -363,7 +363,7 @@ export function canonicalizeJobUrl(value) {
     if (!TRACKING_PARAM_RE.test(key)) retained.push([key, paramValue, index]);
     index += 1;
   }
-  retained.sort((left, right) => left[0].localeCompare(right[0]) || left[1].localeCompare(right[1]) || left[2] - right[2]);
+  retained.sort((left, right) => (left[0] === right[0] ? 0 : left[0] < right[0] ? -1 : 1) || (left[1] === right[1] ? 0 : left[1] < right[1] ? -1 : 1) || left[2] - right[2]);
   parsed.search = '';
   for (const [key, paramValue] of retained) parsed.searchParams.append(key, paramValue);
   return parsed.toString();
@@ -402,7 +402,7 @@ export function classifyAts(canonicalApplicationUrl) {
 }
 
 function normalizeIdentityText(value) {
-  return String(value ?? '').normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase('en-US');
+  return String(value ?? '').normalize('NFKC').trim().replace(/\s+/gu, ' ').toLowerCase();
 }
 
 export function deriveDedupeIdentity(job) {

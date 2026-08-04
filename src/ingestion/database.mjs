@@ -274,15 +274,6 @@ CREATE TABLE IF NOT EXISTS application_runs (
   CHECK (status <> 'completed' OR (submit_action_count IS NOT NULL AND submit_action_count >= 1))
 );
 
-CREATE TABLE IF NOT EXISTS source_checkpoints (
-  source TEXT NOT NULL CHECK (source GLOB '[a-z]*' AND length(source) BETWEEN 1 AND 64),
-  profile TEXT NOT NULL CHECK (length(profile) BETWEEN 1 AND 128),
-  checkpoint TEXT,
-  last_sync_run_id INTEGER REFERENCES sync_runs(id) ON DELETE RESTRICT,
-  updated_at TEXT NOT NULL CHECK (updated_at GLOB '????-??-??T??:??:??.???Z'),
-  revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
-  PRIMARY KEY (source, profile)
-);
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY,
   name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 256),
@@ -712,7 +703,7 @@ export function initializeIngestionDatabase(databasePath, { now = new Date() } =
     const digest = migrationDigest();
     if (identity && (identity.name !== INGESTION_MIGRATION_NAME || identity.sha256 !== digest)) throw new Error('E_SCHEMA_MIGRATION_IDENTITY');
     if (!identity) db.prepare('INSERT INTO schema_migrations (version,name,sha256,applied_at) VALUES (?,?,?,?)').run(INGESTION_MIGRATION_VERSION, INGESTION_MIGRATION_NAME, digest, appliedAt);
-    db.exec('COMMIT;');
+    db.exec('COMMIT; PRAGMA foreign_keys = ON;');
     assertIngestionSchema(db);
     return Object.freeze({ databasePath, version: INGESTION_MIGRATION_VERSION, idempotent: Boolean(identity) });
   } catch (error) {

@@ -43,8 +43,24 @@ After a new session, handoff, or model change, read only this section plus the a
 
 The observer supplies policy-free field state and ledger/evidence refs. The OMP `browser` snapshot supplies live action selectors. Observer refs are never browser selectors. For each planner batch:
 
+The active action hierarchy is strict and serialized:
+
+```text
+fresh DOM observation
+  -> OMP browser helper
+  -> pinned control-specific browser mechanic
+  -> freshly grounded visual/computer interaction when the browser paths cannot operate the exact control
+  -> fresh DOM observation
+```
+
+The visual/computer step is a bounded mechanic fallback, not a second ledger, answer resolver, selector authority, or visual adapter. Re-ground with a fresh screenshot and the current DOM/browser state immediately before it, act on the same visible surface, then obtain the fresh DOM observation before any diagnosis, retry, or next action.
+
+The final submission boundary is DOM-owned. Take `finalRef` only from the current accepted DOM observation, call `prepareSubmission({ finalRef })`, then `beginFinalSubmit` and require its returned ref to equal that exact `finalRef`. Only the OMP `browser` helper or the pinned control-specific mechanic may activate that exact final ref; the visual/computer fallback must never cross this boundary. Re-observe after the attempt and complete it through the coordinator.
+
+CAPTCHA is automatic. Detect and complete it with the OMP `browser` or `computer` tool on the visible CMUX surface, re-grounding with fresh DOM and browser/screenshot state before and after the interaction. CAPTCHA alone never triggers user escalation, a `needs_user` outcome, or a blocked run.
+
 1. Call `selectSafeApplicationBatch` against the latest accepted observation and ledger.
-2. Resolve deterministic memory/profile/resume answers in-process. Delegate only an ambiguous inference, unfamiliar-control diagnosis, or confirmed implementation repair.
+2. Resolve each unit alias with `resolveField` before any browser mutation. A returned multi-unit candidate executes as a batch only after all unit aliases resolve to `memory`, `profile`, or `resume`; otherwise discard the candidate batch and process the first unit singly.
 3. Take one fresh `tab.ariaSnapshot()` or `tab.observe()` and uniquely map every planned observer field to its live control.
 4. Perform each planned helper action in order, recording each semantic outcome against the shared pre-action observation. Stop early on any unexpected state.
 5. Re-run the observer once, accept its diff, and verify retention for every attempted field before planning another batch.
@@ -64,11 +80,11 @@ Use `"aria-ref=eNN"` inline only with helpers that support it here, including `t
 
 For resume upload, map the observer file field to exactly one actual `<input type=file>`, including a hidden input when that is the application’s real file control, derive and uniquely verify its exact CSS selector, then call `tab.uploadFile(exactFileInputCss, session.runMetadata.resume_upload_path)`. `session.runMetadata.resume_upload_path` is the verified canonical absolute path; do not use a potentially relative run-contract path. The helper uses the browser’s native file-input protocol; it is an OMP browser action, not page-JavaScript form mutation. It requires the CSS selector first and one or more file paths after it—`tab.uploadFile(path)` and `tab.uploadFile("aria-ref=eNN", path)` are not supported signatures. Do not click or arm a chooser for this primary path.
 
-Fallback order is strict:
+Fallback order is strict and follows the hierarchy above:
 
 1. OMP `browser` helper on the visible CMUX browser surface.
 2. Pinned Playwright CLI only when the matching browser helper cannot operate the exact control. Use a fresh CLI snapshot and its current `eNN` ref. Text fallback is exactly `playwright-cli fill eNN "<exact text>"`; chooser fallback is click the uniquely mapped upload trigger and immediately run `playwright-cli upload <session.runMetadata.resume_upload_path>`, using that verified canonical absolute path.
-3. The OMP `computer` tool only when it is available and the remaining interaction is a native browser/OS surface neither browser nor pinned CLI can operate, such as a still-open file chooser. Take a fresh DOM/browser snapshot and a fresh desktop screenshot first, act on the same visible CMUX browser surface, then immediately re-observe through the coordinator.
+3. When neither browser path can operate the exact control, take a fresh DOM/browser snapshot and a fresh desktop screenshot, ground the bounded visual/computer interaction on those views, act on the same visible CMUX browser surface, and immediately obtain a fresh DOM observation. Do not invent a visual adapter or a second state model.
 
 Never use `tab.evaluate`, pinned-CLI evaluation, or injected page JavaScript to set a value, attach a file, click Submit, or bypass a UI control. Evaluation remains observation-only. Regardless of which physical mechanic succeeds, record every semantic action; after a safe routine batch, perform one fresh observer → `acceptObservation` → batch retention chain. Controls excluded from batching retain the single-action chain.
 
@@ -103,7 +119,7 @@ The run contract requires `answer_memory_path` and must contain at least one or 
 
 ## Ordered local preflight
 
-1. Initialize the sole state owner with `const session = await startRun(runPath, { startedAt, resume, supportedInference })`, passing only configured source-bound candidates. `startRun` owns contract, profile, memory, and evidence initialization; do not construct a parallel ledger or evidence store.
+1. Initialize the sole state owner with `const session = await startRun(runPath, { startedAt, resume, agentInference })`, passing only configured source-bound candidates. `startRun` owns contract, profile, memory, and evidence initialization; do not construct a parallel ledger or evidence store.
 2. Set `const run = session.run`. `startRun` calls `loadRunContractSnapshot(runPath, { local: false })`, then `loadRunInputs`, then prepares `run_artifact_dir` at mode `0700` before creating evidence. That coordinator-owned sequence enforces the checks and ordering represented by parse-only `loadRunContract(runPath, { local: false })` followed by `validateRunContractLocal` before evidence or browser use; callers must not invoke those wrappers independently. It also loads the configured profile and answer memory through owner-private APIs, canonicalizes the upload path, and computes the run-contract SHA-256 and resume-upload SHA-256.
 Equivalent invariant only: `loadRunContract(runPath, { local: false })` for parse-only discovery; prepare `run_artifact_dir` at `0700`; enforce `validateRunContractLocal`; then initialize evidence. `startRun` owns those stages.
 3. Keep the coordinator's fixed run metadata contract: `phase1-run-evidence-v1` run metadata uses exactly `schema`, `application_url`, `run_contract_sha256`, `resume_upload_path`, `resume_upload_sha256`, `browser_mode`, `observer`, `action_driver`, `submit_policy`, `loop_contract`, and `started_at`. New runs emit `safe-batch-observe-act-reobserve`. Recovery accepts immutable evidence that already carries the legacy `one-field-observe-act-reobserve` value; never rewrite an existing run's metadata.
@@ -124,7 +140,7 @@ Repeat this coordinator loop with `selectSafeApplicationBatch({ observation: ses
 Observer `ref` values such as `observation-…:control-N` are ledger/evidence identities, not browser targets. Before a batch, take a fresh OMP `browser` snapshot and map every planned observer control to exactly one live selector. If any mapping is missing or ambiguous, stop and replan that field as a single diagnosis unit.
 
 1. Accept the planner's ordered batch. `mode: 'batch'` contains only independent ordinary controls; `mode: 'single'` preserves the existing priority for every hazardous or ambiguous next unit.
-2. Resolve each planned field with `resolveField` before any browser mutation. Execute a multi-field batch only when every resolution selected deterministic memory, profile, or resume evidence. If any field is missing or selects agent inference/user input, do not execute the batch; process that field through single mode and replan afterward. Invoke typed agents only for ambiguous supported inference, control diagnosis after a concrete mapping/action failure, or repository repair after deterministic defect classification.
+2. Resolve each planned field alias with `resolveField` before any browser mutation. Execute a returned multi-unit candidate as a batch only after all unit aliases resolve to `memory`, `profile`, or `resume`. Otherwise discard the candidate batch and process the first unit singly, then replan. Invoke typed agents only for ambiguous agent inference, control diagnosis after a concrete mapping/action failure, or repository repair after defect classification.
 3. Execute planned actions in order from the same fresh browser snapshot and stop on the first non-success. Publish every actually attempted routine fill atomically with `recordActionBatch(session, attempts)`: zero or more successful fills followed by at most one terminal attempted/failed/retry/blocked fill. A lone attempted fill uses `recordAction`. Evidence publication remains inside coordinator APIs, not a separate operator step.
 4. Stop the remaining batch immediately if an action fails, browser state indicates navigation or validation, or a control can no longer be uniquely mapped.
 5. Obtain one fresh chained DOM observation, publish it with `acceptObservation`, inspect the diff, and call `verifyRetention` with proofs covering every attempted field.
@@ -139,7 +155,7 @@ When no unresolved field remains on a non-final page, select the current `non_fi
 Record each retry before correcting and retrying. A failed routine fill at the end of a multi-action batch is the terminal item in the same atomic `recordActionBatch`; a standalone failure uses `recordAction(session, attempt)`. Set `retry_of` to the prior attempt's nonnegative integer sequence/index, never its string `action_id`; never overwrite or hide the failure. After a batch stops, accept a fresh observation before any further resolution or action.
 When a final-action attempt is rejected or leaves the application page unchanged, do not classify the job as closed or unavailable and do not close its browser surface. Capture the outcome, obtain a fresh chained observation, identify the validation or unresolved-control cause, resolve and retain it through the planner's single-action repair mode, then return to the pre-submit boundary. Only explicit live evidence that the posting is unavailable may end the run as closed.
 
-For every null-digest semantic choice or deliberate blank, `source` must be only `memory`, `profile`, or `user`; never use `resume` or `supported_inference`.
+For every null-digest semantic choice or deliberate blank, `source` must be only `memory`, `profile`, or `user`; never use `resume` or agent inference.
 
 ## UI mechanics recipes
 
@@ -183,7 +199,7 @@ Resolve every reachable checkbox or switch option, not only selected options. Wh
 
 After a mutation, publish semantic action `check` or `uncheck` with `recordAction(session, attempt)`, obtain a fresh observation through `acceptObservation(session, observation)`, and verify retention. When the option already matches, create no action record; publish one fresh observation and use the no-mutation retention path. For an intentionally unchecked option, use `value_digest` null and `semantic_choice` `none` only when that fresh UI state proves it unchecked.
 
-For every null-digest `none` choice, use only `memory`, `profile`, or `user`; `resume` and `supported_inference` are not allowed. A grouped field passes only when every reachable option has a deliberate retained state.
+For every null-digest `none` choice, use only `memory`, `profile`, or `user`; `resume` and agent inference are not allowed. A grouped field passes only when every reachable option has a deliberate retained state.
 
 ### Radio groups
 
@@ -198,7 +214,7 @@ Every historically reachable field must be deliberate, valid, and retained; no f
 
 ### Country selector
 
-Call `resolveField(session, { field_id, alias: 'profile.address.country', sensitive: true })` so country can resolve only from exact memory, profile, or user evidence: memory remains first globally; within the profile, structured `address.country` precedes the `profile.answers` fallback. Use the React Select sequence when applicable, match one exact live option, click it, and verify the retained observer value.
+Call `resolveField(session, { field_id, alias: 'profile.address.country', sensitive: true })` so country can resolve only from memory, profile, or user evidence: memory remains first globally; within the profile, structured `address.country` precedes the `profile.answers` entry. Use the React Select sequence when applicable, match one exact live option, click it, and verify the retained observer value.
 
 ### Relocation fields
 

@@ -12,8 +12,9 @@
     "fieldPolicy",
     "proposedAnswer",
     "answerSource",
-    "decisionMode",
     "evidenceReferences",
+    "inferenceRationaleDigest",
+    "inferenceEvidenceDigests",
     "proposedAction",
     "expectedRetainedState",
     "modelTier",
@@ -61,26 +62,11 @@
     },
     "answerSource": {
       "enum": [
-        "exact_memory",
-        "profile_evidence",
-        "resume_evidence",
-        "supported_inference",
-        "best_effort_inference",
-        "configured_default",
-        "configured_decline",
-        "require_user"
-      ]
-    },
-    "decisionMode": {
-      "enum": [
-        "exact_memory",
-        "profile_evidence",
-        "resume_evidence",
-        "supported_inference",
-        "best_effort_inference",
-        "configured_default",
-        "configured_decline",
-        "require_user"
+        "memory",
+        "profile",
+        "resume",
+        "agent_inference",
+        "user"
       ]
     },
     "evidenceReferences": {
@@ -100,6 +86,16 @@
         {
           "type": "string",
           "pattern": "^[a-f0-9]{64}$"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "inferenceEvidenceDigests": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/inferenceEvidenceDigests"
         },
         {
           "type": "null"
@@ -153,37 +149,27 @@
   "allOf": [
     {
       "if": {
-        "anyOf": [
-          {
-            "properties": {
-              "decisionMode": {
-                "enum": [
-                  "supported_inference",
-                  "best_effort_inference"
-                ]
-              }
-            }
-          },
-          {
-            "properties": {
-              "answerSource": {
-                "enum": [
-                  "supported_inference",
-                  "best_effort_inference"
-                ]
-              }
-            }
+        "properties": {
+          "answerSource": {
+            "const": "agent_inference"
           }
-        ]
+        }
       },
       "then": {
         "required": [
-          "inferenceRationaleDigest"
+          "inferenceRationaleDigest",
+          "inferenceEvidenceDigests"
         ],
         "properties": {
           "inferenceRationaleDigest": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"
+          },
+          "inferenceEvidenceDigests": {
+            "$ref": "#/$defs/inferenceEvidenceDigests"
+          },
+          "evidenceReferences": {
+            "minItems": 1
           }
         }
       }
@@ -192,52 +178,18 @@
       "if": {
         "properties": {
           "answerSource": {
-            "const": "exact_memory"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "decisionMode": {
-            "const": "exact_memory"
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "answerSource": {
-            "const": "profile_evidence"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "decisionMode": {
             "enum": [
-              "profile_evidence",
-              "supported_inference"
+              "memory",
+              "profile",
+              "resume"
             ]
           }
         }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "answerSource": {
-            "const": "resume_evidence"
-          }
-        }
       },
       "then": {
         "properties": {
-          "decisionMode": {
-            "enum": [
-              "resume_evidence",
-              "supported_inference"
-            ]
+          "evidenceReferences": {
+            "minItems": 1
           }
         }
       }
@@ -246,78 +198,19 @@
       "if": {
         "properties": {
           "answerSource": {
-            "const": "supported_inference"
+            "not": {
+              "const": "agent_inference"
+            }
           }
         }
       },
       "then": {
         "properties": {
-          "decisionMode": {
-            "const": "supported_inference"
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "answerSource": {
-            "const": "best_effort_inference"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "decisionMode": {
-            "const": "best_effort_inference"
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "answerSource": {
-            "const": "configured_default"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "decisionMode": {
-            "const": "configured_default"
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "answerSource": {
-            "const": "configured_decline"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "decisionMode": {
-            "const": "configured_decline"
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "answerSource": {
-            "const": "require_user"
-          }
-        }
-      },
-      "then": {
-        "properties": {
-          "decisionMode": {
-            "const": "require_user"
+          "inferenceRationaleDigest": {
+            "type": "null"
+          },
+          "inferenceEvidenceDigests": {
+            "type": "null"
           }
         }
       }
@@ -339,59 +232,11 @@
         "properties": {
           "answerSource": {
             "enum": [
-              "exact_memory",
-              "configured_default",
-              "configured_decline",
-              "require_user"
-            ]
-          },
-          "decisionMode": {
-            "enum": [
-              "exact_memory",
-              "configured_default",
-              "configured_decline",
-              "require_user"
+              "memory",
+              "profile",
+              "user"
             ]
           }
-        }
-      }
-    },
-    {
-      "if": {
-        "properties": {
-          "fieldPolicy": {
-            "enum": [
-              "legal",
-              "demographic",
-              "identity"
-            ]
-          }
-        }
-      },
-      "then": {
-        "not": {
-          "anyOf": [
-            {
-              "properties": {
-                "decisionMode": {
-                  "enum": [
-                    "supported_inference",
-                    "best_effort_inference"
-                  ]
-                }
-              }
-            },
-            {
-              "properties": {
-                "answerSource": {
-                  "enum": [
-                    "supported_inference",
-                    "best_effort_inference"
-                  ]
-                }
-              }
-            }
-          ]
         }
       }
     },
@@ -445,75 +290,27 @@
           }
         }
       }
-    },
-    {
-      "if": {
-        "anyOf": [
-          {
-            "properties": {
-              "decisionMode": {
-                "enum": [
-                  "exact_memory",
-                  "profile_evidence",
-                  "resume_evidence",
-                  "supported_inference",
-                  "best_effort_inference"
-                ]
-              }
-            }
-          },
-          {
-            "properties": {
-              "answerSource": {
-                "enum": [
-                  "exact_memory",
-                  "profile_evidence",
-                  "resume_evidence",
-                  "supported_inference",
-                  "best_effort_inference"
-                ]
-              }
-            }
-          }
-        ]
-      },
-      "then": {
-        "properties": {
-          "evidenceReferences": {
-            "minItems": 1
-          }
-        }
-      }
-    },
-    {
-      "if": {
-        "anyOf": [
-          {
-            "properties": {
-              "decisionMode": {
-                "const": "best_effort_inference"
-              }
-            }
-          },
-          {
-            "properties": {
-              "answerSource": {
-                "const": "best_effort_inference"
-              }
-            }
-          }
-        ]
-      },
-      "then": {
-        "properties": {
-          "modelTier": {
-            "const": "highest"
-          }
-        }
-      }
     }
   ],
   "$defs": {
+    "inferenceEvidenceDigests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "resumeSha256",
+        "jobDescriptionSha256"
+      ],
+      "properties": {
+        "resumeSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "jobDescriptionSha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      }
+    },
     "identifier": {
       "type": "string",
       "minLength": 1,

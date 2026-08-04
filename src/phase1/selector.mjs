@@ -7,21 +7,17 @@ const FIELD_POLICY_VALUES = Object.freeze([
   'hard_fact',
 ]);
 
-const SUBJECTIVE_ANSWER_SOURCES = Object.freeze([
-  'exact_memory',
-  'profile_evidence',
-  'resume_evidence',
-  'supported_inference',
-  'best_effort_inference',
+const ANSWER_SOURCES = Object.freeze([
+  'memory',
+  'profile',
+  'resume',
+  'agent_inference',
+  'user',
 ]);
-const PROTECTED_ANSWER_SOURCES = Object.freeze([
-  'exact_memory',
-  'configured_default',
-  'configured_decline',
-  'require_user',
-]);
-const RESUME_ANSWER_SOURCES = Object.freeze(['resume_evidence']);
-const EMPTY_ARRAY = Object.freeze([]);
+const SUBJECTIVE_ANSWER_SOURCES = ANSWER_SOURCES;
+const PROTECTED_ANSWER_SOURCES = Object.freeze(['memory', 'profile', 'user']);
+const RESUME_ANSWER_SOURCES = Object.freeze(['resume']);
+const ANSWER_SOURCE_SET = new Set(ANSWER_SOURCES);
 const NORMALIZED_ACTIONS = Object.freeze([
   'fill_text',
   'clear',
@@ -49,7 +45,6 @@ const PENDING_OR_SUCCESSFUL_OUTCOMES = new Set(['attempted', 'succeeded']);
 const FIELD_CANDIDATE = 'field';
 const CONTINUATION_CANDIDATE = 'non_final_navigation';
 const FINAL_CANDIDATE = 'final_candidate';
-const UNSET = Symbol('unset');
 const SAFE_BATCH_DEFAULT_SIZE = 3;
 const ORDINARY_TEXT_TYPES = new Set([
   'text',
@@ -112,7 +107,6 @@ const KEY_ALIASES = Object.freeze({
   latestObservationId: ['latestObservationId', 'latest_observation_id'],
   candidateClass: ['candidateClass', 'candidate_class'],
   answerState: ['answerState', 'answer_state'],
-  answerSource: ['answerSource', 'answer_source'],
   latestState: ['latestState', 'latest_state'],
   retained: ['retained'],
   valid: ['valid'],
@@ -158,13 +152,6 @@ function firstDefined(value, keys) {
   return undefined;
 }
 
-function firstPresent(value, keys) {
-  if (!isRecord(value)) return UNSET;
-  for (const key of keys) {
-    if (own(value, key)) return value[key];
-  }
-  return UNSET;
-}
 
 function aliasValue(value, alias) {
   return firstDefined(value, KEY_ALIASES[alias] ?? [alias]);
@@ -213,7 +200,6 @@ function canonicalPolicy(value) {
 
 function modelTier(value) {
   const normalized = normalizedText(value).replace(/[-\s]+/g, '_');
-  if (normalized === 'highest_inference' || normalized === 'highest_tier') return 'highest';
   if (MODEL_TIERS.has(normalized)) return normalized;
   return 'cheap';
 }
@@ -253,40 +239,6 @@ function configForField(container, field) {
     if (own(container, key)) return container[key];
   }
   return undefined;
-}
-
-function unwrapConfiguredValue(value) {
-  if (isRecord(value) && own(value, 'value')) return { found: true, value: value.value };
-  return { found: true, value };
-}
-
-function lookupRecordValue(container, field) {
-  const direct = configForField(container, field);
-  if (direct !== undefined) return unwrapConfiguredValue(direct);
-
-  if (!Array.isArray(container)) return { found: false, value: null };
-  const fieldId = aliasValue(field, 'fieldId');
-  const label = firstDefined(field, ['label', 'question', 'text', 'description']);
-  const name = firstDefined(field, ['name', 'key']);
-  const aliases = [fieldId, label, name].filter((item) => typeof item === 'string' && item.length > 0);
-  for (const item of container) {
-    if (!isRecord(item)) continue;
-    const itemAlias = firstDefined(item, [
-      'alias',
-      'fieldId',
-      'field_id',
-      'stableId',
-      'stable_id',
-      'label',
-      'name',
-      'question',
-    ]);
-    if (aliases.includes(itemAlias)) {
-      const value = firstPresent(item, ['value', 'answer', 'default', 'configuredDefault', 'configured_default']);
-      return value === UNSET ? { found: false, value: null } : unwrapConfiguredValue(value);
-    }
-  }
-  return { found: false, value: null };
 }
 
 function fieldPolicyConfig(field, options) {
@@ -678,35 +630,6 @@ function pageCandidates(controls, observationId, ledger) {
     });
 }
 
-function lookupConfiguredValue(field, options, directKeys, containers) {
-  for (const key of directKeys) {
-    const direct = firstPresent(field, [key]);
-    if (direct !== UNSET) return unwrapConfiguredValue(direct);
-  }
-  for (const container of containers) {
-    const found = lookupRecordValue(container, field);
-    if (found.found) return found;
-  }
-  return { found: false, value: null };
-}
-
-function answerAvailability(field, options) {
-  const answerMemory = firstDefined(options, ['answerMemory', 'answer_memory', 'memory']);
-  const defaults = firstDefined(options, ['configuredDefaults', 'configured_defaults', 'defaults']);
-  const exact = lookupConfiguredValue(
-    field,
-    options,
-    ['exactAnswer', 'exact_answer', 'exactMemory', 'exact_memory', 'memoryAnswer', 'memory_answer'],
-    [answerMemory],
-  );
-  const fallback = lookupConfiguredValue(
-    field,
-    options,
-    ['configuredFallback', 'configured_fallback', 'configuredDefault', 'configured_default', 'defaultAnswer', 'default_answer'],
-    [defaults],
-  );
-  return { exact, fallback };
-}
 
 function inferableField(field, policy, config) {
   const explicit = firstDefined(field, ['inferable', 'canInfer', 'can_infer']);
@@ -716,16 +639,23 @@ function inferableField(field, policy, config) {
   return SUBJECTIVE_POLICY_SET.has(policy);
 }
 
+function sourceList(value, defaultSources) {
+  if (!Array.isArray(value)) return [...defaultSources];
+  const filtered = value.filter((source) => ANSWER_SOURCE_SET.has(source));
+  return filtered.length > 0 ? [...filtered] : [...defaultSources];
+}
+
 function policyMetadata(field, options, control = null) {
   const policyField = isRecord(control) ? { ...control, ...field } : field;
   const config = fieldPolicyConfig(policyField, options);
   const policy = classifyFieldPolicy(policyField, options);
-  const sources = isFileControl(policyField) ? RESUME_ANSWER_SOURCES :
-    (Array.isArray(config.allowedAnswerSources) ? config.allowedAnswerSources : ANSWER_SOURCES_BY_POLICY[policy]);
+  const sources = isFileControl(policyField)
+    ? [...RESUME_ANSWER_SOURCES]
+    : sourceList(config.allowedAnswerSources, ANSWER_SOURCES_BY_POLICY[policy]);
   return {
     config,
     policy,
-    sources: [...sources],
+    sources,
     inferable: inferableField(policyField, policy, config),
     requiredModelTier: modelTier(firstDefined(config, ['requiredModelTier', 'required_model_tier']) ??
       firstDefined(policyField, ['requiredModelTier', 'required_model_tier'])),
@@ -736,17 +666,14 @@ function policyMetadata(field, options, control = null) {
 
 function outputForField(info, options) {
   const metadata = policyMetadata(info.field, options, info.control);
-  const configured = info.availability.fallback.found ? info.availability.fallback.value : null;
-  const sources = isFileControl(info.control) ? [...RESUME_ANSWER_SOURCES] : metadata.sources;
   return immutable({
     observationId: info.observationId,
     fieldId: info.fieldId,
     controlReference: info.controlReference,
     fieldPolicy: metadata.policy,
-    allowedAnswerSources: sources,
+    allowedAnswerSources: metadata.sources,
     allowedActions: actionForControl(info.control),
     allowedOptions: optionsForControl(info.control),
-    configuredFallback: configured,
     requiredModelTier: metadata.requiredModelTier,
     escalationPermitted: Boolean(metadata.escalationPermitted),
     reobservationRequired: true,
@@ -762,7 +689,6 @@ function outputForPage(info, kind, options) {
     allowedAnswerSources: [],
     allowedActions: kind === 'final' ? ['click'] : ['navigate'],
     allowedOptions: [],
-    configuredFallback: null,
     requiredModelTier: modelTier(firstDefined(options, ['requiredModelTier', 'required_model_tier'])),
     escalationPermitted: false,
     reobservationRequired: true,
@@ -770,11 +696,6 @@ function outputForPage(info, kind, options) {
 }
 
 function compareInfo(left, right) {
-  if (left.priority === right.priority && left.priority >= 4) {
-    const leftAnswerRank = left.exact ? 0 : left.fallback ? 1 : left.inferable ? 2 : 3;
-    const rightAnswerRank = right.exact ? 0 : right.fallback ? 1 : right.inferable ? 2 : 3;
-    if (leftAnswerRank !== rightAnswerRank) return leftAnswerRank - rightAnswerRank;
-  }
   const leftId = String(left.fieldId ?? '');
   const rightId = String(right.fieldId ?? '');
   if (leftId < rightId) return -1;
@@ -785,6 +706,7 @@ function compareInfo(left, right) {
   if (leftRef > rightRef) return 1;
   return left.index - right.index;
 }
+
 
 function selectFieldInfos(observation, ledger, options, observationId, controls, byId) {
   const infos = [];
@@ -819,7 +741,6 @@ function selectFieldInfos(observation, ledger, options, observationId, controls,
       hasInvalidValidity(control, field)
     );
     const metadata = policyMetadata(field, options, control);
-    const availability = answerAvailability(field, options);
     const info = {
       observationId,
       fieldId,
@@ -832,10 +753,7 @@ function selectFieldInfos(observation, ledger, options, observationId, controls,
       rejected,
       newlyRevealed: isNewlyRevealed(field, ledger, observationId),
       upload: isFileControl(control),
-      exact: availability.exact.found,
-      fallback: availability.fallback.found,
       inferable: metadata.inferable,
-      availability,
     };
     if (info.rejected) {
       info.priority = 0;
@@ -844,8 +762,7 @@ function selectFieldInfos(observation, ledger, options, observationId, controls,
       else if (info.newlyRevealed) info.priority = 2;
       else info.priority = 1;
     } else if (!info.required && info.unresolved) {
-      if (info.exact || info.fallback) info.priority = 4;
-      else if (info.inferable || info.upload) info.priority = 5;
+      if (info.inferable || info.upload) info.priority = 5;
       else info.priority = 6;
     } else {
       info.priority = null;

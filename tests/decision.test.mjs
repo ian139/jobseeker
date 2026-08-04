@@ -4,14 +4,18 @@ import test from 'node:test';
 
 import {
   ANSWER_SOURCES,
-  DECISION_MODES,
   FIELD_POLICIES,
   MODEL_TIERS,
   PROPOSED_ACTIONS,
+  isApplicationDecision,
   validateApplicationDecision,
 } from '../src/phase1/decision.mjs';
 
 const DIGEST = 'a'.repeat(64);
+const INFERENCE_EVIDENCE_DIGESTS = {
+  resumeSha256: DIGEST,
+  jobDescriptionSha256: DIGEST,
+};
 
 function decision(overrides = {}) {
   return {
@@ -20,10 +24,10 @@ function decision(overrides = {}) {
     controlReference: 'observation-1:control-1',
     fieldPolicy: 'qualification',
     proposedAnswer: 'Software engineer',
-    answerSource: 'resume_evidence',
-    decisionMode: 'supported_inference',
+    answerSource: 'resume',
     evidenceReferences: ['resume:sha256:' + DIGEST],
-    inferenceRationaleDigest: DIGEST,
+    inferenceRationaleDigest: null,
+    inferenceEvidenceDigests: null,
     proposedAction: 'fill_text',
     expectedRetainedState: 'Software engineer',
     modelTier: 'strong',
@@ -42,105 +46,151 @@ function context(overrides = {}) {
     currentControlReference: 'observation-1:control-1',
     currentField: { retained: false, valid: false, value: null },
     currentControl: { kind: 'input', type: 'text', visible: true, enabled: true },
-    allowedSources: ['resume_evidence', 'supported_inference'],
-    allowedModes: ['supported_inference'],
+    allowedSources: ['resume'],
     allowedActions: ['fill_text'],
     ...overrides,
   };
 }
 
-test('schema vocabularies are represented by frozen runtime enums', async () => {
+test('schema and runtime expose the same canonical vocabularies', async () => {
   const schema = JSON.parse(await readFile(new URL('../schemas/application-decision.schema.json', import.meta.url), 'utf8'));
   assert.deepEqual(schema.properties.fieldPolicy.enum, FIELD_POLICIES);
   assert.deepEqual(schema.properties.answerSource.enum, ANSWER_SOURCES);
-  assert.deepEqual(schema.properties.decisionMode.enum, DECISION_MODES);
   assert.deepEqual(schema.properties.proposedAction.enum, PROPOSED_ACTIONS);
   assert.deepEqual(schema.properties.modelTier.enum, MODEL_TIERS);
+  assert.equal(Object.prototype.hasOwnProperty.call(schema.properties, 'decisionMode'), false);
+  assert.deepEqual(Object.keys(schema.$defs.inferenceEvidenceDigests.properties), [
+    'resumeSha256',
+    'jobDescriptionSha256',
+  ]);
+  assert.deepEqual(ANSWER_SOURCES, ['memory', 'profile', 'resume', 'agent_inference', 'user']);
+  assert.equal(Object.isFrozen(ANSWER_SOURCES), true);
   assert.equal(Object.isFrozen(FIELD_POLICIES), true);
-  assert.equal(Object.isFrozen(DECISION_MODES), true);
   assert.equal(Object.isFrozen(PROPOSED_ACTIONS), true);
   assert.equal(Object.isFrozen(MODEL_TIERS), true);
 });
 
-test('valid evidence-backed decision passes and is not mutated', () => {
+test('valid source-backed decision passes without mutation', () => {
   const input = decision();
   const output = validateApplicationDecision(input, context());
   assert.deepEqual(output, input);
   assert.notEqual(output, input);
 });
 
-test('legacy source names normalize to canonical source semantics', () => {
-  const input = decision({
-    answerSource: 'resume',
-    decisionMode: 'supported_inference',
-  });
-  assert.equal(validateApplicationDecision(input).answerSource, 'resume_evidence');
-});
+test('all five canonical sources validate without a second source selector', () => {
+  const sourceBacked = [
+    ['memory', ['memory:answer-1']],
+    ['profile', ['profile:answer-1']],
+    ['resume', ['resume:answer-1']],
+  ];
+  for (const [answerSource, evidenceReferences] of sourceBacked) {
+    const output = validateApplicationDecision(decision({ answerSource, evidenceReferences }));
+    assert.equal(output.answerSource, answerSource);
+    assert.equal(output.inferenceEvidenceDigests, null);
+  }
 
-test('exact memory can answer sensitive policy without inference metadata', () => {
-  const output = validateApplicationDecision(decision({
-    fieldPolicy: 'identity',
-    proposedAnswer: 'Applicant',
-    answerSource: 'exact_memory',
-    decisionMode: 'exact_memory',
-    evidenceReferences: ['memory:answer-1'],
-    inferenceRationaleDigest: null,
+  const inferred = validateApplicationDecision(decision({
+    answerSource: 'agent_inference',
+    evidenceReferences: ['resume:sha256:' + DIGEST, 'job:sha256:' + DIGEST],
+    inferenceRationaleDigest: DIGEST,
+    inferenceEvidenceDigests: INFERENCE_EVIDENCE_DIGESTS,
     modelTier: 'cheap',
-    reobservationRequired: false,
   }));
-  assert.equal(output.decisionMode, 'exact_memory');
+  assert.equal(inferred.answerSource, 'agent_inference');
+  assert.equal(inferred.modelTier, 'cheap');
+  assert.deepEqual(inferred.inferenceEvidenceDigests, INFERENCE_EVIDENCE_DIGESTS);
+
+  const user = validateApplicationDecision(decision({
+    answerSource: 'user',
+    evidenceReferences: [],
+    inferenceRationaleDigest: null,
+  }));
+  assert.equal(user.answerSource, 'user');
+  assert.equal(user.inferenceEvidenceDigests, null);
 });
 
-test('forbidden decisions fail closed', () => {
+test('inference requires both bound digests and is rejected for protected policies', () => {
   assert.throws(
-    () => validateApplicationDecision({ ...decision(), unexpected: true }),
-    (error) => error.code === 'E_DECISION_UNKNOWN_KEY',
-  );
-  assert.throws(
-    () => validateApplicationDecision(decision({ observationId: 'old-observation' }), context()),
-    (error) => error.code === 'E_DECISION_STALE_CONTEXT',
-  );
-  assert.throws(
-    () => validateApplicationDecision(decision({ fieldPolicy: 'legal' })),
-    (error) => error.code === 'E_DECISION_INFERENCE_POLICY',
+    () => validateApplicationDecision(decision({
+      answerSource: 'agent_inference',
+      evidenceReferences: ['resume:sha256:' + DIGEST],
+      inferenceRationaleDigest: null,
+      inferenceEvidenceDigests: INFERENCE_EVIDENCE_DIGESTS,
+    })),
+    (error) => error.code === 'E_DECISION_RATIONALE_REQUIRED',
   );
   assert.throws(
     () => validateApplicationDecision(decision({
-      answerSource: 'best_effort_inference',
-      decisionMode: 'best_effort_inference',
-      modelTier: 'strong',
+      answerSource: 'agent_inference',
+      evidenceReferences: ['resume:sha256:' + DIGEST, 'job:sha256:' + DIGEST],
+      inferenceRationaleDigest: DIGEST,
+      inferenceEvidenceDigests: null,
     })),
-    (error) => error.code === 'E_DECISION_BEST_EFFORT_TIER',
+    (error) => error.code === 'E_DECISION_INFERENCE_EVIDENCE_REQUIRED',
   );
   assert.throws(
-    () => validateApplicationDecision(decision({ inferenceRationaleDigest: null })),
-    (error) => error.code === 'E_DECISION_RATIONALE_REQUIRED',
+    () => validateApplicationDecision(decision({
+      answerSource: 'agent_inference',
+      evidenceReferences: ['resume:sha256:' + DIGEST, 'job:sha256:' + DIGEST],
+      inferenceRationaleDigest: DIGEST,
+      inferenceEvidenceDigests: { resumeSha256: DIGEST },
+    })),
+    (error) => error.code === 'E_DECISION_REQUIRED',
+  );
+  assert.throws(
+    () => validateApplicationDecision(decision({
+      answerSource: 'agent_inference',
+      evidenceReferences: ['resume:sha256:' + DIGEST, 'job:sha256:' + DIGEST],
+      inferenceRationaleDigest: DIGEST,
+      inferenceEvidenceDigests: {
+        resumeSha256: DIGEST,
+        jobDescriptionSha256: 'A'.repeat(64),
+      },
+    })),
+    (error) => error.code === 'E_DECISION_INFERENCE_EVIDENCE',
+  );
+  assert.throws(
+    () => validateApplicationDecision(decision({
+      fieldPolicy: 'hard_fact',
+      answerSource: 'agent_inference',
+      evidenceReferences: ['resume:sha256:' + DIGEST, 'job:sha256:' + DIGEST],
+      inferenceRationaleDigest: DIGEST,
+      inferenceEvidenceDigests: INFERENCE_EVIDENCE_DIGESTS,
+    })),
+    (error) => error.code === 'E_DECISION_INFERENCE_POLICY',
   );
 });
 
-test('highest tier is mandatory for best-effort inference', () => {
-  const output = validateApplicationDecision(decision({
-    answerSource: 'best_effort_inference',
-    decisionMode: 'best_effort_inference',
-    modelTier: 'highest',
-  }));
-  assert.equal(output.modelTier, 'highest');
+test('source evidence and non-inference metadata constraints are enforced', () => {
+  assert.throws(
+    () => validateApplicationDecision(decision({ evidenceReferences: [] })),
+    (error) => error.code === 'E_DECISION_EVIDENCE_REQUIRED',
+  );
+  assert.throws(
+    () => validateApplicationDecision(decision({ inferenceRationaleDigest: DIGEST })),
+    (error) => error.code === 'E_DECISION_RATIONALE_FORBIDDEN',
+  );
+  assert.throws(
+    () => validateApplicationDecision(decision({ inferenceEvidenceDigests: INFERENCE_EVIDENCE_DIGESTS })),
+    (error) => error.code === 'E_DECISION_INFERENCE_EVIDENCE_FORBIDDEN',
+  );
+  assert.throws(
+    () => validateApplicationDecision(decision({ answerSource: 'other', evidenceReferences: [] })),
+    (error) => error.code === 'E_DECISION_SOURCE',
+  );
 });
+
 
 test('select options require current option membership and compatible controls', () => {
   const select = decision({
     proposedAnswer: 'Remote',
-    answerSource: 'profile_evidence',
-    decisionMode: 'profile_evidence',
+    answerSource: 'profile',
     evidenceReferences: ['profile:answer-1'],
-    inferenceRationaleDigest: null,
     proposedAction: 'select_option',
     expectedRetainedState: 'Remote',
-    reobservationRequired: true,
   });
   assert.equal(validateApplicationDecision(select, context({
-    allowedSources: ['profile_evidence'],
-    allowedModes: ['profile_evidence'],
+    allowedSources: ['profile'],
     allowedActions: ['select_option'],
     currentControl: {
       kind: 'select',
@@ -151,22 +201,30 @@ test('select options require current option membership and compatible controls',
   })).proposedAnswer, 'Remote');
   assert.throws(
     () => validateApplicationDecision(select, context({
-      allowedSources: ['profile_evidence'],
-      allowedModes: ['profile_evidence'],
+      allowedSources: ['profile'],
       allowedActions: ['select_option'],
       currentControl: {
-        kind: 'select', visible: true, enabled: true, options: [{ value: 'On-site', disabled: false }],
+        kind: 'select',
+        visible: true,
+        enabled: true,
+        options: [{ value: 'On-site', disabled: false }],
       },
     })),
     (error) => error.code === 'E_DECISION_OPTION_MEMBERSHIP',
   );
 });
 
-test('duplicate retained states and ineligible submission are rejected', () => {
+test('unknown keys, stale context, duplicate retained state, and ineligible submission fail closed', () => {
   assert.throws(
-    () => validateApplicationDecision(decision({
-      expectedRetainedState: 'Already retained',
-    }), context({
+    () => validateApplicationDecision({ ...decision(), unexpected: true }),
+    (error) => error.code === 'E_DECISION_UNKNOWN_KEY',
+  );
+  assert.throws(
+    () => validateApplicationDecision(decision({ observationId: 'old-observation' }), context()),
+    (error) => error.code === 'E_DECISION_STALE_CONTEXT',
+  );
+  assert.throws(
+    () => validateApplicationDecision(decision({ expectedRetainedState: 'Already retained' }), context({
       currentField: { retained: true, valid: true, value: 'Already retained' },
     })),
     (error) => error.code === 'E_DECISION_DUPLICATE_RETAINED_STATE',
@@ -174,22 +232,24 @@ test('duplicate retained states and ineligible submission are rejected', () => {
   assert.throws(
     () => validateApplicationDecision(decision({
       proposedAction: 'click',
-      fieldId: 'field-1',
-      controlReference: 'observation-1:control-1',
-      automaticSubmissionEligible: true,
-      reobservationRequired: false,
-      answerSource: 'exact_memory',
-      decisionMode: 'exact_memory',
-      evidenceReferences: ['memory:submit'],
-      inferenceRationaleDigest: null,
       proposedAnswer: null,
       expectedRetainedState: null,
+      fieldId: 'field-1',
+      controlReference: 'observation-1:control-1',
+      answerSource: 'memory',
+      evidenceReferences: ['memory:submit'],
+      automaticSubmissionEligible: true,
+      reobservationRequired: false,
     }), context({
-      currentControl: { kind: 'button', type: 'submit', visible: true, enabled: true },
-      allowedSources: ['exact_memory'],
-      allowedModes: ['exact_memory'],
+      allowedSources: ['memory'],
       allowedActions: ['click'],
+      currentControl: { kind: 'button', type: 'submit', visible: true, enabled: true },
     })),
     (error) => error.code === 'E_DECISION_SUBMISSION_INELIGIBLE',
   );
+});
+
+test('boolean recognition follows the same runtime validator', () => {
+  assert.equal(isApplicationDecision(decision(), context()), true);
+  assert.equal(isApplicationDecision(decision({ answerSource: 'other' })), false);
 });

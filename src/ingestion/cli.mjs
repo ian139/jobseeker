@@ -191,6 +191,7 @@ export async function runCli(argv = process.argv.slice(2), env = process.env) {
       postedAtMaxAgeDays: integer(values.postedAtMaxAgeDays, 'posted_at_max_age_days'),
       queryFilters: values.queryFilters,
       windowEnd: required.windowEnd,
+      now: required.now,
       paidAuthorization: mode !== 'preview',
     });
     const options = {

@@ -325,11 +325,12 @@ function assertCompletedAttemptBinding(attempt, planned, plan) {
   }
 }
 
-function validatedReceipt(receipt) {
+function validatedReceipt(receipt, options = {}) {
   const validation = validateBrowserActionResult(
     receipt.result,
     receipt.plan,
     receipt.post_observation,
+    options,
   );
   if (!Array.isArray(validation.attempts)
     || validation.attempts.length === 0
@@ -632,7 +633,7 @@ function actionRetentionSummary(validation, retention, observation) {
 
 
 async function recoverReceiptInState(state, receipt) {
-  const validation = validatedReceipt(receipt);
+  const validation = validatedReceipt(receipt, { historical: true });
   const plan = receipt.plan;
   if (state.observation === null || state.ledger === null) {
     throw new TypeError('receipt recovery requires an initialized ledger');

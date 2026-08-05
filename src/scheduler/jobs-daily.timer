@@ -1,0 +1,10 @@
+[Unit]
+Description=Jobs New Daily Source Ingestion Timer
+
+[Timer]
+OnCalendar=*-*-* 10:00:00 America/New_York
+Persistent=true
+Unit=jobs-daily.service
+
+[Install]
+WantedBy=timers.target

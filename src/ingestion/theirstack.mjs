@@ -17,6 +17,7 @@ export const THEIRSTACK_DEFAULT_POSTED_MAX_AGE_DAYS = 7;
 export const THEIRSTACK_DEFAULT_PAGE_LIMIT = 25;
 export const THEIRSTACK_DEFAULT_TIMEOUT_MS = 10_000;
 export const THEIRSTACK_DEFAULT_PREVIEW_RETRIES = 2;
+export const THEIRSTACK_DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 
 export const THEIRSTACK_ERROR_CODES = Object.freeze({
   authentication: 'authentication',
@@ -35,7 +36,7 @@ export class TheirStackError extends Error {
   }
 }
 
-const PROFILE_NAMES = Object.freeze([
+export const THEIRSTACK_PROFILE_NAMES = Object.freeze([
   'new_grad_cs',
   'new_grad_non_coop_cs',
   'fall_coop_swe_data',
@@ -201,7 +202,6 @@ const STRING_ITEM_FIELDS = new Set([
   'url',
   'closed_at',
 ]);
-const NULLABLE_STRING_ITEM_FIELDS = new Set(['date_reposted', 'description', 'final_url', 'closed_at', 'postal_code']);
 const BOOLEAN_ITEM_FIELDS = new Set(['easy_apply', 'hybrid', 'remote', 'reposted']);
 const STRING_ARRAY_ITEM_FIELDS = new Set([
   'cities',
@@ -278,22 +278,46 @@ function assertResponseStatus(response) {
   return response.status;
 }
 
+async function boundedResponseJson(response, maxBytes, mode) {
+  const code = mode === 'paid' ? THEIRSTACK_ERROR_CODES.paid_ambiguous : THEIRSTACK_ERROR_CODES.terminal_validation;
+  const contentLength = response?.headers?.get?.('content-length') ?? response?.headers?.['content-length'];
+  if (typeof contentLength === 'string' && /^\d+$/u.test(contentLength) && Number(contentLength) > maxBytes) {
+    throw new TheirStackError(code);
+  }
+  const body = response?.body;
+  if (body !== null && body !== undefined && typeof body[Symbol.asyncIterator] === 'function') {
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of body) {
+      if (!(chunk instanceof Uint8Array)) throw new TheirStackError(code);
+      total += chunk.byteLength;
+      if (total > maxBytes) throw new TheirStackError(code);
+      chunks.push(chunk);
+    }
+    return JSON.parse(Buffer.concat(chunks, total).toString('utf8'));
+  }
+  if (typeof response?.json !== 'function') throw new TheirStackError(code);
+  return response.json();
+}
+
 function sleep(milliseconds) {
   if (milliseconds <= 0) return Promise.resolve();
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function retryDelay(attempt, response, configured) {
-  if (configured > 0) return Math.min(configured * 2 ** attempt, 2_000);
   const retryAfter = response?.headers?.get?.('retry-after') ?? response?.headers?.['retry-after'];
-  if (typeof retryAfter === 'string' && /^\d+$/u.test(retryAfter)) {
-    return Math.min(Number(retryAfter) * 1_000, 2_000);
+  if (typeof retryAfter === 'string') {
+    if (/^\d+$/u.test(retryAfter)) return Math.min(Number(retryAfter) * 1_000, 60_000);
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) return Math.min(Math.max(retryAt - Date.now(), 0), 60_000);
   }
+  if (configured > 0) return Math.min(configured * 2 ** attempt, 2_000);
   return 0;
 }
 
 function validateProfile(profile) {
-  if (typeof profile !== 'string' || !PROFILE_NAMES.includes(profile)) terminal();
+  if (typeof profile !== 'string' || !THEIRSTACK_PROFILE_NAMES.includes(profile)) terminal();
   return profile;
 }
 
@@ -441,9 +465,8 @@ function validateJobItem(item) {
   for (const field of STRING_ITEM_FIELDS) {
     if (!(field in item)) continue;
     const value = item[field];
-    if (value === null && NULLABLE_STRING_ITEM_FIELDS.has(field)) continue;
-    if (field === 'description' && value === '') continue;
-    assertNonEmptyString(value);
+    if (value === null || value === '') continue;
+    if (typeof value !== 'string') terminal();
     if (['date_posted', 'date_reposted', 'discovered_at', 'closed_at'].includes(field)) assertIsoTimestamp(value);
   }
   for (const field of BOOLEAN_ITEM_FIELDS) {
@@ -469,7 +492,7 @@ function validateJobItem(item) {
   return item;
 }
 
-function validateResponse(payload, request) {
+function validateResponse(payload, request, mode) {
   assertRecord(payload);
   const keys = Object.keys(payload);
   if (keys.length !== TOP_LEVEL_RESPONSE_KEYS.size || keys.some((key) => !TOP_LEVEL_RESPONSE_KEYS.has(key))) terminal();
@@ -478,6 +501,11 @@ function validateResponse(payload, request) {
   for (const key of Object.keys(payload.metadata)) if (!METADATA_KEYS.has(key)) terminal();
 
   const metadata = payload.metadata;
+  for (const key of ['total_companies', 'truncated_results', 'truncated_companies']) {
+    if (!(key in metadata)) continue;
+    if (metadata[key] !== null && (typeof metadata[key] !== 'number' || !Number.isSafeInteger(metadata[key]) || metadata[key] < 0)) terminal();
+  }
+  if ((metadata.truncated_results ?? 0) > 0) throw new TheirStackError(THEIRSTACK_ERROR_CODES.account_health);
   let totalResults = null;
   if ('total_results' in metadata) {
     if (metadata.total_results !== null && (typeof metadata.total_results !== 'number' || !Number.isSafeInteger(metadata.total_results) || metadata.total_results < 0)) terminal();
@@ -490,7 +518,7 @@ function validateResponse(payload, request) {
     if (typeof metadata.limit !== 'number' || !Number.isSafeInteger(metadata.limit) || metadata.limit !== request.limit) terminal();
   }
   if (payload.data.length > request.limit) terminal();
-  for (const item of payload.data) validateJobItem(item);
+  for (const item of payload.data) mode === 'preview' ? assertRecord(item) : validateJobItem(item);
   if (totalResults !== null && request.page * request.limit + payload.data.length > totalResults) terminal();
   return { data: payload.data, totalResults };
 }
@@ -513,7 +541,13 @@ function classifyHttpStatus(status, mode, attempt, maxRetries) {
   if (status < 200 || status >= 300) {
     throw new TheirStackError(THEIRSTACK_ERROR_CODES.terminal_validation);
   }
-  return false;
+}
+
+function dayWindow(value) {
+  const date = new Date(value);
+  const start = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 0, 0, 0));
+  const end = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate(), 23, 59, 59, 999));
+  return { start: start.toISOString(), end: end.toISOString() };
 }
 
 function canonicalTimestamp(value, nullable = false) {
@@ -594,6 +628,10 @@ function classifyEligibilityValue(job) {
   return { state: eligibilityState, reasonCodes: [...eligibilityReasonCodes], priority };
 }
 
+function firstNonEmptyString(...values) {
+  return values.find((value) => typeof value === 'string' && value.length > 0) ?? null;
+}
+
 
 function normalizeOfficialJob(raw, context) {
   assertRecord(raw);
@@ -605,19 +643,20 @@ function normalizeOfficialJob(raw, context) {
   if (!/^[0-9a-f]{64}$/u.test(rawPayloadSha256)) terminal();
 
   const sourceJobId = String(raw.id);
-  const canonicalListingUrl = canonicalizeJobUrl(raw.url ?? raw.source_url ?? raw.final_url);
-  const canonicalApplicationUrl = canonicalizeJobUrl(raw.final_url ?? raw.url ?? raw.source_url);
+  const canonicalListingUrl = canonicalizeJobUrl(firstNonEmptyString(raw.url, raw.source_url, raw.final_url));
+  const canonicalApplicationUrl = canonicalizeJobUrl(firstNonEmptyString(raw.final_url, raw.url, raw.source_url));
   const ats = classifyAtsValue({ canonicalListingUrl, canonicalApplicationUrl });
-  const description = raw.description ?? null;
+  const description = typeof raw.description === 'string' ? raw.description : '';
   const sourcePostedAt = canonicalTimestamp(raw.date_posted);
-  const sourceUpdatedAt = canonicalTimestamp(raw.date_reposted ?? raw.discovered_at ?? raw.date_posted);
+  const repostedAt = firstNonEmptyString(raw.date_reposted);
+  const sourceUpdatedAt = canonicalTimestamp(repostedAt ?? raw.discovered_at ?? raw.date_posted);
   const discoveredAt = canonicalTimestamp(raw.discovered_at);
-  const availabilityState = raw.closed_at === undefined ? 'unknown' : raw.closed_at === null ? 'open' : 'closed';
+  const availabilityState = raw.closed_at === undefined ? 'unknown' : firstNonEmptyString(raw.closed_at) === null ? 'open' : 'closed';
   const freshnessState = freshnessValue(
     {
       ...raw,
       date_posted: sourcePostedAt,
-      date_reposted: raw.date_reposted === null || raw.date_reposted === undefined ? null : canonicalTimestamp(raw.date_reposted),
+      date_reposted: repostedAt === null ? null : canonicalTimestamp(repostedAt),
       discovered_at: canonicalTimestamp(raw.discovered_at),
     },
     observedAt,
@@ -635,9 +674,9 @@ function normalizeOfficialJob(raw, context) {
     company: raw.company_object.name,
     location: locationValue(raw),
     workplaceType: workplaceValue(raw),
-    employmentTypes: raw.employment_statuses ? [...raw.employment_statuses] : [],
+    employmentTypes: raw.employment_statuses ? [...new Set(raw.employment_statuses)].sort() : [],
     description,
-    descriptionSha256: description === null ? null : sha256Text(description),
+    descriptionSha256: sha256Text(description),
     sourcePostedAt,
     sourceUpdatedAt,
     discoveredAt,
@@ -670,10 +709,12 @@ const CONSTRUCTION_OPTION_KEYS = new Set([
   'timeoutMs',
   'maxPreviewRetries',
   'retryDelayMs',
+  'maxResponseBytes',
   'postedAtMaxAgeDays',
   'queryFilters',
   'windowEnd',
   'now',
+  'creditNow',
   'paidAuthorization',
 ]);
 
@@ -693,21 +734,136 @@ export function createTheirStackAdapter(options = {}) {
   if (typeof maxPreviewRetries !== 'number' || !Number.isInteger(maxPreviewRetries) || maxPreviewRetries < 0 || maxPreviewRetries > 5) terminal();
   const retryDelayMs = options.retryDelayMs ?? 0;
   if (typeof retryDelayMs !== 'number' || !Number.isFinite(retryDelayMs) || retryDelayMs < 0 || retryDelayMs > 2_000) terminal();
+  const maxResponseBytes = options.maxResponseBytes ?? THEIRSTACK_DEFAULT_MAX_RESPONSE_BYTES;
+  if (typeof maxResponseBytes !== 'number' || !Number.isSafeInteger(maxResponseBytes) || maxResponseBytes < 1 || maxResponseBytes > 128 * 1024 * 1024) terminal();
   const postedAtMaxAgeDays = options.postedAtMaxAgeDays ?? THEIRSTACK_DEFAULT_POSTED_MAX_AGE_DAYS;
   if (typeof postedAtMaxAgeDays !== 'number' || !Number.isInteger(postedAtMaxAgeDays) || postedAtMaxAgeDays < 0 || postedAtMaxAgeDays > 30) terminal();
   const configuredQueryFilters = validateQueryFilters(options.queryFilters);
   const paidAuthorization = options.paidAuthorization;
   if (paidAuthorization !== undefined && paidAuthorization !== true && paidAuthorization !== false) terminal();
   const now = options.now ?? (() => new Date());
-  if (typeof now !== 'function') terminal();
-  const clockNow = () => {
-    const value = now();
+  const responseNow = options.responseNow ?? (() => new Date());
+  const creditNow = options.creditNow ?? (() => new Date());
+  if (typeof now !== 'function' || typeof responseNow !== 'function' || typeof creditNow !== 'function') terminal();
+  const clockValue = (clock) => {
+    const value = clock();
     if (value instanceof Date) {
       if (!Number.isFinite(value.getTime())) terminal();
       return value.toISOString();
     }
     return canonicalTimestamp(value);
   };
+  const clockNow = () => clockValue(now);
+  const responseClockNow = () => clockValue(responseNow);
+  const creditClockNow = () => clockValue(creditNow);
+  async function fetchJson(url, init, mode) {
+    for (let attempt = 0; ; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), timeoutMs);
+      let response = null;
+      let payload;
+      let shouldRetry = false;
+      let transientFailure = false;
+      let failure = null;
+      try {
+        response = await fetchImpl(url, { ...init, signal: controller.signal });
+        shouldRetry = classifyHttpStatus(assertResponseStatus(response), mode, attempt, maxPreviewRetries) === true;
+        if (!shouldRetry) {
+          try {
+            payload = await boundedResponseJson(response, maxResponseBytes, mode);
+          } catch (error) {
+            if (error instanceof TheirStackError) {
+              failure = error;
+            } else if (mode === 'paid') {
+              failure = new TheirStackError(THEIRSTACK_ERROR_CODES.paid_ambiguous);
+            } else if (error instanceof SyntaxError) {
+              failure = new TheirStackError(THEIRSTACK_ERROR_CODES.terminal_validation);
+            } else {
+              transientFailure = true;
+            }
+          }
+        }
+      } catch (error) {
+        if (error instanceof TheirStackError) failure = error;
+        else transientFailure = true;
+      } finally {
+        clearTimeout(timeout);
+      }
+      if (shouldRetry) {
+        await sleep(retryDelay(attempt, response, retryDelayMs));
+        continue;
+      }
+      if (transientFailure) {
+        if (mode === 'preview' && attempt < maxPreviewRetries) {
+          await sleep(retryDelay(attempt, response, retryDelayMs));
+          continue;
+        }
+        throw new TheirStackError(mode === 'preview' ? THEIRSTACK_ERROR_CODES.retryable_preview : THEIRSTACK_ERROR_CODES.paid_ambiguous);
+      }
+      if (failure !== null) throw failure;
+      return payload;
+    }
+  }
+
+  async function readCreditUsage(period = undefined) {
+    if (typeof apiKey !== 'string' || apiKey.length === 0) {
+      throw new TheirStackError(THEIRSTACK_ERROR_CODES.authentication);
+    }
+    const observedAt = creditClockNow();
+    let periodStart;
+    let periodEnd;
+    if (period === undefined) {
+      ({ start: periodStart, end: periodEnd } = dayWindow(observedAt));
+    } else {
+      assertRecord(period);
+      const keys = Object.keys(period);
+      if (keys.length !== 2 || !keys.includes('periodStart') || !keys.includes('periodEnd')) terminal();
+      periodStart = canonicalTimestamp(period.periodStart);
+      periodEnd = canonicalTimestamp(period.periodEnd);
+      const expected = dayWindow(periodStart);
+      if (periodStart !== expected.start || periodEnd !== expected.end) terminal();
+    }
+    const startMs = Date.parse(periodStart);
+    const endMs = Date.parse(periodEnd);
+    const observedMs = Date.parse(observedAt);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || !Number.isFinite(observedMs)
+      || startMs > endMs || observedMs < startMs) {
+      throw new TheirStackError(THEIRSTACK_ERROR_CODES.terminal_validation);
+    }
+    const params = new URLSearchParams({
+      start_datetime: periodStart,
+      end_datetime: periodEnd,
+      timezone: 'UTC',
+    });
+    const url = `${normalizedBaseUrl}/v0/teams/credits_consumption?${params.toString()}`;
+    const headers = { accept: 'application/json', authorization: `Bearer ${apiKey}` };
+    const payload = await fetchJson(url, { method: 'GET', headers }, 'preview');
+    if (!Array.isArray(payload)) {
+      throw new TheirStackError(THEIRSTACK_ERROR_CODES.terminal_validation);
+    }
+    let consumedCredits = 0;
+    const seenPeriods = new Set();
+    for (const entry of payload) {
+      if (!isRecord(entry)) {
+        throw new TheirStackError(THEIRSTACK_ERROR_CODES.terminal_validation);
+      }
+      const entryPeriodStart = canonicalTimestamp(entry.period_start);
+      if (entryPeriodStart < periodStart || entryPeriodStart > periodEnd
+        || entryPeriodStart > observedAt || seenPeriods.has(entryPeriodStart)) {
+        throw new TheirStackError(THEIRSTACK_ERROR_CODES.terminal_validation);
+      }
+      seenPeriods.add(entryPeriodStart);
+      const consumed = entry.api_credits_consumed;
+      if (typeof consumed !== 'number' || !Number.isSafeInteger(consumed) || consumed < 0) {
+        throw new TheirStackError(THEIRSTACK_ERROR_CODES.terminal_validation);
+      }
+      consumedCredits += consumed;
+      if (!Number.isSafeInteger(consumedCredits)) {
+        throw new TheirStackError(THEIRSTACK_ERROR_CODES.terminal_validation);
+      }
+    }
+    return deepFreeze({ observedAt, periodStart, periodEnd, consumedCredits });
+  }
   const configuredWindowEnd = options.windowEnd ?? clockNow();
   validateWindowEnd(configuredWindowEnd);
 
@@ -777,43 +933,23 @@ export function createTheirStackAdapter(options = {}) {
       authorization: `Bearer ${apiKey}`,
       'content-type': 'application/json',
     };
-    let response;
-    for (let attempt = 0; ; attempt += 1) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
-      try {
-        response = await fetchImpl(request.url, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify(request.body),
-          signal: controller.signal,
-        });
-      } catch {
-        clearTimeout(timeout);
-        if (mode === 'preview' && attempt < maxPreviewRetries) {
-          await sleep(retryDelay(attempt, null, retryDelayMs));
-          continue;
-        }
-        throw new TheirStackError(mode === 'preview' ? THEIRSTACK_ERROR_CODES.retryable_preview : THEIRSTACK_ERROR_CODES.paid_ambiguous);
-      }
-      clearTimeout(timeout);
-      const status = assertResponseStatus(response);
-      const shouldRetry = classifyHttpStatus(status, mode, attempt, maxPreviewRetries);
-      if (shouldRetry) {
-        await sleep(retryDelay(attempt, response, retryDelayMs));
-        continue;
-      }
-      break;
-    }
-
-    if (!response || typeof response.json !== 'function') terminal();
-    let payload;
+    const payload = await fetchJson(request.url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(request.body),
+    }, mode);
+    let validated;
     try {
-      payload = await response.json();
-    } catch {
-      terminal();
+      validated = validateResponse(payload, request, mode);
+    } catch (error) {
+      if (mode === 'paid' && error instanceof TheirStackError && error.code === THEIRSTACK_ERROR_CODES.terminal_validation) {
+        throw new TheirStackError(THEIRSTACK_ERROR_CODES.paid_ambiguous);
+      }
+      if (!(error instanceof TheirStackError)) {
+        throw new TheirStackError(mode === 'paid' ? THEIRSTACK_ERROR_CODES.paid_ambiguous : THEIRSTACK_ERROR_CODES.terminal_validation);
+      }
+      throw error;
     }
-    const validated = validateResponse(payload, request);
     const scopeBody = { ...request.body };
     delete scopeBody.page;
     delete scopeBody.include_total_results;
@@ -827,17 +963,23 @@ export function createTheirStackAdapter(options = {}) {
       requestSha256: request.requestSha256,
       items: validated.data.map((item) => immutable(item)),
       totalResults: validated.totalResults,
-      receivedAt: clockNow(),
-      estimatedCredits: mode === 'preview' ? 0 : validated.data.length,
+      receivedAt: responseClockNow(),
+      estimatedCredits: mode === 'preview' ? (validated.totalResults ?? 0) : validated.data.length,
+      reportedCredits: mode === 'preview' ? 0 : null,
     };
     return deepFreeze(result);
   }
 
   const adapter = {
     source: THEIRSTACK_SOURCE,
+    requiresCreditReconciliation: true,
     buildRequest,
     fetchPage,
+    readCreditUsage,
     normalizeJob: normalizeOfficialJob,
+    normalizeCheckpoint(value) {
+      return canonicalTimestamp(value);
+    },
   };
   return deepFreeze(adapter);
 }

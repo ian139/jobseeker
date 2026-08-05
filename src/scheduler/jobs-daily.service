@@ -1,0 +1,13 @@
+[Unit]
+Description=Jobs New Daily Source Ingestion Scheduler
+After=network.target
+
+[Service]
+Type=oneshot
+User=%I
+WorkingDirectory=/path/to/jobs-new
+EnvironmentFile=-/etc/jobs-new/env
+ExecStart=/usr/bin/env node src/scheduler/run-daily.mjs
+
+[Install]
+WantedBy=multi-user.target

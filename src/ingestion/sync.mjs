@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
-import { chmod, lstat, mkdir, open, readFile, rename } from 'node:fs/promises';
+import { constants as fsConstants } from 'node:fs';
+import { chmod, lstat, mkdir, open, unlink } from 'node:fs/promises';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import { assertIngestionSchema, openIngestionDatabase } from './database.mjs';
 import {
   canonicalJson,
   sha256Canonical,
@@ -16,6 +17,9 @@ const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/;
 const TERMINAL = new Set(['succeeded', 'failed', 'paid_ambiguous']);
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
+const NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0;
+const MAX_PRIVATE_ARTIFACT_BYTES = 64 * 1024 * 1024;
+const CREDIT_SNAPSHOT_KEYS = Object.freeze(['observedAt', 'periodStart', 'periodEnd', 'consumedCredits']);
 
 export class SyncFailure extends Error {
   constructor(reasonCode, failureClass = 'validation') {
@@ -85,13 +89,13 @@ function openDatabase(options) {
   const path = options.databasePath ?? options.dbPath ?? (typeof supplied === 'string' ? supplied : null);
   string(path, 'database_required');
   try {
-    return { database: new DatabaseSync(path), owned: true };
+    return { database: openIngestionDatabase(path), owned: true };
   } catch {
     fail('database_open_failed', 'database');
   }
 }
 
-function run(database, sql, values = []) {
+function execute(database, sql, values = []) {
   try {
     return database.prepare(sql).run(...values);
   } catch {
@@ -158,37 +162,47 @@ function hasTable(database, table) {
 }
 
 function assertMigrated(database) {
-  const required = ['jobs', 'source_observations', 'dedupe_groups', 'source_checkpoints', 'sync_runs', 'source_sync_pages', 'schema_migrations'];
-  for (const table of required) if (!hasTable(database, table) || columns(database, table).length === 0) fail('database_schema_required', 'database');
-  const migrations = many(database, 'SELECT * FROM schema_migrations');
-  if (!migrations.some((row) => Object.values(row).some((value) => String(value) === '005' || String(value) === '5' || String(value).startsWith('005-')))) fail('database_schema_required', 'database');
-  const expected = {
-    jobs: ['id', 'source', 'source_job_id', 'canonical_application_url', 'dedupe_group_id', 'raw_payload_path', 'raw_payload_sha256'],
-    source_observations: ['id', 'sync_run_id', 'job_id', 'source', 'observed_at', 'raw_payload_path', 'raw_payload_sha256', 'normalized_job_sha256'],
-    dedupe_groups: ['id', 'identity_kind', 'identity_key', 'review_required'],
-    source_checkpoints: ['source', 'profile', 'checkpoint', 'last_sync_run_id', 'revision'],
-    sync_runs: ['id', 'source', 'profile', 'mode', 'state', 'pending_page', 'pending_request_sha256', 'pending_started_at', 'next_page'],
-    source_sync_pages: ['sync_run_id', 'page_number', 'request_sha256', 'response_path', 'response_sha256', 'item_count', 'total_results'],
-  };
-  for (const [table, names] of Object.entries(expected)) {
-    const actual = new Set(columns(database, table).map((column) => column.name));
-    if (names.some((name) => !actual.has(name))) fail('database_schema_required', 'database');
+  try {
+    assertIngestionSchema(database);
+  } catch {
+    fail('database_schema_required', 'database');
   }
+}
+
+function appColumns(database) {
+  if (!hasTable(database, 'application_jobs')) return null;
+  return new Set(columns(database, 'application_jobs').map((column) => column.name));
 }
 
 function context(options, paid) {
   const adapter = options.adapter;
   if (!adapter || typeof adapter.buildRequest !== 'function' || typeof adapter.fetchPage !== 'function' || typeof adapter.normalizeJob !== 'function') fail('adapter_required');
+  const requiresCreditReconciliation = adapter.requiresCreditReconciliation ?? false;
+  if (typeof requiresCreditReconciliation !== 'boolean') fail('adapter_accounting_contract');
+  if (requiresCreditReconciliation && typeof adapter.readCreditUsage !== 'function') fail('adapter_accounting_contract');
   const source = options.source ?? adapter.source;
-  if (typeof source !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(source) || adapter.source !== source) fail('source_required');
+  if (typeof source !== 'string' || !/^[a-z][a-z0-9_-]{0,63}$/u.test(source) || adapter.source !== source) fail('source_required');
   const profile = options.profile;
-  if (typeof profile !== 'string' || profile.length === 0 || profile.length > 128) fail('profile_required');
+  if (typeof profile !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/u.test(profile)) fail('profile_required');
   const now = time(options.now, 'invalid_now');
   if (paid && options.paidAuthorization !== true) fail('paid_authorization_required', 'authorization');
-  return { adapter, source, profile, now };
+  return { adapter, source, profile, now, requiresCreditReconciliation };
 }
 
-function bounds(options) {
+function checkpointValue(adapter, value) {
+  if (value === null || value === undefined) return null;
+  let normalized = value;
+  if (typeof adapter.normalizeCheckpoint === 'function') {
+    try {
+      normalized = adapter.normalizeCheckpoint(value);
+    } catch {
+      fail('invalid_checkpoint');
+    }
+  }
+  return time(normalized, 'invalid_checkpoint');
+}
+
+function bounds(options, adapter) {
   const input = object(options.bounds) ? options.bounds : {};
   const limit = options.limit ?? options.pageSize ?? input.limit;
   const maxPages = options.maxPages ?? input.maxPages;
@@ -199,7 +213,7 @@ function bounds(options) {
   integer(maxPages, 'invalid_max_pages', 1, 1000);
   if (maxItems !== null) integer(maxItems, 'invalid_max_items', 1, 1_000_000);
   const end = time(windowEnd, 'invalid_window_end');
-  const start = checkpoint === null ? null : time(checkpoint, 'invalid_checkpoint');
+  const start = checkpointValue(adapter, checkpoint);
   if (start !== null && start > end) fail('invalid_time_bounds');
   return { limit, maxPages, maxItems, windowEnd: end, checkpoint: start };
 }
@@ -236,7 +250,7 @@ async function ensurePrivateRoot(value) {
   } catch {
     fail('private_root_required', 'filesystem');
   }
-  if (!info.isDirectory() || (info.mode & 0o077) !== 0) fail('private_root_not_private', 'filesystem');
+  if (!info.isDirectory() || (info.mode & 0o077) !== 0 || (typeof process.getuid === 'function' && info.uid !== process.getuid())) fail('private_root_not_private', 'filesystem');
   return root;
 }
 
@@ -244,7 +258,7 @@ async function privateDir(path) {
   try {
     await mkdir(path, { recursive: true, mode: DIR_MODE });
     const info = await lstat(path);
-    if (!info.isDirectory() || (info.mode & 0o077) !== 0) fail('private_directory_not_private', 'filesystem');
+    if (!info.isDirectory() || (info.mode & 0o077) !== 0 || (typeof process.getuid === 'function' && info.uid !== process.getuid())) fail('private_directory_not_private', 'filesystem');
     if ((info.mode & 0o777) !== DIR_MODE) await chmod(path, DIR_MODE);
   } catch (error) {
     if (error instanceof SyncFailure) throw error;
@@ -254,43 +268,69 @@ async function privateDir(path) {
 
 async function privateFile(path, text) {
   await privateDir(dirname(path));
-  const temporary = `${path}.tmp-${process.pid}-${Math.random().toString(16).slice(2)}`;
   let handle;
+  let created = false;
   try {
-    handle = await open(temporary, 'wx', FILE_MODE);
+    handle = await open(path, 'wx', FILE_MODE);
+    created = true;
     await handle.writeFile(text, 'utf8');
     await handle.sync();
+    await handle.chmod(FILE_MODE);
     await handle.close();
-    await rename(temporary, path);
-    await chmod(path, FILE_MODE);
+    handle = null;
   } catch {
     try {
       await handle?.close();
     } catch {
       // Best effort close.
     }
-    try {
-      const { unlink } = await import('node:fs/promises');
-      await unlink(temporary);
-    } catch {
-      // Best effort cleanup.
+    if (created) {
+      try {
+        await unlink(path);
+      } catch {
+        // Best effort cleanup.
+      }
     }
     fail('private_artifact_write_failed', 'filesystem');
   }
 }
 
 async function readPrivate(path) {
-  let info;
+  let handle;
   try {
-    info = await lstat(path);
+    handle = await open(path, fsConstants.O_RDONLY | NOFOLLOW);
   } catch {
     fail('private_artifact_missing', 'filesystem');
   }
-  if (!info.isFile() || (info.mode & 0o077) !== 0) fail('private_artifact_not_private', 'filesystem');
   try {
-    return await readFile(path, 'utf8');
-  } catch {
+    const info = await handle.stat();
+    const linked = await lstat(path);
+    if (
+      !info.isFile()
+      || !linked.isFile()
+      || info.dev !== linked.dev
+      || info.ino !== linked.ino
+      || info.size > MAX_PRIVATE_ARTIFACT_BYTES
+      || (info.mode & 0o077) !== 0
+      || (typeof process.getuid === 'function' && info.uid !== process.getuid())
+    ) fail('private_artifact_not_private', 'filesystem');
+    const chunks = [];
+    let total = 0;
+    for await (const chunk of handle.createReadStream({ autoClose: false })) {
+      total += chunk.byteLength;
+      if (total > MAX_PRIVATE_ARTIFACT_BYTES) fail('private_artifact_not_private', 'filesystem');
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks, total).toString('utf8');
+  } catch (error) {
+    if (error instanceof SyncFailure) throw error;
     fail('private_artifact_read_failed', 'filesystem');
+  } finally {
+    try {
+      await handle?.close();
+    } catch {
+      // Best effort close.
+    }
   }
 }
 
@@ -316,37 +356,162 @@ function requestCheck(value, page, limit) {
   return value;
 }
 
-function responseCheck(value, request, now, expectedTotal) {
+function responseCheck(value, request, _now, expectedTotal) {
   if (!object(value) || !Array.isArray(value.items)) fail('invalid_response');
   digest(value.requestSha256, 'invalid_response');
   if (value.requestSha256 !== request.requestSha256) fail('request_mismatch');
   if (value.items.length > request.limit || value.items.some((item) => !object(item))) fail('invalid_response');
-  const total = value.totalResults === undefined ? expectedTotal : value.totalResults;
+  const total = value.totalResults === undefined || value.totalResults === null ? expectedTotal : value.totalResults;
   if (total !== null) integer(total, 'invalid_response');
   if (expectedTotal !== null && total !== expectedTotal) fail('totals_changed');
   if (total !== null && value.items.length > total) fail('total_bounds_exceeded');
   const receivedAt = time(value.receivedAt, 'invalid_response');
-  if (receivedAt > now) fail('response_time_out_of_bounds');
+  if (receivedAt > new Date().toISOString()) fail('response_time_out_of_bounds');
   const estimatedCredits = value.estimatedCredits ?? 0;
+  const reportedCredits = value.reportedCredits ?? null;
   if (typeof estimatedCredits !== 'number' || !Number.isFinite(estimatedCredits) || estimatedCredits < 0) fail('invalid_response');
-  return { items: value.items, totalResults: total, receivedAt, estimatedCredits };
+  if (reportedCredits !== null && (typeof reportedCredits !== 'number' || !Number.isFinite(reportedCredits) || reportedCredits < 0)) fail('invalid_response');
+  return { items: value.items, totalResults: total, receivedAt, estimatedCredits, reportedCredits };
 }
 
-async function buildRequest(ctx, b, page, mode) {
+function paidRequestLimit(b, fetched) {
+  if (b.maxItems === null) return b.limit;
+  const remaining = b.maxItems - fetched;
+  return remaining < b.limit ? 0 : b.limit;
+}
+
+async function buildRequest(ctx, b, page, mode, limit = b.limit) {
   try {
-    const request = await ctx.adapter.buildRequest({ profile: ctx.profile, mode, page, limit: b.limit, checkpoint: b.checkpoint, windowEnd: b.windowEnd, includeTotals: page === 0 });
-    return requestCheck(request, page, b.limit);
+    const request = await ctx.adapter.buildRequest({ profile: ctx.profile, mode, page, limit, checkpoint: b.checkpoint, windowEnd: b.windowEnd, includeTotals: page === 0 });
+    return requestCheck(request, page, limit);
   } catch (error) {
     if (error instanceof SyncFailure) throw error;
     fail('request_build_failed');
   }
 }
 
+function providerFailure(error, mode) {
+  if (error instanceof SyncFailure) return error;
+  const code = typeof error?.code === 'string' ? error.code : null;
+  if (code === 'authentication') return new SyncFailure('provider_authentication', 'authentication');
+  if (code === 'account_health') return new SyncFailure('provider_account_health', 'account_health');
+  if (code === 'terminal_validation') return new SyncFailure('provider_terminal_validation', 'terminal');
+  if (code === 'paid_authorization') return new SyncFailure('paid_authorization_required', 'terminal');
+  if (code === 'retryable_preview') return new SyncFailure('preview_retry_exhausted', 'retryable');
+  if (code === 'paid_ambiguous' || mode === 'paid') return new SyncFailure('paid_request_ambiguous', 'paid_ambiguous');
+  return new SyncFailure('preview_failed', 'retryable');
+}
+
 async function fetchPage(ctx, request, mode) {
   try {
     return await ctx.adapter.fetchPage({ request, mode });
-  } catch {
-    fail('paid_request_ambiguous', 'paid_ambiguous');
+  } catch (error) {
+    throw providerFailure(error, mode);
+  }
+}
+function validateCreditSnapshot(value, { allowAfterPeriod = false } = {}) {
+  if (!object(value)) fail('credit_usage_invalid');
+  const keys = Object.keys(value);
+  if (keys.length !== CREDIT_SNAPSHOT_KEYS.length || CREDIT_SNAPSHOT_KEYS.some((key) => !Object.hasOwn(value, key))) fail('credit_usage_invalid');
+  const observedAt = time(value.observedAt, 'credit_usage_invalid');
+  const periodStart = time(value.periodStart, 'credit_usage_invalid');
+  const periodEnd = time(value.periodEnd, 'credit_usage_invalid');
+  if (periodStart > periodEnd || periodStart > observedAt || (!allowAfterPeriod && observedAt > periodEnd)) fail('credit_usage_invalid');
+  const consumedCredits = integer(value.consumedCredits, 'credit_usage_invalid');
+  return { observedAt, periodStart, periodEnd, consumedCredits };
+}
+
+async function readCreditSnapshot(ctx, mode, period = null) {
+  try {
+    const request = period === null ? undefined : {
+      periodStart: period.periodStart,
+      periodEnd: period.periodEnd,
+    };
+    return validateCreditSnapshot(await ctx.adapter.readCreditUsage(request), {
+      allowAfterPeriod: period !== null,
+    });
+  } catch (error) {
+    if (error instanceof SyncFailure) throw error;
+    throw providerFailure(error, mode);
+  }
+}
+
+function creditAuditRow(database, runId) {
+  return one(database, 'SELECT * FROM source_credit_audits WHERE sync_run_id=?', [runId]);
+}
+
+async function startCreditAudit(database, run, ctx) {
+  if (!ctx.requiresCreditReconciliation) return null;
+  const existing = creditAuditRow(database, run.id);
+  if (existing === null || existing.source !== ctx.source) fail('credit_audit_missing', 'paid_ambiguous');
+  return existing;
+}
+
+function makeCreditAuditUnavailable(database, runId, reasonCode) {
+  tx(database, () => execute(database, `UPDATE source_credit_audits
+    SET state='unavailable',reason_code=?
+    WHERE sync_run_id=? AND state='pending'`, [reasonCode, runId]));
+}
+
+async function reconcileCreditAudit(database, run, ctx) {
+  if (!ctx.requiresCreditReconciliation) return undefined;
+  const audit = creditAuditRow(database, run.id);
+  if (audit === null || audit.source !== ctx.source) fail('credit_audit_missing', 'paid_ambiguous');
+  if (audit.state === 'reconciled') return integer(Number(audit.reported_credits), 'credit_audit_invalid');
+  if (audit.state !== 'pending') fail('credit_reconciliation_unavailable', 'paid_ambiguous');
+  const outsidePeriod = one(database, `SELECT 1 FROM source_sync_pages
+    WHERE sync_run_id=? AND (received_at < ? OR received_at > ?) LIMIT 1`, [
+    run.id,
+    audit.period_start,
+    audit.period_end,
+  ]);
+  if (outsidePeriod !== null) {
+    makeCreditAuditUnavailable(database, run.id, 'credit_period_spanned');
+    fail('credit_period_spanned', 'paid_ambiguous');
+  }
+  let snapshot;
+  try {
+    snapshot = await readCreditSnapshot(ctx, 'paid', {
+      periodStart: audit.period_start,
+      periodEnd: audit.period_end,
+    });
+  } catch (error) {
+    makeCreditAuditUnavailable(database, run.id, 'credit_usage_unavailable');
+    if (error instanceof SyncFailure && error.failureClass === 'database') throw error;
+    fail('credit_reconciliation_unavailable', 'paid_ambiguous');
+  }
+  if (snapshot.periodStart !== audit.period_start || snapshot.periodEnd !== audit.period_end) {
+    makeCreditAuditUnavailable(database, run.id, 'credit_period_changed');
+    fail('credit_period_changed', 'paid_ambiguous');
+  }
+  if (snapshot.observedAt < audit.observed_before_at) {
+    makeCreditAuditUnavailable(database, run.id, 'credit_observation_regressed');
+    fail('credit_observation_regressed', 'paid_ambiguous');
+  }
+  const before = integer(Number(audit.credits_before), 'credit_audit_invalid');
+  if (snapshot.consumedCredits < before) {
+    makeCreditAuditUnavailable(database, run.id, 'credit_usage_regressed');
+    fail('credit_usage_regressed', 'paid_ambiguous');
+  }
+  const reportedCredits = snapshot.consumedCredits - before;
+  tx(database, () => execute(database, `UPDATE source_credit_audits
+    SET observed_after_at=?,credits_after=?,reported_credits=?,state='reconciled',reason_code=NULL
+    WHERE sync_run_id=? AND state='pending'`, [
+    snapshot.observedAt,
+    snapshot.consumedCredits,
+    reportedCredits,
+    run.id,
+  ]));
+  return reportedCredits;
+}
+
+async function settleCreditAuditAfterAmbiguity(database, run, ctx) {
+  if (!ctx.requiresCreditReconciliation) return;
+  try {
+    const reportedCredits = await reconcileCreditAudit(database, run, ctx);
+    updateRun(database, run.id, { reported_credits: reportedCredits });
+  } catch (error) {
+    if (!(error instanceof SyncFailure) || error.failureClass !== 'paid_ambiguous') throw error;
   }
 }
 
@@ -375,30 +540,48 @@ function maxTime(a, b) {
   return a >= b ? a : b;
 }
 
-function createRun(database, ctx, b, root) {
-  const result = run(database, `INSERT INTO sync_runs (
+function createRun(database, ctx, b, root, creditBaseline = null) {
+  if (ctx.requiresCreditReconciliation) {
+    const active = one(database, "SELECT 1 FROM sync_runs WHERE source=? AND state IN ('fetching','ready_to_commit') LIMIT 1", [ctx.source]);
+    if (active !== null) fail('source_sync_active', 'retryable');
+    if (creditBaseline === null) fail('credit_audit_missing', 'database');
+  }
+  const result = execute(database, `INSERT INTO sync_runs (
     source,profile,mode,state,started_at,finished_at,window_end_at,checkpoint_before,
     checkpoint_after,artifact_dir,request_count,pages_fetched,jobs_seen,jobs_inserted,
     jobs_updated,jobs_unchanged,dedupe_groups_touched,queue_rows_inserted,estimated_credits,
     reported_credits,pending_page,pending_request_sha256,pending_started_at,next_page,
-    expected_total_results,failure_class,reason_code,result_sha256
-  ) VALUES (${new Array(28).fill('?').join(',')})`, [
+    expected_total_results,failure_class,reason_code,result_sha256,page_limit,max_pages,max_items
+  ) VALUES (${new Array(31).fill('?').join(',')})`, [
     ctx.source, ctx.profile, 'paid', 'fetching', ctx.now, null, b.windowEnd, b.checkpoint,
-    null, `source-sync/${ctx.source}`, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    null, null, null, 0, null, null, null, null,
+    null, `source-sync/${ctx.source}`, 0, 0, 0, 0, 0, 0, 0, 0, 0, null,
+    null, null, null, 0, null, null, null, null, b.limit, b.maxPages, b.maxItems,
   ]);
   const id = idOf(result);
   const row = runRow(database, id);
   if (!row) fail('database_write_failed', 'database');
   const rootDirectory = join(root, 'source-sync', ctx.source, String(row.id));
   updateRun(database, id, { artifact_dir: `source-sync/${ctx.source}/${row.id}` });
+  if (creditBaseline !== null) {
+    execute(database, `INSERT INTO source_credit_audits (
+      sync_run_id,source,period_start,period_end,observed_before_at,credits_before,
+      observed_after_at,credits_after,reported_credits,state,reason_code
+    ) VALUES (?,?,?,?,?,?,NULL,NULL,NULL,'pending',NULL)`, [
+      id,
+      ctx.source,
+      creditBaseline.periodStart,
+      creditBaseline.periodEnd,
+      creditBaseline.observedAt,
+      creditBaseline.consumedCredits,
+    ]);
+  }
   return { ...row, artifact_dir: `source-sync/${ctx.source}/${row.id}`, rootDirectory };
 }
 
 function updateRun(database, id, values) {
   const keys = Object.keys(values);
   if (keys.length === 0) return;
-  run(database, `UPDATE sync_runs SET ${keys.map((key) => `${q(key)}=?`).join(',')} WHERE id=?`, [...keys.map((key) => values[key]), id]);
+  execute(database, `UPDATE sync_runs SET ${keys.map((key) => `${q(key)}=?`).join(',')} WHERE id=?`, [...keys.map((key) => values[key]), id]);
 }
 
 function resultFrom(row, ctx, overrides = {}) {
@@ -424,7 +607,9 @@ function resultFrom(row, ctx, overrides = {}) {
     dedupeGroupsTouched: overrides.dedupeGroupsTouched ?? Number(row?.dedupe_groups_touched ?? 0),
     queueRowsInserted: overrides.queueRowsInserted ?? Number(row?.queue_rows_inserted ?? 0),
     estimatedCredits: overrides.estimatedCredits ?? Number(row?.estimated_credits ?? 0),
-    reportedCredits: overrides.reportedCredits ?? Number(row?.reported_credits ?? 0),
+    reportedCredits: overrides.reportedCredits !== undefined
+      ? overrides.reportedCredits
+      : row?.reported_credits === null || row?.reported_credits === undefined ? null : Number(row.reported_credits),
     failureClass: overrides.failureClass !== undefined
       ? resultFailureClass(overrides.failureClass, publicState)
       : resultFailureClass(row?.failure_class ?? null, publicState),
@@ -454,6 +639,7 @@ async function publishPage(root, source, id, page, request, response) {
     totalResults: response.totalResults,
     receivedAt: response.receivedAt,
     estimatedCredits: response.estimatedCredits,
+    reportedCredits: response.reportedCredits,
     items,
   };
   const text = canonicalJson(receipt);
@@ -475,8 +661,9 @@ async function loadPage(root, page) {
   }
   if (canonicalJson(receipt) !== text) fail('private_artifact_noncanonical', 'filesystem');
   if (!object(receipt) || receipt.schema !== RECEIPT_SCHEMA || !Array.isArray(receipt.items)) fail('private_artifact_invalid', 'filesystem');
-  if (receipt.requestSha256 !== page.request_sha256 || receipt.itemCount !== page.item_count || receipt.items.length !== page.item_count || receipt.totalResults !== page.total_results || receipt.receivedAt !== page.received_at || receipt.estimatedCredits !== page.estimated_credits) fail('private_artifact_metadata_mismatch', 'filesystem');
+  if (receipt.requestSha256 !== page.request_sha256 || receipt.itemCount !== page.item_count || receipt.items.length !== page.item_count || receipt.totalResults !== page.total_results || receipt.receivedAt !== page.received_at || receipt.estimatedCredits !== page.estimated_credits || receipt.reportedCredits !== page.reported_credits) fail('private_artifact_metadata_mismatch', 'filesystem');
   const indexes = new Set();
+  const items = [];
   for (const entry of receipt.items) {
     if (!object(entry) || !Number.isSafeInteger(entry.index) || indexes.has(entry.index)) fail('private_artifact_invalid', 'filesystem');
     indexes.add(entry.index);
@@ -500,26 +687,29 @@ async function loadPage(root, page) {
 async function normalizePages(root, database, run, ctx, b) {
   const result = [];
   const sourceIds = new Set();
-  const applicationUrls = new Set();
+  const fallbackApplicationUrls = new Set();
   for (const page of pages(database, run.id)) {
     for (const item of (await loadPage(root, page)).items) {
+      const rawPayloadPath = abs(root, item.rawPayloadPath);
       let normalized;
       try {
-        normalized = await ctx.adapter.normalizeJob(item.raw, { observedAt: ctx.now, rawPayloadPath: item.rawPayloadPath, rawPayloadSha256: item.rawPayloadSha256 });
+        normalized = await ctx.adapter.normalizeJob(item.raw, { observedAt: ctx.now, rawPayloadPath, rawPayloadSha256: item.rawPayloadSha256 });
       } catch {
         fail('normalization_failed');
       }
       normalized = check(validateNormalizedJob, normalized, 'normalization_failed');
-      if (normalized.source !== ctx.source || normalized.rawPayloadPath !== item.rawPayloadPath || normalized.rawPayloadSha256 !== item.rawPayloadSha256) fail('normalization_artifact_mismatch');
-      if (normalized.discoveredAt > b.windowEnd || normalized.discoveredAt > ctx.now || (b.checkpoint && normalized.discoveredAt < b.checkpoint)) fail('discovered_time_out_of_bounds');
+      if (normalized.source !== ctx.source || normalized.rawPayloadPath !== rawPayloadPath || normalized.rawPayloadSha256 !== item.rawPayloadSha256) fail('normalization_artifact_mismatch');
+      if ((b.checkpoint !== null && normalized.discoveredAt < b.checkpoint) || normalized.discoveredAt > b.windowEnd) {
+        fail('normalization_time_bounds');
+      }
       if (normalized.sourceJobId !== null) {
         const id = String(normalized.sourceJobId);
         if (sourceIds.has(id)) fail('duplicate_job_identity');
         sourceIds.add(id);
       }
-      if (normalized.canonicalApplicationUrl !== null) {
-        if (applicationUrls.has(normalized.canonicalApplicationUrl)) fail('duplicate_job_identity');
-        applicationUrls.add(normalized.canonicalApplicationUrl);
+      if (normalized.sourceJobId === null && normalized.canonicalApplicationUrl !== null) {
+        if (fallbackApplicationUrls.has(normalized.canonicalApplicationUrl)) fail('duplicate_job_identity');
+        fallbackApplicationUrls.add(normalized.canonicalApplicationUrl);
       }
       result.push(normalized);
     }
@@ -531,17 +721,18 @@ async function normalizePages(root, database, run, ctx, b) {
 function dedupeGroup(database, job, now) {
   const existing = one(database, 'SELECT * FROM dedupe_groups WHERE identity_kind=? AND identity_key=?', [job.dedupeIdentityKind, job.dedupeIdentityKey]);
   if (existing) {
-    run(database, 'UPDATE dedupe_groups SET review_required=?,updated_at=? WHERE id=?', [job.dedupeReviewRequired ? 1 : 0, now, existing.id]);
+    execute(database, 'UPDATE dedupe_groups SET review_required=?,updated_at=? WHERE id=?', [job.dedupeReviewRequired ? 1 : 0, now, existing.id]);
     return existing.id;
   }
-  return idOf(run(database, 'INSERT INTO dedupe_groups (identity_kind,identity_key,review_required,created_at,updated_at) VALUES (?,?,?,?,?)', [job.dedupeIdentityKind, job.dedupeIdentityKey, job.dedupeReviewRequired ? 1 : 0, now, now]));
+  return idOf(execute(database, 'INSERT INTO dedupe_groups (identity_kind,identity_key,review_required,created_at,updated_at) VALUES (?,?,?,?,?)', [job.dedupeIdentityKind, job.dedupeIdentityKey, job.dedupeReviewRequired ? 1 : 0, now, now]));
 }
 
 function existingJob(database, job) {
-  const source = job.sourceJobId === null ? null : one(database, 'SELECT * FROM jobs WHERE source=? AND source_job_id=?', [job.source, job.sourceJobId]);
-  const url = job.canonicalApplicationUrl === null ? null : one(database, 'SELECT * FROM jobs WHERE source=? AND canonical_application_url=?', [job.source, job.canonicalApplicationUrl]);
-  if (source && url && source.id !== url.id) fail('identity_conflict');
-  return source ?? url;
+  if (job.sourceJobId !== null) {
+    return one(database, 'SELECT * FROM jobs WHERE source=? AND source_job_id=?', [job.source, job.sourceJobId]);
+  }
+  if (job.canonicalApplicationUrl === null) return null;
+  return one(database, 'SELECT * FROM jobs WHERE source=? AND source_job_id IS NULL AND canonical_application_url=?', [job.source, job.canonicalApplicationUrl]);
 }
 
 function jobParams(job, groupId, now, existing) {
@@ -582,10 +773,10 @@ function upsertJob(database, job, groupId, now) {
     : job;
   const params = jobParams(storedJob, groupId, now, existing);
   if (existing) {
-    run(database, `UPDATE jobs SET source=?,source_job_id=?,canonical_listing_url=?,canonical_application_url=?,ats_kind=?,ats_identifier=?,title=?,company=?,location=?,workplace_type=?,employment_types_json=?,description=?,description_sha256=?,source_posted_at=?,source_updated_at=?,discovered_at=?,first_seen_at=?,last_seen_at=?,availability_state=?,freshness_state=?,eligibility_state=?,eligibility_reason_codes_json=?,priority=?,dedupe_group_id=?,raw_payload_path=?,raw_payload_sha256=? WHERE id=?`, [...params.slice(0, 26), existing.id]);
+    execute(database, `UPDATE jobs SET source=?,source_job_id=?,canonical_listing_url=?,canonical_application_url=?,ats_kind=?,ats_identifier=?,title=?,company=?,location=?,workplace_type=?,employment_types_json=?,description=?,description_sha256=?,source_posted_at=?,source_updated_at=?,discovered_at=?,first_seen_at=?,last_seen_at=?,availability_state=?,freshness_state=?,eligibility_state=?,eligibility_reason_codes_json=?,priority=?,dedupe_group_id=?,raw_payload_path=?,raw_payload_sha256=? WHERE id=?`, [...params.slice(0, 26), existing.id]);
     return { id: existing.id, inserted: false, unchanged: existing.raw_payload_sha256 === job.rawPayloadSha256 && existing.discovered_at === job.discoveredAt };
   }
-  const result = run(database, `INSERT INTO jobs (source,source_job_id,canonical_listing_url,canonical_application_url,ats_kind,ats_identifier,title,company,location,workplace_type,employment_types_json,description,description_sha256,source_posted_at,source_updated_at,discovered_at,first_seen_at,last_seen_at,availability_state,freshness_state,eligibility_state,eligibility_reason_codes_json,priority,dedupe_group_id,raw_payload_path,raw_payload_sha256) VALUES (${new Array(26).fill('?').join(',')})`, params.slice(0, 26));
+  const result = execute(database, `INSERT INTO jobs (source,source_job_id,canonical_listing_url,canonical_application_url,ats_kind,ats_identifier,title,company,location,workplace_type,employment_types_json,description,description_sha256,source_posted_at,source_updated_at,discovered_at,first_seen_at,last_seen_at,availability_state,freshness_state,eligibility_state,eligibility_reason_codes_json,priority,dedupe_group_id,raw_payload_path,raw_payload_sha256) VALUES (${new Array(26).fill('?').join(',')})`, params.slice(0, 26));
   return { id: idOf(result), inserted: true, unchanged: false };
 }
 function appRows(database, jobId, job = null) {
@@ -605,10 +796,10 @@ function appRows(database, jobId, job = null) {
   return rows;
 }
 
-function queuedGroup(database, groupId) {
+function boundGroup(database, groupId) {
   const names = appColumns(database);
-  if (!names?.has('status') || !names.has('dedupe_group_id')) return false;
-  return one(database, "SELECT 1 FROM application_jobs WHERE status='queued' AND dedupe_group_id=?", [groupId]) !== null;
+  if (!names?.has('dedupe_group_id')) return false;
+  return one(database, 'SELECT 1 FROM application_jobs WHERE dedupe_group_id=?', [groupId]) !== null;
 }
 
 function addQueue(database, job, jobId, groupId, now) {
@@ -621,6 +812,7 @@ function addQueue(database, job, jobId, groupId, now) {
       : 'backfill_only';
   const candidate = {
     status: 'queued',
+    dedupe_group_id: groupId,
     source_rowid: jobId,
     source_job_id: job.sourceJobId ?? job.canonicalApplicationUrl,
     source_table: 'jobs',
@@ -629,7 +821,7 @@ function addQueue(database, job, jobId, groupId, now) {
     eligibility_tier: tier,
     verification_reason: 'source_sync',
     source_posted_at: job.sourcePostedAt,
-    source_last_seen_at: job.discoveredAt,
+    source_last_seen_at: now,
     created_at: now,
     updated_at: now,
   };
@@ -644,54 +836,121 @@ function addQueue(database, job, jobId, groupId, now) {
     namesToUse.push(column.name);
     values.push(column.name === 'reason_code' ? 'source_sync' : column.type.includes('INT') ? 0 : column.name.includes('json') ? '[]' : '');
   }
-  run(database, `INSERT INTO application_jobs (${namesToUse.map(q).join(',')}) VALUES (${namesToUse.map(() => '?').join(',')})`, values);
+  execute(database, `INSERT INTO application_jobs (${namesToUse.map(q).join(',')}) VALUES (${namesToUse.map(() => '?').join(',')})`, values);
   return true;
 }
 
-function promote(database, job, jobId, groupId, now, groups) {
-  if (job.eligibilityState !== 'eligible') return false;
+function refreshQueuedApplication(database, rows, job, jobId, groupId, now) {
+  const byUrl = rows.find((row) => row.application_url === job.canonicalApplicationUrl) ?? null;
+  const byGroup = one(database, 'SELECT * FROM application_jobs WHERE dedupe_group_id=?', [groupId]);
+  const keeper = byGroup ?? byUrl ?? rows.find((row) => row.status === 'queued') ?? null;
+  for (const row of rows) {
+    if (row.status === 'queued' && keeper !== null && row.id !== keeper.id) {
+      execute(database, "UPDATE application_jobs SET status='skipped',status_reason='deduplicated',dedupe_group_id=NULL WHERE id=? AND status='queued'", [row.id]);
+    }
+  }
+  if (keeper === null || keeper.status !== 'queued' || !rows.some((row) => row.id === keeper.id)) return false;
+  execute(database, `UPDATE application_jobs SET
+    source_rowid=?,source_job_id=?,application_url=?,eligibility_tier='active_verified',
+    verification_reason='source_sync',source_posted_at=?,source_last_seen_at=?,dedupe_group_id=?
+    WHERE id=? AND status='queued'`, [
+    jobId,
+    job.sourceJobId ?? job.canonicalApplicationUrl,
+    job.canonicalApplicationUrl,
+    job.sourcePostedAt,
+    now,
+    groupId,
+    keeper.id,
+  ]);
+  return true;
+}
+
+function revokeQueuedApplication(database, job, jobId, groupId, now) {
   const current = appRows(database, jobId, job);
-  if (current.length > 0) {
-    if (current.some((row) => row.status === 'queued')) groups.add(groupId);
+  const status = job.availabilityState === 'closed' ? 'closed' : 'skipped';
+  const reason = job.availabilityState === 'closed' ? 'source_closed' : 'source_ineligible';
+  const tier = job.freshnessState === 'stale' ? 'unverified_stale' : 'backfill_only';
+  for (const row of current) {
+    if (row.status !== 'queued') continue;
+    execute(database, `UPDATE application_jobs SET
+      status=?,status_reason=?,source_rowid=?,source_job_id=?,application_url=?,
+      eligibility_tier=?,verification_reason='source_sync',source_posted_at=?,
+      source_last_seen_at=?,dedupe_group_id=?
+      WHERE id=? AND status='queued'`, [
+      status,
+      reason,
+      jobId,
+      job.sourceJobId ?? job.canonicalApplicationUrl,
+      job.canonicalApplicationUrl,
+      tier,
+      job.sourcePostedAt,
+      now,
+      groupId,
+      row.id,
+    ]);
+  }
+}
+
+function promote(database, job, jobId, groupId, now, groups) {
+  if (job.eligibilityState !== 'eligible') {
+    revokeQueuedApplication(database, job, jobId, groupId, now);
     return false;
   }
-  if (groups.has(groupId) || queuedGroup(database, groupId)) return false;
+  const current = appRows(database, jobId, job);
+  if (current.length > 0) {
+    if (refreshQueuedApplication(database, current, job, jobId, groupId, now)) groups.add(groupId);
+    return false;
+  }
+  if (groups.has(groupId) || boundGroup(database, groupId)) return false;
   const added = addQueue(database, job, jobId, groupId, now);
   if (added) groups.add(groupId);
   return added;
 }
 
 function observe(database, runIdValue, jobId, job, now) {
-  run(database, 'INSERT INTO source_observations (sync_run_id,job_id,source,source_job_id,observed_at,raw_payload_path,raw_payload_sha256,normalized_job_sha256) VALUES (?,?,?,?,?,?,?,?)', [runIdValue, jobId, job.source, job.sourceJobId, now, job.rawPayloadPath, job.rawPayloadSha256, canonicalDigest(job)]);
+  execute(database, 'INSERT INTO source_observations (sync_run_id,job_id,source,source_job_id,observed_at,raw_payload_path,raw_payload_sha256,normalized_job_sha256) VALUES (?,?,?,?,?,?,?,?)', [runIdValue, jobId, job.source, job.sourceJobId, now, job.rawPayloadPath, job.rawPayloadSha256, canonicalDigest(job)]);
 }
 
 function checkpoint(database, ctx, runIdValue, after, now) {
   const existing = checkpointRow(database, ctx.source, ctx.profile);
-  const durable = maxTime(existing?.checkpoint, after);
-  if (existing) run(database, 'UPDATE source_checkpoints SET checkpoint=?,last_sync_run_id=?,updated_at=?,revision=revision+1 WHERE source=? AND profile=?', [durable, runIdValue, now, ctx.source, ctx.profile]);
-  else run(database, 'INSERT INTO source_checkpoints (source,profile,checkpoint,last_sync_run_id,updated_at,revision) VALUES (?,?,?,?,?,?)', [ctx.source, ctx.profile, durable, runIdValue, now, 1]);
+  const durable = maxTime(
+    checkpointValue(ctx.adapter, existing?.checkpoint),
+    checkpointValue(ctx.adapter, after),
+  );
+  if (existing) execute(database, 'UPDATE source_checkpoints SET checkpoint=?,last_sync_run_id=?,updated_at=?,revision=revision+1 WHERE source=? AND profile=?', [durable, runIdValue, now, ctx.source, ctx.profile]);
+  else execute(database, 'INSERT INTO source_checkpoints (source,profile,checkpoint,last_sync_run_id,updated_at,revision) VALUES (?,?,?,?,?,?)', [ctx.source, ctx.profile, durable, runIdValue, now, 1]);
   return durable;
 }
 
 function pageAggregate(rows) {
   let jobs = 0;
-  let credits = 0;
+  let estimatedCredits = 0;
+  let reportedCredits = 0;
+  let reportedComplete = true;
   let total = null;
   for (const row of rows) {
     jobs += Number(row.item_count) || 0;
-    credits += Number(row.estimated_credits) || 0;
+    estimatedCredits += Number(row.estimated_credits) || 0;
+    if (row.reported_credits === null) reportedComplete = false;
+    else reportedCredits += Number(row.reported_credits) || 0;
     if (row.total_results !== null) {
       if (total !== null && total !== Number(row.total_results)) fail('totals_changed');
       total = Number(row.total_results);
     }
   }
-  return { jobs, credits, total };
+  return { jobs, estimatedCredits, reportedCredits: reportedComplete ? reportedCredits : null, total };
+}
+function pageContentDigest(items) {
+  return canonicalDigest(items.map((item) => item.rawPayloadSha256));
 }
 
 async function commit(database, root, run, ctx, b) {
   const jobs = await normalizePages(root, database, run, ctx, b);
   const pageRows = pages(database, run.id);
   const aggregate = pageAggregate(pageRows);
+  const reportedCredits = ctx.requiresCreditReconciliation
+    ? await reconcileCreditAudit(database, run, ctx)
+    : aggregate.reportedCredits;
   let after = checkpointRow(database, ctx.source, ctx.profile)?.checkpoint ?? b.checkpoint;
   for (const job of jobs) after = maxTime(after, job.discoveredAt);
   let inserted = 0;
@@ -733,8 +992,8 @@ async function commit(database, root, run, ctx, b) {
       jobsUnchanged: unchanged,
       dedupeGroupsTouched: groupsTouched,
       queueRowsInserted: queueInserted,
-      estimatedCredits: aggregate.credits,
-      reportedCredits: aggregate.credits,
+      estimatedCredits: aggregate.estimatedCredits,
+      reportedCredits,
       failureClass: null,
       reasonCode: null,
     }, 'invalid_result');
@@ -749,8 +1008,8 @@ async function commit(database, root, run, ctx, b) {
       jobs_unchanged: unchanged,
       dedupe_groups_touched: groupsTouched,
       queue_rows_inserted: queueInserted,
-      estimated_credits: aggregate.credits,
-      reported_credits: aggregate.credits,
+      estimated_credits: aggregate.estimatedCredits,
+      reported_credits: reportedCredits,
       pending_page: null,
       pending_request_sha256: null,
       pending_started_at: null,
@@ -762,7 +1021,36 @@ async function commit(database, root, run, ctx, b) {
   return resultFrom(runRow(database, run.id), ctx, { state: 'succeeded', checkpointAfter: after });
 }
 
-function failRun(database, run, ctx, failureClass, reasonCode, state = 'failed') {
+async function settleCreditAuditOnFailure(database, run, ctx) {
+  if (!ctx.requiresCreditReconciliation) return null;
+  const audit = creditAuditRow(database, run.id);
+  const current = runRow(database, run.id);
+  const hadPaidRequest = Number(current.request_count) > 0;
+  if (audit === null) return null;
+  if (audit.state === 'reconciled') return 'reconciled';
+  if (audit.state === 'unavailable') return hadPaidRequest ? 'unavailable' : null;
+  if (hadPaidRequest) {
+    try {
+      const reportedCredits = await reconcileCreditAudit(database, current, ctx);
+      updateRun(database, run.id, { reported_credits: reportedCredits });
+      return 'reconciled';
+    } catch (error) {
+      if (error instanceof SyncFailure && error.failureClass === 'database') throw error;
+    }
+  }
+  if (creditAuditRow(database, run.id)?.state === 'pending') {
+    makeCreditAuditUnavailable(database, run.id, 'run_failed_unreconciled');
+  }
+  return hadPaidRequest ? 'unavailable' : null;
+}
+
+async function failRun(database, run, ctx, failureClass, reasonCode, state = 'failed') {
+  const creditState = await settleCreditAuditOnFailure(database, run, ctx);
+  if (state !== 'paid_ambiguous' && creditState === 'unavailable') {
+    state = 'paid_ambiguous';
+    failureClass = 'paid_ambiguous';
+    reasonCode = 'credit_reconciliation_unavailable';
+  }
   const storedClass = resultFailureClass(failureClass, state === 'paid_ambiguous' ? 'paid_ambiguous' : 'failed');
   tx(database, () => updateRun(database, run.id, {
     state,
@@ -785,21 +1073,58 @@ function hook(options, point, value) {
 
 async function continueRun(database, root, initialRun, ctx, b, options) {
   let run = initialRun;
+  try {
+    await startCreditAudit(database, run, ctx);
+  } catch (error) {
+    if (error instanceof SyncFailure) {
+      const state = error.failureClass === 'paid_ambiguous' ? 'paid_ambiguous' : 'failed';
+      return failRun(database, run, ctx, error.failureClass, error.reasonCode, state);
+    }
+    throw error;
+  }
   let pageRows = pages(database, run.id);
   const first = pageAggregate(pageRows);
   let fetched = first.jobs;
   let expectedTotal = first.total;
+  let reportedCredits = first.reportedCredits;
   let next = Number(run.next_page) || pageRows.length;
-  if (run.pending_page !== null) return failRun(database, run, ctx, 'paid_ambiguous', 'paid_request_ambiguous', 'paid_ambiguous');
-  for (;;) {
-    if (next >= b.maxPages) return failRun(database, run, ctx, 'bounds', 'page_bounds_exceeded');
+  const seenPageContent = new Set();
+  try {
+    for (const page of pageRows) seenPageContent.add(pageContentDigest((await loadPage(root, page)).items));
+  } catch (error) {
+    if (error instanceof SyncFailure) return failRun(database, run, ctx, error.failureClass, error.reasonCode);
+    throw error;
+  }
+  if (run.pending_page !== null) {
+    await settleCreditAuditAfterAmbiguity(database, run, ctx);
+    return failRun(database, run, ctx, 'paid_ambiguous', 'paid_request_ambiguous', 'paid_ambiguous');
+  }
+  if (b.maxItems !== null && fetched > b.maxItems) return failRun(database, run, ctx, 'terminal', 'item_bounds_exceeded');
+  let completeFromReceipts = false;
+  const lastReceipt = pageRows.at(-1) ?? null;
+  if (lastReceipt !== null) {
+    const lastItemCount = Number(lastReceipt.item_count);
+    const lastRequestLimit = paidRequestLimit(b, fetched - lastItemCount);
+    if (lastRequestLimit === 0) return failRun(database, run, ctx, 'terminal', 'item_bounds_exceeded');
+    if (expectedTotal !== null) {
+      if (fetched > expectedTotal) return failRun(database, run, ctx, 'terminal', 'pagination_total_mismatch');
+      if (fetched === expectedTotal) completeFromReceipts = true;
+      else if (lastItemCount < lastRequestLimit) return failRun(database, run, ctx, 'terminal', 'pagination_total_mismatch');
+    } else if (lastItemCount < lastRequestLimit) {
+      completeFromReceipts = true;
+    }
+  }
+  while (!completeFromReceipts) {
+    if (next >= b.maxPages) return failRun(database, run, ctx, 'terminal', 'page_bounds_exceeded');
     if (pageRows.some((page) => Number(page.page_number) === next)) {
       next += 1;
       continue;
     }
+    const limit = paidRequestLimit(b, fetched);
+    if (limit === 0) return failRun(database, run, ctx, 'terminal', 'item_bounds_exceeded');
     let request;
     try {
-      request = await buildRequest(ctx, b, next, 'paid');
+      request = await buildRequest(ctx, b, next, 'paid', limit);
     } catch (error) {
       if (error instanceof SyncFailure) return failRun(database, run, ctx, error.failureClass, error.reasonCode);
       throw error;
@@ -817,28 +1142,41 @@ async function continueRun(database, root, initialRun, ctx, b, options) {
     try {
       raw = await fetchPage(ctx, request, 'paid');
     } catch (error) {
-      if (error instanceof SyncFailure) return failRun(database, run, ctx, error.failureClass, error.reasonCode, 'paid_ambiguous');
+      if (error instanceof SyncFailure) {
+        if (error.failureClass === 'paid_ambiguous') await settleCreditAuditAfterAmbiguity(database, run, ctx);
+        const state = error.failureClass === 'paid_ambiguous' ? 'paid_ambiguous' : 'failed';
+        return failRun(database, run, ctx, error.failureClass, error.reasonCode, state);
+      }
       throw error;
     }
     let response;
     try {
       response = responseCheck(raw, request, ctx.now, expectedTotal);
     } catch (error) {
-      if (error instanceof SyncFailure) return failRun(database, run, ctx, error.failureClass, error.reasonCode);
+      if (error instanceof SyncFailure) {
+        await settleCreditAuditAfterAmbiguity(database, run, ctx);
+        return failRun(database, run, ctx, 'paid_ambiguous', 'paid_response_invalid', 'paid_ambiguous');
+      }
       throw error;
     }
     if (expectedTotal === null) expectedTotal = response.totalResults;
-    if (b.maxItems !== null && fetched + response.items.length > b.maxItems) return failRun(database, run, ctx, 'bounds', 'item_bounds_exceeded');
+    const exceedsItemBound = b.maxItems !== null && fetched + response.items.length > b.maxItems;
     let artifact;
     try {
       artifact = await publishPage(root, ctx.source, run.id, next, request, response);
     } catch (error) {
-      if (error instanceof SyncFailure) return failRun(database, run, ctx, error.failureClass, error.reasonCode, 'paid_ambiguous');
+      if (error instanceof SyncFailure) {
+        await settleCreditAuditAfterAmbiguity(database, run, ctx);
+        return failRun(database, run, ctx, error.failureClass, error.reasonCode, 'paid_ambiguous');
+      }
       throw error;
     }
     hook(options, 'afterReceipt', { runId: run.id, page: next, request, artifact });
+    reportedCredits = reportedCredits === null || response.reportedCredits === null
+      ? null
+      : reportedCredits + response.reportedCredits;
     tx(database, () => {
-      run(database, 'INSERT INTO source_sync_pages (sync_run_id,page_number,request_sha256,response_path,response_sha256,received_at,item_count,total_results,estimated_credits) VALUES (?,?,?,?,?,?,?,?,?)', [run.id, next, request.requestSha256, artifact.responsePath, artifact.responseSha, response.receivedAt, response.items.length, response.totalResults, response.estimatedCredits]);
+      execute(database, 'INSERT INTO source_sync_pages (sync_run_id,page_number,request_sha256,response_path,response_sha256,received_at,item_count,total_results,estimated_credits,reported_credits) VALUES (?,?,?,?,?,?,?,?,?,?)', [run.id, next, request.requestSha256, artifact.responsePath, artifact.responseSha, response.receivedAt, response.items.length, response.totalResults, response.estimatedCredits, response.reportedCredits]);
       updateRun(database, run.id, {
         pending_page: null,
         pending_request_sha256: null,
@@ -847,14 +1185,20 @@ async function continueRun(database, root, initialRun, ctx, b, options) {
         pages_fetched: Number(run.pages_fetched) + 1,
         jobs_seen: Number(run.jobs_seen) + response.items.length,
         estimated_credits: Number(run.estimated_credits) + response.estimatedCredits,
-        reported_credits: Number(run.reported_credits) + response.estimatedCredits,
+        reported_credits: reportedCredits,
         expected_total_results: expectedTotal,
       });
     });
     hook(options, 'afterReceiptCommit', { runId: run.id, page: next, request, artifact });
+    const contentDigest = pageContentDigest(artifact.items);
+    if (response.items.length > 0 && seenPageContent.has(contentDigest)) return failRun(database, run, ctx, 'terminal', 'pagination_repeated_page');
+    seenPageContent.add(contentDigest);
+    if (exceedsItemBound) return failRun(database, run, ctx, 'terminal', 'item_bounds_exceeded');
     pageRows = pages(database, run.id);
     fetched += response.items.length;
-    if (response.items.length === 0 || (expectedTotal !== null && fetched >= expectedTotal) || response.items.length < b.limit) break;
+    if (expectedTotal !== null && fetched > expectedTotal) return failRun(database, run, ctx, 'terminal', 'pagination_total_mismatch');
+    if (response.items.length < request.limit && expectedTotal !== null && fetched < expectedTotal) return failRun(database, run, ctx, 'terminal', 'pagination_total_mismatch');
+    if (response.items.length === 0 || (expectedTotal !== null && fetched === expectedTotal) || response.items.length < request.limit) break;
     next += 1;
     run = runRow(database, run.id);
   }
@@ -864,19 +1208,24 @@ async function continueRun(database, root, initialRun, ctx, b, options) {
     return await commit(database, root, runRow(database, run.id), ctx, b);
   } catch (error) {
     if (error instanceof CrashInjection) throw error;
-    if (error instanceof SyncFailure) return resultFrom(runRow(database, run.id), ctx, { state: 'failed', failureClass: error.failureClass, reasonCode: error.reasonCode });
-    return resultFrom(runRow(database, run.id), ctx, { state: 'failed', failureClass: 'database', reasonCode: 'commit_failed' });
+    if (error instanceof SyncFailure) {
+      const state = error.failureClass === 'paid_ambiguous' ? 'paid_ambiguous' : 'failed';
+      return failRun(database, runRow(database, run.id), ctx, error.failureClass, error.reasonCode, state);
+    }
+    throw error;
   }
 }
 
 export async function previewSource(options = {}) {
   const ctx = context(options, false);
-  const b = bounds(options);
-  const request = await buildRequest(ctx, b, 0, 'preview');
+  const b = bounds(options, ctx.adapter);
+  const request = await buildRequest(ctx, { ...b, limit: 1, maxPages: 1 }, 0, 'preview');
   let raw;
+  let previewFailure = null;
   try {
     raw = await ctx.adapter.fetchPage({ request, mode: 'preview' });
-  } catch {
+  } catch (error) {
+    previewFailure = providerFailure(error, 'preview');
     return check(validateSourceSyncResult, {
       schema: RESULT_SCHEMA,
       syncRunId: null,
@@ -898,8 +1247,8 @@ export async function previewSource(options = {}) {
       queueRowsInserted: 0,
       estimatedCredits: 0,
       reportedCredits: 0,
-      failureClass: 'retryable',
-      reasonCode: 'preview_failed',
+      failureClass: resultFailureClass(previewFailure.failureClass, 'failed'),
+      reasonCode: previewFailure.reasonCode,
     }, 'invalid_result');
   }
   let response;
@@ -952,7 +1301,7 @@ export async function previewSource(options = {}) {
     dedupeGroupsTouched: 0,
     queueRowsInserted: 0,
     estimatedCredits: response.estimatedCredits,
-    reportedCredits: response.estimatedCredits,
+    reportedCredits: response.reportedCredits,
     failureClass: null,
     reasonCode: null,
   }, 'invalid_result');
@@ -960,16 +1309,51 @@ export async function previewSource(options = {}) {
 
 export async function syncSource(options = {}) {
   const ctx = context(options, true);
-  const b = bounds(options);
+  const b = bounds(options, ctx.adapter);
   const root = await ensurePrivateRoot(options.privateRoot ?? options.artifactRoot);
   const opened = openDatabase(options);
   try {
     assertMigrated(opened.database);
     const durableRaw = checkpointRow(opened.database, ctx.source, ctx.profile)?.checkpoint ?? b.checkpoint;
-    const durable = durableRaw === null ? null : time(String(durableRaw), 'invalid_checkpoint');
-    if (options.checkpoint !== undefined && options.checkpoint !== null && durable !== time(String(options.checkpoint), 'invalid_checkpoint')) fail('checkpoint_mismatch');
-    const effective = { ...b, checkpoint: durable };
-    const run = tx(opened.database, () => createRun(opened.database, ctx, effective, root));
+    const durable = checkpointValue(ctx.adapter, durableRaw);
+    if (options.checkpoint !== undefined && options.checkpoint !== null && durable !== checkpointValue(ctx.adapter, options.checkpoint)) fail('checkpoint_mismatch');
+    const effective = {
+      ...b,
+      limit: b.maxItems === null ? b.limit : Math.min(b.limit, b.maxItems),
+      checkpoint: durable,
+    };
+    let run;
+    if (ctx.requiresCreditReconciliation) {
+      opened.database.exec('BEGIN IMMEDIATE;');
+      try {
+        const active = one(opened.database, "SELECT 1 FROM sync_runs WHERE source=? AND state IN ('fetching','ready_to_commit') LIMIT 1", [ctx.source]);
+        if (active !== null) fail('source_sync_active', 'retryable');
+        let creditBaseline;
+        try {
+          creditBaseline = await readCreditSnapshot(ctx, 'preview');
+        } catch (error) {
+          opened.database.exec('ROLLBACK;');
+          if (error instanceof SyncFailure) {
+            const failureClass = resultFailureClass(error.failureClass, 'failed');
+            return resultFrom(null, ctx, {
+              mode: 'paid',
+              state: 'failed',
+              finishedAt: ctx.now,
+              failureClass,
+              reasonCode: error.reasonCode,
+            });
+          }
+          throw error;
+        }
+        run = createRun(opened.database, ctx, effective, root, creditBaseline);
+        opened.database.exec('COMMIT;');
+      } catch (error) {
+        try { opened.database.exec('ROLLBACK;'); } catch {}
+        throw error;
+      }
+    } else {
+      run = tx(opened.database, () => createRun(opened.database, ctx, effective, root));
+    }
     return await continueRun(opened.database, root, run, ctx, effective, options);
   } finally {
     if (opened.owned) {
@@ -995,7 +1379,7 @@ function selectRun(database, options, ctx) {
 
 export async function recoverSourceSync(options = {}) {
   const ctx = context(options, true);
-  const supplied = bounds(options);
+  const supplied = bounds(options, ctx.adapter);
   const root = await ensurePrivateRoot(options.privateRoot ?? options.artifactRoot);
   const opened = openDatabase(options);
   try {
@@ -1005,19 +1389,31 @@ export async function recoverSourceSync(options = {}) {
     if (TERMINAL.has(selected.state)) return resultFrom(selected, ctx);
     const storedCheckpoint = selected.checkpoint_before ?? supplied.checkpoint;
     const storedWindowEnd = selected.window_end_at ?? supplied.windowEnd;
+    if (selected.page_limit === null || selected.max_pages === null) fail('run_bounds_missing', 'database');
     const effective = {
       ...supplied,
-      checkpoint: storedCheckpoint === null ? null : time(String(storedCheckpoint), 'invalid_checkpoint'),
+      limit: integer(Number(selected.page_limit), 'stored_page_limit_invalid', 1, 100),
+      maxPages: integer(Number(selected.max_pages), 'stored_max_pages_invalid', 1, 1000),
+      maxItems: selected.max_items === null
+        ? null
+        : integer(Number(selected.max_items), 'stored_max_items_invalid', 1, 1_000_000),
+      checkpoint: checkpointValue(ctx.adapter, storedCheckpoint),
       windowEnd: time(String(storedWindowEnd), 'invalid_window_end'),
     };
-    if (selected.pending_page !== null) return failRun(opened.database, selected, ctx, 'paid_ambiguous', 'paid_request_ambiguous', 'paid_ambiguous');
+    if (selected.pending_page !== null) {
+      await settleCreditAuditAfterAmbiguity(opened.database, selected, ctx);
+      return await failRun(opened.database, selected, ctx, 'paid_ambiguous', 'paid_request_ambiguous', 'paid_ambiguous');
+    }
     if (selected.state === 'ready_to_commit') {
       try {
         return await commit(opened.database, root, selected, ctx, effective);
       } catch (error) {
         if (error instanceof CrashInjection) throw error;
-        if (error instanceof SyncFailure) return resultFrom(runRow(opened.database, selected.id), ctx, { state: 'failed', failureClass: error.failureClass, reasonCode: error.reasonCode });
-        return resultFrom(runRow(opened.database, selected.id), ctx, { state: 'failed', failureClass: 'database', reasonCode: 'commit_failed' });
+        if (error instanceof SyncFailure) {
+          const state = error.failureClass === 'paid_ambiguous' ? 'paid_ambiguous' : 'failed';
+          return await failRun(opened.database, runRow(opened.database, selected.id), ctx, error.failureClass, error.reasonCode, state);
+        }
+        throw error;
       }
     }
     return await continueRun(opened.database, root, selected, ctx, effective, options);

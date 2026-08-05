@@ -384,18 +384,19 @@ test('preserves a file field stable ID across uploaded-container replacement', (
 
   initialContainer._connected = false;
   for (const child of initialContainer.children) child._connected = false;
-  const uploadedContainer = document.createElement('div', document, '', { class: 'file-upload' });
-  const uploadedLabel = document.createElement('label', document, 'Resume', { for: 'resume' });
-  const uploadedInput = document.createElement('input', document, '', { type: 'file', id: 'resume' });
-  uploadedInput.files = [{ name: 'resume.pdf' }];
+  const uploadedContainer = document.createElement('div', document, '', {
+    class: 'file-upload',
+    'aria-labelledby': 'upload-label-resume',
+  });
+  const uploadedLabel = document.createElement('label', document, 'Resume', { id: 'upload-label-resume' });
   const filename = document.createElement('span', document, 'resume.pdf', { class: 'file-upload__filename' });
-  uploadedContainer.append(uploadedLabel, uploadedInput, filename);
+  uploadedContainer.append(uploadedLabel, filename);
   form.append(uploadedContainer);
   markConnected(uploadedContainer);
 
   const second = observe(document, first.observation_id);
   validateObservation(second);
-  const secondFile = second.controls.find((control) => control.locator.value === 'resume');
+  const secondFile = second.controls.find((control) => control.type === 'file' && control.file.count === 1);
   assert.ok(secondFile);
   assert.equal(second.controls.filter((control) => control.type === 'file').length, 1);
   assert.equal(secondFile.file.names.length, 1);
@@ -405,4 +406,72 @@ test('preserves a file field stable ID across uploaded-container replacement', (
 
   const ledger = mergeObservation(createLedger(first), second);
   assert.equal(ledger.fields.filter((field) => field.field_id === firstFile.stable_id).length, 1);
+});
+
+ 
+function frameObservation({ src, title = '', frameId = '', captcha = false, response = null }) {
+  const document = new Document();
+  const html = document.createElement('html');
+  html._connected = true;
+  const body = document.createElement('body');
+  document.documentElement = html;
+  html.append(body);
+  if (captcha) body.append(document.createElement('div', document, 'Complete the CAPTCHA', { id: 'captcha-widget' }));
+  if (response !== null) {
+    const responseInput = document.createElement('input', document, '', { type: 'hidden', name: 'g-recaptcha-response' });
+    responseInput.value = response;
+    body.append(responseInput);
+  }
+  const frame = document.createElement('iframe', document, '', { src, title, id: frameId });
+  Object.defineProperty(frame, 'contentWindow', {
+    get() { throw new Error('cross-origin'); },
+  });
+  body.append(frame);
+  const markConnected = (element) => {
+    element._connected = true;
+    for (const child of element.children) markConnected(child);
+  };
+  markConnected(html);
+  return observe(document);
+}
+
+test('inventories inaccessible passive media frames without blocking', () => {
+  const observation = frameObservation({ src: 'https://www.youtube.com/embed/abc123', title: 'Video' });
+  const mediaFrame = observation.frames.find((frame) => frame.url.includes('youtube.com'));
+  assert.ok(mediaFrame);
+  assert.equal(mediaFrame.accessible, false);
+  assert.equal(observation.blockers.some((blocker) => blocker.frame_id === mediaFrame.id), false);
+});
+
+test('blocks inaccessible relevant application frames', () => {
+  const observation = frameObservation({
+    src: 'https://accounts.example.test/login',
+    title: 'Sign in',
+    frameId: 'auth-frame',
+  });
+  const frame = observation.frames.find((candidate) => candidate.id !== 'top');
+  assert.ok(frame);
+  assert.equal(observation.blockers.some((blocker) => blocker.code === 'inaccessible_frame' && blocker.frame_id === frame.id), true);
+  assert.equal(observation.blockers.some((blocker) => blocker.code === 'authentication'), true);
+});
+
+test('unsolved CAPTCHA remains a transient blocker', () => {
+  const observation = frameObservation({
+    src: 'https://captcha.example.test/widget',
+    title: 'CAPTCHA',
+    captcha: true,
+  });
+  assert.equal(observation.blockers.some((blocker) => blocker.code === 'captcha'), true);
+});
+
+test('top-document CAPTCHA response clears blocker without exposing token bytes', () => {
+  const token = 'secret-captcha-token-should-never-appear';
+  const observation = frameObservation({
+    src: 'https://captcha.example.test/widget',
+    title: 'CAPTCHA',
+    captcha: true,
+    response: token,
+  });
+  assert.equal(observation.blockers.some((blocker) => blocker.code === 'captcha'), false);
+  assert.equal(JSON.stringify(observation).includes(token), false);
 });

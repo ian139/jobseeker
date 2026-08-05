@@ -30,7 +30,7 @@
   ],
   "properties": {
     "schema": { "const": "source-sync-result-v1" },
-    "syncRunId": { "type": ["string", "null"], "maxLength": 128 },
+    "syncRunId": { "type": ["integer", "null"], "minimum": 1, "maximum": 9007199254740991 },
     "source": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,63}$" },
     "profile": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$" },
     "mode": { "enum": ["preview", "paid"] },
@@ -50,6 +50,40 @@
     "estimatedCredits": { "type": ["number", "null"], "minimum": 0, "maximum": 2147483647 },
     "reportedCredits": { "type": ["number", "null"], "minimum": 0, "maximum": 2147483647 },
     "failureClass": { "enum": ["retryable", "terminal", "paid_ambiguous", "authentication", "account_health", null] },
-    "reasonCode": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9_]{0,63}$", "maxLength": 256 }
-  }
+    "reasonCode": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9_]{0,63}$", "maxLength": 64 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "mode": { "const": "preview" } }, "required": ["mode"] },
+      "then": { "properties": { "syncRunId": { "type": "null" } } }
+    },
+    {
+      "if": { "properties": { "state": { "const": "previewed" } }, "required": ["state"] },
+      "then": { "properties": { "mode": { "const": "preview" } } }
+    },
+    {
+      "if": { "properties": { "state": { "enum": ["succeeded", "paid_ambiguous"] } }, "required": ["state"] },
+      "then": {
+        "properties": {
+          "mode": { "const": "paid" },
+          "syncRunId": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "enum": ["failed", "paid_ambiguous"] } }, "required": ["state"] },
+      "then": {
+        "properties": {
+          "failureClass": { "enum": ["retryable", "terminal", "paid_ambiguous", "authentication", "account_health"] },
+          "reasonCode": { "type": "string" }
+        }
+      },
+      "else": {
+        "properties": {
+          "failureClass": { "type": "null" },
+          "reasonCode": { "type": "null" }
+        }
+      }
+    }
+  ]
 }

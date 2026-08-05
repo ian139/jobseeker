@@ -9,6 +9,7 @@ import {
 
 const WINDOW_END = '2026-08-03T23:59:59.000Z';
 const OBSERVED_AT = '2026-08-03T12:00:00.000Z';
+const CREDIT_PERIOD = '2026-08-03T00:00:00Z';
 const RAW_PATH = '/tmp/jobs-new/theirstack/abc.json';
 const RAW_SHA = 'a'.repeat(64);
 
@@ -37,10 +38,10 @@ function item(id = 1, overrides = {}) {
   };
 }
 
-function response(payload, status = 200) {
+function response(payload, status = 200, headers = {}) {
   return {
     status,
-    headers: { get: () => null },
+    headers: { get: (name) => headers[String(name).toLowerCase()] ?? null },
     async json() {
       return payload;
     },
@@ -82,6 +83,7 @@ test('profiles preserve current documented search semantics and immutable reques
   assert.equal(rebuilt.body.job_title_or.length, request.body.job_title_or.length);
   assert.equal('company_name_or' in rebuilt.body, false);
   assert.equal('company_domain_or' in rebuilt.body, false);
+  assert.equal(adapter.normalizeCheckpoint('2026-08-03T10:00:00+00:00'), '2026-08-03T10:00:00.000Z');
 });
 
 test('construction query filters are allowlisted, canonical, and preview-safe', () => {
@@ -111,12 +113,31 @@ test('preview is exactly blur plus total plus limit one and costs zero', async (
   assert.equal(request.body.blur_company_data, true);
   assert.equal(request.body.include_total_results, true);
   const result = await adapter.fetchPage({ request, mode: 'preview' });
-  assert.equal(result.estimatedCredits, 0);
+  assert.equal(result.estimatedCredits, 1);
+  assert.equal(result.reportedCredits, 0);
   assert.equal(result.totalResults, 1);
   assert.equal(calls.length, 1);
   assert.equal(calls[0].init.method, 'POST');
   assert.equal(calls[0].init.headers.authorization, 'Bearer test-key');
   assert.deepEqual(JSON.parse(calls[0].init.body), request.body);
+});
+
+test('preview accepts structurally bounded blurred items without treating them as paid jobs', async () => {
+  const blurred = { id: 1, company_object: null, has_blurred_data: true };
+  const { adapter } = adapterWith([response({ data: [blurred], metadata: { total_results: 1 } })]);
+  const request = adapter.buildRequest({ mode: 'preview' });
+  const result = await adapter.fetchPage({ request, mode: 'preview' });
+  assert.equal(result.items.length, 1);
+
+  const { adapter: paidAdapter } = adapterWith(
+    [response({ data: [blurred], metadata: { total_results: 1 } })],
+    { paidAuthorization: true },
+  );
+  const paidRequest = paidAdapter.buildRequest({ mode: 'paid', page: 0, limit: 1 });
+  await assert.rejects(
+    paidAdapter.fetchPage({ request: paidRequest, mode: 'paid' }),
+    (error) => error.code === 'paid_ambiguous',
+  );
 });
 
 test('paid fetch requires explicit authorization and never replays an ambiguous response', async () => {
@@ -151,6 +172,17 @@ test('preview retries bounded 429 and server failures only', async () => {
   assert.equal(calls.length, 3);
 });
 
+test('preview retries honor Retry-After before the configured fallback', { timeout: 500 }, async () => {
+  const { adapter, calls } = adapterWith([
+    response({ error: { description: 'private' } }, 429, { 'retry-after': '0' }),
+    response({ data: [item()], metadata: { total_results: 1 } }),
+  ], { retryDelayMs: 2_000 });
+  const request = adapter.buildRequest({ mode: 'preview' });
+  const result = await adapter.fetchPage({ request, mode: 'preview' });
+  assert.equal(result.items.length, 1);
+  assert.equal(calls.length, 2);
+});
+
 test('authentication, account health, terminal, and paid ambiguity errors expose stable codes only', async () => {
   for (const [status, code] of [[401, 'authentication'], [402, 'account_health'], [422, 'terminal_validation']]) {
     const { adapter } = adapterWith([response({ secret: 'do-not-leak' }, status)], { paidAuthorization: true });
@@ -168,7 +200,18 @@ test('authentication, account health, terminal, and paid ambiguity errors expose
   );
 });
 
-test('later pages disable totals, retain checkpoint and fixed window, and reject malformed envelopes', async () => {
+test('credit-truncated success responses fail as account health errors', async () => {
+  const { adapter } = adapterWith([
+    response({ data: [item()], metadata: { total_results: 3, truncated_results: 2 } }),
+  ], { paidAuthorization: true });
+  const request = adapter.buildRequest({ mode: 'paid', page: 0, limit: 3 });
+  await assert.rejects(
+    adapter.fetchPage({ request, mode: 'paid' }),
+    (error) => error.code === 'account_health',
+  );
+});
+
+test('later pages disable totals, retain checkpoint, and classify malformed paid responses as ambiguous', async () => {
   const { adapter } = adapterWith([
     response({ data: [item(1)], metadata: { total_results: 2, page: 0 } }),
     response({ data: [item(2)], metadata: { total_results: 2, page: 1 } }),
@@ -191,7 +234,7 @@ test('later pages disable totals, retain checkpoint and fixed window, and reject
     const badRequest = badAdapter.buildRequest({ mode: 'paid', page: 0, limit: 1 });
     await assert.rejects(
       badAdapter.fetchPage({ request: badRequest, mode: 'paid' }),
-      (error) => error.code === 'terminal_validation',
+      (error) => error.code === 'paid_ambiguous',
     );
   }
 });
@@ -233,12 +276,26 @@ test('normalization uses only official fields, URL precedence, and raw digest me
   assert.equal(normalized.canonicalListingUrl, 'https://jobs.example.test/listing/42');
   assert.equal(normalized.canonicalApplicationUrl, 'https://boards.greenhouse.io/acme/jobs/42');
   assert.equal(normalized.workplaceType, 'hybrid');
-  assert.deepEqual(normalized.employmentTypes, ['full_time', 'contract']);
+  assert.deepEqual(normalized.employmentTypes, ['contract', 'full_time']);
   assert.equal(normalized.descriptionSha256, createHash('sha256').update('Official description').digest('hex'));
   assert.equal(normalized.discoveredAt, '2026-08-03T10:00:00.000Z');
   assert.equal(normalized.rawPayloadPath, RAW_PATH);
   assert.equal(normalized.rawPayloadSha256, RAW_SHA);
   assert.ok(Object.isFrozen(normalized));
+});
+
+test('future provider timestamps are unverified rather than fresh', () => {
+  const { adapter } = adapterWith([]);
+  const normalized = adapter.normalizeJob(item(43, {
+    date_reposted: '2026-08-05',
+  }), {
+    observedAt: OBSERVED_AT,
+    rawPayloadPath: RAW_PATH,
+    rawPayloadSha256: RAW_SHA,
+  });
+  assert.equal(normalized.freshnessState, 'unverified');
+  assert.equal(normalized.eligibilityState, 'review');
+  assert.ok(normalized.eligibilityReasonCodes.includes('unverified_freshness'));
 });
 
 test('provider raw items are never logged while returned as frozen process data', async () => {
@@ -257,4 +314,189 @@ test('provider raw items are never logged while returned as frozen process data'
     console.log = original;
   }
   assert.deepEqual(logs, []);
+});
+
+test('credit reconciliation capability reads and freezes current-day usage', async () => {
+  const { adapter, calls } = adapterWith([response([
+    { api_credits_consumed: 5, period_start: CREDIT_PERIOD },
+  ])], { now: () => OBSERVED_AT, creditNow: () => '2026-08-03T12:05:00.000Z' });
+  assert.equal(adapter.requiresCreditReconciliation, true);
+  assert.equal(typeof adapter.readCreditUsage, 'function');
+  const usage = await adapter.readCreditUsage();
+  assert.deepEqual(usage, {
+    observedAt: '2026-08-03T12:05:00.000Z',
+    periodStart: '2026-08-03T00:00:00.000Z',
+    periodEnd: '2026-08-03T23:59:59.999Z',
+    consumedCredits: 5,
+  });
+  assert.ok(Object.isFrozen(usage));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init.method, 'GET');
+  assert.equal(calls[0].init.headers.authorization, 'Bearer test-key');
+  const requestUrl = new URL(calls[0].url);
+  assert.equal(requestUrl.pathname, '/v0/teams/credits_consumption');
+  assert.equal(requestUrl.searchParams.get('start_datetime'), '2026-08-03T00:00:00.000Z');
+  assert.equal(requestUrl.searchParams.get('end_datetime'), '2026-08-03T23:59:59.999Z');
+  assert.equal(requestUrl.searchParams.get('timezone'), 'UTC');
+  assert.equal('creditUsage' in adapter, false);
+});
+
+test('recovery can reconcile the persisted UTC period after that day ends', async () => {
+  const { adapter, calls } = adapterWith([response([
+    { api_credits_consumed: 8, period_start: CREDIT_PERIOD },
+  ])], { creditNow: () => '2026-08-04T00:05:00.000Z' });
+  const usage = await adapter.readCreditUsage({
+    periodStart: '2026-08-03T00:00:00.000Z',
+    periodEnd: '2026-08-03T23:59:59.999Z',
+  });
+  assert.deepEqual(usage, {
+    observedAt: '2026-08-04T00:05:00.000Z',
+    periodStart: '2026-08-03T00:00:00.000Z',
+    periodEnd: '2026-08-03T23:59:59.999Z',
+    consumedCredits: 8,
+  });
+  const requestUrl = new URL(calls[0].url);
+  assert.equal(requestUrl.searchParams.get('start_datetime'), '2026-08-03T00:00:00.000Z');
+  assert.equal(requestUrl.searchParams.get('end_datetime'), '2026-08-03T23:59:59.999Z');
+});
+
+test('credit reconciliation rejects malformed rows and invalid timestamps', async () => {
+  for (const payload of [
+    {},
+    [null],
+    [{ api_credits_consumed: 1 }],
+    [{ api_credits_consumed: -1, period_start: CREDIT_PERIOD }],
+    [{ api_credits_consumed: 1.5, period_start: CREDIT_PERIOD }],
+    [{ api_credits_consumed: '1', period_start: CREDIT_PERIOD }],
+    [{ api_credits_consumed: 1, period_start: 'not-a-date' }],
+    [{ api_credits_consumed: 1, period_start: '2026-08-02T23:59:59Z' }],
+    [{ api_credits_consumed: 1, period_start: '2026-08-03T13:00:00Z' }],
+    [{ api_credits_consumed: 1, period_start: CREDIT_PERIOD }, { api_credits_consumed: 1, period_start: CREDIT_PERIOD }],
+    [{ api_credits_consumed: Number.MAX_SAFE_INTEGER, period_start: CREDIT_PERIOD }, { api_credits_consumed: 1, period_start: '2026-08-03T01:00:00Z' }],
+  ]) {
+    const { adapter } = adapterWith([response(payload)], { now: () => OBSERVED_AT });
+    await assert.rejects(
+      adapter.readCreditUsage(),
+      (error) => error instanceof TheirStackError && error.code === 'terminal_validation',
+    );
+  }
+});
+
+test('credit reconciliation classifies auth and bounded transient failures', async () => {
+  const auth = adapterWith([response({}, 401)], { now: () => OBSERVED_AT }).adapter;
+  await assert.rejects(auth.readCreditUsage(), (error) => error.code === 'authentication');
+
+  const { adapter, calls } = adapterWith([
+    response({}, 429),
+    response([{ api_credits_consumed: 4, period_start: CREDIT_PERIOD }]),
+  ], { maxPreviewRetries: 1, now: () => OBSERVED_AT, creditNow: () => OBSERVED_AT });
+  const usage = await adapter.readCreditUsage();
+  assert.equal(usage.consumedCredits, 4);
+  assert.equal(calls.length, 2);
+
+  const failed = adapterWith([response({}, 500)], { maxPreviewRetries: 0, now: () => OBSERVED_AT }).adapter;
+  await assert.rejects(failed.readCreditUsage(), (error) => error.code === 'retryable_preview');
+});
+
+test('response body timeouts cover preview, paid, and accounting JSON reads', async () => {
+  function stalledFetch(calls) {
+    return async (url, init) => {
+      calls.push({ url, init });
+      return {
+        status: 200,
+        headers: { get() { return null; } },
+        json() {
+          return new Promise((resolve, reject) => {
+            init.signal.addEventListener('abort', () => reject(new Error('body aborted')), { once: true });
+          });
+        },
+      };
+    };
+  }
+
+  const previewCalls = [];
+  const preview = createTheirStackAdapter({
+    apiKey: 'test-key',
+    fetch: stalledFetch(previewCalls),
+    timeoutMs: 5,
+    maxPreviewRetries: 1,
+    retryDelayMs: 0,
+    now: () => OBSERVED_AT,
+    windowEnd: WINDOW_END,
+  });
+  await assert.rejects(
+    preview.fetchPage({ request: preview.buildRequest({ mode: 'preview' }), mode: 'preview' }),
+    (error) => error.code === 'retryable_preview',
+  );
+  assert.equal(previewCalls.length, 2);
+
+  const paidCalls = [];
+  const paid = createTheirStackAdapter({
+    apiKey: 'test-key',
+    timeoutMs: 5,
+    maxPreviewRetries: 0,
+    paidAuthorization: true,
+    fetch: stalledFetch(paidCalls),
+    now: () => OBSERVED_AT,
+    windowEnd: WINDOW_END,
+  });
+  await assert.rejects(
+    paid.fetchPage({ request: paid.buildRequest({ mode: 'paid', limit: 1 }), mode: 'paid' }),
+    (error) => error.code === 'paid_ambiguous',
+  );
+  assert.equal(paidCalls.length, 1);
+
+  const accountingCalls = [];
+  const accounting = createTheirStackAdapter({
+    apiKey: 'test-key',
+    timeoutMs: 5,
+    maxPreviewRetries: 0,
+    now: () => OBSERVED_AT,
+    windowEnd: WINDOW_END,
+    fetch: stalledFetch(accountingCalls),
+  });
+  await assert.rejects(accounting.readCreditUsage(), (error) => error.code === 'retryable_preview');
+  assert.equal(accountingCalls.length, 1);
+});
+
+test('malformed JSON is terminal for preview and ambiguous after a paid request', async () => {
+  const invalid = {
+    status: 200,
+    headers: { get() { return null; } },
+    async json() {
+      throw new SyntaxError('invalid JSON');
+    },
+  };
+  const preview = adapterWith([invalid]).adapter;
+  await assert.rejects(
+    preview.fetchPage({ request: preview.buildRequest({ mode: 'preview' }), mode: 'preview' }),
+    (error) => error.code === 'terminal_validation',
+  );
+  const paid = adapterWith([invalid], { paidAuthorization: true }).adapter;
+  await assert.rejects(
+    paid.fetchPage({ request: paid.buildRequest({ mode: 'paid', limit: 1 }), mode: 'paid' }),
+    (error) => error.code === 'paid_ambiguous',
+  );
+});
+
+test('streamed response bodies are byte-bounded before JSON parsing', async () => {
+  const streamed = () => ({
+    status: 200,
+    headers: { get() { return null; } },
+    body: {
+      async *[Symbol.asyncIterator]() {
+        yield new TextEncoder().encode('{"private":"oversized"}');
+      },
+    },
+  });
+  const preview = adapterWith([streamed()], { maxResponseBytes: 4, maxPreviewRetries: 0 }).adapter;
+  await assert.rejects(
+    preview.fetchPage({ request: preview.buildRequest({ mode: 'preview' }), mode: 'preview' }),
+    (error) => error.code === 'terminal_validation',
+  );
+  const paid = adapterWith([streamed()], { maxResponseBytes: 4, paidAuthorization: true }).adapter;
+  await assert.rejects(
+    paid.fetchPage({ request: paid.buildRequest({ mode: 'paid', limit: 1 }), mode: 'paid' }),
+    (error) => error.code === 'paid_ambiguous',
+  );
 });

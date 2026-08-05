@@ -1,0 +1,235 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase1-browser-action-request-v1",
+  "title": "Phase 1 browser action request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "driver",
+    "screenshot_sha256",
+    "retry_of",
+    "created_at",
+    "ats",
+    "resume",
+    "agent_inference",
+    "greenhouse_board_token",
+    "items"
+  ],
+  "properties": {
+    "schema": { "const": "phase1-browser-action-request-v1" },
+    "driver": { "enum": ["omp_browser", "playwright_cli", "computer"] },
+    "screenshot_sha256": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/sha256" }
+      ]
+    },
+    "retry_of": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "propertyNames": { "$ref": "#/$defs/identifier" },
+          "additionalProperties": {
+            "oneOf": [
+              { "type": "null" },
+              { "type": "integer", "minimum": 0 }
+            ]
+          }
+        }
+      ]
+    },
+    "created_at": { "$ref": "#/$defs/isoTimestamp" },
+    "ats": { "enum": ["greenhouse", "ashby", "company_site"] },
+    "resume": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/resumeCandidate" }
+      ]
+    },
+    "agent_inference": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/inferenceCandidate" }
+      ]
+    },
+    "greenhouse_board_token": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/identifier" }
+      ]
+    },
+    "items": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": { "$ref": "#/$defs/item" }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,511}$"
+    },
+    "boundedString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 16384,
+      "pattern": "^[^\\u0000]+$"
+    },
+    "isoTimestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d{3})?Z$"
+    },
+    "resumeCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_sha256", "answers"],
+      "properties": {
+        "source_sha256": { "$ref": "#/$defs/sha256" },
+        "answers": { "type": "object" }
+      }
+    },
+    "inferenceCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_resume_sha256", "job_description_sha256", "answers"],
+      "properties": {
+        "source_resume_sha256": { "$ref": "#/$defs/sha256" },
+        "job_description_sha256": { "$ref": "#/$defs/sha256" },
+        "answers": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/inferenceAnswer" }
+        }
+      }
+    },
+    "inferenceAnswer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "rationale", "evidence"],
+      "properties": {
+        "value": true,
+        "rationale": { "$ref": "#/$defs/boundedString" },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["resume_sha256", "job_description_sha256"],
+          "properties": {
+            "resume_sha256": { "$ref": "#/$defs/sha256" },
+            "job_description_sha256": { "$ref": "#/$defs/sha256" }
+          }
+        }
+      }
+    },
+    "resolution": {
+      "oneOf": [
+        { "$ref": "#/$defs/answerResolution" },
+        { "$ref": "#/$defs/uploadResolution" }
+      ]
+    },
+    "answerResolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "field_id",
+        "alias",
+        "sensitive",
+        "remember",
+        "approved_at",
+        "deliberate_blank",
+        "semantic_choice",
+        "formatted_value",
+        "user"
+      ],
+      "properties": {
+        "kind": { "const": "answer" },
+        "field_id": { "$ref": "#/$defs/identifier" },
+        "alias": { "$ref": "#/$defs/boundedString" },
+        "sensitive": { "type": ["boolean", "null"] },
+        "remember": { "type": "boolean" },
+        "approved_at": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/isoTimestamp" }
+          ]
+        },
+        "deliberate_blank": { "type": "boolean" },
+        "semantic_choice": {
+          "oneOf": [
+            { "type": "null" },
+            { "enum": ["blank", "decline", "not_applicable", "prefer_not_to_answer", "none"] }
+          ]
+        },
+        "formatted_value": {
+          "oneOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/boundedString" }
+          ]
+        },
+        "user": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["answers"],
+              "properties": { "answers": { "type": "object" } }
+            }
+          ]
+        }
+      }
+    },
+    "uploadResolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "field_id", "alias"],
+      "properties": {
+        "kind": { "const": "canonical_upload" },
+        "field_id": { "$ref": "#/$defs/identifier" },
+        "alias": { "$ref": "#/$defs/boundedString" }
+      }
+    },
+    "option": {
+      "oneOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/observedOption" },
+        { "$ref": "#/$defs/greenhouseEducation" }
+      ]
+    },
+    "observedOption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "option_text", "option_value"],
+      "properties": {
+        "kind": { "const": "observed_exact" },
+        "option_text": { "$ref": "#/$defs/boundedString" },
+        "option_value": { "$ref": "#/$defs/boundedString" }
+      }
+    },
+    "greenhouseEducation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "category"],
+      "properties": {
+        "kind": { "const": "greenhouse_education" },
+        "category": { "enum": ["schools", "degrees", "disciplines"] }
+      }
+    },
+    "item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resolution", "decision", "option"],
+      "properties": {
+        "resolution": { "$ref": "#/$defs/resolution" },
+        "decision": { "$ref": "application-decision.schema.json" },
+        "option": { "$ref": "#/$defs/option" }
+      }
+    }
+  }
+}

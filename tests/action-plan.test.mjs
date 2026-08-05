@@ -1,0 +1,535 @@
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import test from 'node:test';
+
+import {
+  ACTION_PLAN_SCHEMA,
+  ACTION_RESULT_SCHEMA,
+  createBrowserActionPlan,
+  validateBrowserActionPlan,
+  validateBrowserActionResult,
+} from '../src/phase1/action-plan.mjs';
+import {
+  createLedger,
+  digestObservedValue,
+  digestPrivateValue,
+  recordResolution,
+} from '../src/phase1/ledger.mjs';
+
+const DIGEST = 'a'.repeat(64);
+const FILE_DIGEST = 'b'.repeat(64);
+
+function frame() {
+  return {
+    id: 'frame-main',
+    parent_id: null,
+    url: 'https://example.test/app',
+    origin: 'https://example.test',
+    accessible: true,
+  };
+}
+
+function control(fieldId, overrides = {}) {
+  return {
+    ref: `ref-${fieldId}`,
+    stable_id: fieldId,
+    group_id: null,
+    kind: 'text',
+    tag: 'input',
+    type: 'text',
+    role: 'textbox',
+    label: `Question ${fieldId}`,
+    name: fieldId,
+    description: null,
+    locator: { strategy: 'id', value: fieldId, role: null, name: null },
+    frame_id: 'frame-main',
+    visible: true,
+    enabled: true,
+    required: true,
+    readonly: false,
+    disabled: false,
+    value: `current-${fieldId}`,
+    value_present: true,
+    checked: null,
+    selected: null,
+    options: [],
+    validity: { valid: true, aria_invalid: null, message: null },
+    file: null,
+    candidate: { class: 'field', reason: 'visible user-facing field control' },
+    ...overrides,
+  };
+}
+
+function observation(id, controls, previous = null) {
+  return {
+    schema: 'phase1-observation-v1',
+    observation_id: id,
+    previous_observation_id: previous,
+    observed_at: `2026-08-04T00:00:${id === 'obs-1' ? '01' : '02'}.000Z`,
+    url: 'https://example.test/app',
+    title: 'Synthetic application',
+    snapshot_sha256: DIGEST,
+    frames: [frame()],
+    controls,
+    blockers: [],
+  };
+}
+
+function decision(fieldId, action, proposedAnswer, overrides = {}) {
+  return {
+    observationId: 'obs-1',
+    fieldId,
+    controlReference: `ref-${fieldId}`,
+    fieldPolicy: 'qualification',
+    proposedAnswer,
+    answerSource: 'user',
+    evidenceReferences: [],
+    inferenceRationaleDigest: null,
+    inferenceEvidenceDigests: null,
+    proposedAction: action,
+    expectedRetainedState: proposedAnswer,
+    modelTier: 'standard',
+    confidence: 0.9,
+    reasonCode: 'test_answer',
+    reobservationRequired: true,
+    automaticSubmissionEligible: false,
+    ...overrides,
+  };
+}
+
+function resolvedLedger(current, resolutions) {
+  let ledger = createLedger(current);
+  for (const resolution of resolutions) {
+    const control = current.controls.find((item) => item.stable_id === resolution.field_id);
+    const field = ledger.fields.find((item) => item.field_id === resolution.field_id);
+    const value = resolution.value;
+    ledger = recordResolution(ledger, {
+      field_id: resolution.field_id,
+      observation_id: current.observation_id,
+      ref: control.ref,
+      source: 'user',
+      value_digest: resolution.semantic_choice ? null : digestObservedValue(control, value),
+      ...(resolution.semantic_choice ? { semantic_choice: resolution.semantic_choice } : {}),
+    });
+    assert.equal(ledger.fields.find((item) => item.field_id === field.field_id).latest_ref, control.ref);
+  }
+  return ledger;
+}
+
+function textPlan(overrides = {}) {
+  const current = observation('obs-1', [control('name')]);
+  const ledger = resolvedLedger(current, [{ field_id: 'name', value: 'Ada Lovelace' }]);
+  return createBrowserActionPlan({
+    observation: current,
+    ledger,
+    decisions: [decision('name', 'fill_text', 'Ada Lovelace')],
+    answerAliases: { name: { alias: 'full_name', value: 'Ada Lovelace' } },
+    optionMatches: {},
+    driver: 'omp_browser',
+    ...overrides,
+  });
+}
+
+function resultFor(plan, outcomes, post = null) {
+  return validateBrowserActionResult({
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: plan.plan_id,
+    post_observation_id: post?.observation_id ?? 'obs-2',
+    outcomes,
+  }, plan, post ?? observation('obs-2', [], 'obs-1'));
+}
+
+test('schema and runtime expose strict plan/result roots', async () => {
+  const schema = JSON.parse(await readFile(new URL('../schemas/browser-action-plan.schema.json', import.meta.url), 'utf8'));
+  assert.deepEqual(schema.$defs.plan.properties.fallback_order.items.enum, [
+    'omp_browser',
+    'playwright_cli',
+    'computer',
+  ]);
+  assert.deepEqual(schema.$defs.action.properties.semantic_action.enum, [
+    'fill_text',
+    'clear',
+    'select_option',
+    'toggle',
+    'upload_file',
+  ]);
+  assert.deepEqual(schema.$defs.normalizedClear.required, [
+    'action',
+    'observationId',
+    'fieldId',
+    'controlReference',
+  ]);
+  assert.equal(
+    schema.$defs.step.properties.value.oneOf[0].$ref,
+    '#/$defs/possiblyEmptyString',
+  );
+  assert.equal(ACTION_PLAN_SCHEMA, 'phase1-browser-action-plan-v1');
+  assert.equal(ACTION_RESULT_SCHEMA, 'phase1-browser-action-result-v1');
+});
+
+test('creates a fill plan with exact private step arguments and normalized action', () => {
+  const plan = textPlan();
+  const step = plan.actions[0].steps[0];
+  assert.equal(plan.mode, 'single_action');
+  assert.equal(plan.actions[0].control_reference, 'ref-name');
+  assert.equal(step.selector, '[id="name"]');
+  assert.equal(step.value, 'Ada Lovelace');
+  assert.equal(step.option_value, null);
+  assert.equal(step.file_path, null);
+  assert.equal(step.option_text, null);
+  assert.equal(step.exact, true);
+  assert.deepEqual(step.normalized_action, {
+    action: 'fill_text',
+    observationId: 'obs-1',
+    fieldId: 'name',
+    controlReference: 'ref-name',
+    value: 'Ada Lovelace',
+  });
+});
+
+test('supports clear, toggle, native select, custom select, and upload actions', () => {
+  const native = control('country', {
+    kind: 'select',
+    tag: 'select',
+    type: 'select',
+    role: 'combobox',
+    value: 'us',
+    options: [
+      { value: 'us', label: 'United States', disabled: false, selected: true },
+      { value: 'ca', label: 'Canada', disabled: false, selected: false },
+    ],
+  });
+  const custom = control('department', {
+    kind: 'input',
+    type: 'text',
+    role: 'combobox',
+    value: '',
+    value_present: false,
+    options: [
+      { value: '', label: 'Engineering', disabled: false, selected: false },
+      { value: '', label: 'Sales', disabled: false, selected: false },
+    ],
+  });
+  const check = control('consent', {
+    kind: 'checkbox',
+    type: 'checkbox',
+    role: 'checkbox',
+    value: null,
+    value_present: false,
+    checked: true,
+  });
+  const blank = control('optional', {
+    required: false,
+    value: '',
+    value_present: false,
+  });
+  const file = control('resume', {
+    kind: 'file',
+    type: 'file',
+    role: 'input',
+    value: null,
+    value_present: false,
+    file: { accept: null, count: 0, names: [] },
+  });
+  const current = observation('obs-1', [native, custom, check, blank, file]);
+  let ledger = resolvedLedger(current, [
+    { field_id: 'country', value: 'us' },
+    { field_id: 'department', value: 'Engineering' },
+    { field_id: 'consent', value: true },
+    { field_id: 'resume', value: '/tmp/resume.pdf' },
+    { field_id: 'optional', value: null, semantic_choice: 'blank' },
+  ]);
+  const plans = [
+    createBrowserActionPlan({
+      observation: current,
+      ledger,
+      decisions: [decision('country', 'select_option', 'us')],
+      answerAliases: { country: { alias: 'country', value: 'us' } },
+      optionMatches: { country: { option_text: 'United States', option_value: 'us' } },
+      driver: 'omp_browser',
+    }),
+    createBrowserActionPlan({
+      observation: current,
+      ledger,
+      decisions: [decision('department', 'select_option', 'Engineering')],
+      answerAliases: { department: { alias: 'department', value: 'Engineering' } },
+      optionMatches: { department: { option_text: 'Engineering', option_value: 'Engineering' } },
+      driver: 'omp_browser',
+    }),
+    createBrowserActionPlan({
+      observation: current,
+      ledger,
+      decisions: [decision('consent', 'toggle', true)],
+      answerAliases: { consent: { alias: 'consent', value: true } },
+      optionMatches: {},
+      driver: 'omp_browser',
+    }),
+    createBrowserActionPlan({
+      observation: current,
+      ledger,
+      decisions: [decision('optional', 'clear', null)],
+      answerAliases: { optional: { alias: 'blank', value: null } },
+      optionMatches: {},
+      driver: 'omp_browser',
+    }),
+    createBrowserActionPlan({
+      observation: current,
+      ledger,
+      decisions: [decision('resume', 'upload_file', '/tmp/resume.pdf')],
+      answerAliases: {},
+      optionMatches: {},
+      resumeUpload: { path: '/tmp/resume.pdf', sha256: FILE_DIGEST },
+      driver: 'omp_browser',
+    }),
+  ];
+  assert.equal(plans[0].actions[0].steps[0].helper, 'select');
+  assert.equal(plans[1].actions[0].steps.length, 3);
+  assert.equal(plans[1].actions[0].steps[0].helper, 'click');
+  assert.equal(plans[1].actions[0].steps[1].helper, 'fill');
+  assert.equal(plans[1].actions[0].steps[2].helper, 'click_exact_option');
+  assert.equal(plans[1].actions[0].steps[2].option_value, 'Engineering');
+  assert.equal(plans[2].actions[0].steps[0].normalized_action.checked, true);
+  assert.equal(plans[3].actions[0].retention.kind, 'semantic_blank');
+  assert.equal(plans[3].actions[0].steps[0].value, '');
+  assert.deepEqual(plans[3].actions[0].steps[0].normalized_action, {
+    action: 'clear',
+    observationId: 'obs-1',
+    fieldId: 'optional',
+    controlReference: 'ref-optional',
+  });
+  assert.equal(plans[4].actions[0].retention.artifact_sha256, FILE_DIGEST);
+  assert.equal(plans[4].actions[0].retention.expected_value_digest, ledger.fields.find((field) => field.field_id === 'resume').value_digest);
+});
+test('plans an exact custom option from a bounded external catalog before the flyout opens', () => {
+  const current = observation('obs-1', [control('school', {
+    kind: 'input',
+    type: 'text',
+    role: 'combobox',
+    value: null,
+    value_present: false,
+    options: [],
+  })]);
+  const ledger = resolvedLedger(current, [{ field_id: 'school', value: '42' }]);
+  const plan = createBrowserActionPlan({
+    observation: current,
+    ledger,
+    decisions: [decision('school', 'select_option', '42')],
+    answerAliases: { school: { alias: 'school', value: '42' } },
+    optionMatches: { school: { option_text: 'Exact School', option_value: '42' } },
+    driver: 'omp_browser',
+  });
+  assert.equal(plan.actions[0].steps.length, 3);
+  assert.equal(plan.actions[0].steps[0].helper, 'click');
+  assert.equal(plan.actions[0].steps[1].value, 'Exact School');
+  assert.equal(plan.actions[0].steps[1].normalized_action.action, 'fill_text');
+  assert.equal(plan.actions[0].steps[2].helper, 'click_exact_option');
+  assert.equal(plan.actions[0].steps[2].option_text, 'Exact School');
+  assert.throws(() => createBrowserActionPlan({
+    observation: observation('obs-1', [control('school', {
+      kind: 'select',
+      tag: 'select',
+      type: 'select',
+      role: 'combobox',
+      options: [],
+    })]),
+    ledger,
+    decisions: [decision('school', 'select_option', '42')],
+    answerAliases: { school: { alias: 'school', value: '42' } },
+    optionMatches: { school: { option_text: 'Exact School', option_value: '42' } },
+    driver: 'omp_browser',
+  }));
+});
+
+
+test('opens a custom combobox before filling its option query', () => {
+  const current = observation('obs-1', [control('role', {
+    kind: 'input',
+    type: 'text',
+    role: 'combobox',
+    value: null,
+    value_present: false,
+    options: [{ value: 'eng', label: 'Engineering', disabled: false, selected: false }],
+  })]);
+  const ledger = resolvedLedger(current, [{ field_id: 'role', value: 'eng' }]);
+  const plan = createBrowserActionPlan({
+    observation: current,
+    ledger,
+    decisions: [decision('role', 'select_option', 'eng')],
+    answerAliases: { role: { alias: 'role', value: 'eng' } },
+    optionMatches: { role: { option_text: 'Engineering', option_value: 'eng' } },
+    driver: 'omp_browser',
+  });
+  const steps = plan.actions[0].steps;
+  assert.deepEqual(steps.map((step) => step.helper), ['click', 'fill', 'click_exact_option']);
+  assert.deepEqual(steps.map((step) => step.sequence), [1, 2, 3]);
+  assert.deepEqual(steps.map((step) => step.normalized_action.action), ['click', 'fill_text', 'click']);
+  assert.deepEqual(steps.map((step) => step.normalized_action.fieldId), ['role', 'role', 'role']);
+});
+
+test('creates an independent two-action fill batch and rejects mixed batches', () => {
+  const current = observation('obs-1', [control('first'), control('second')]);
+  const ledger = resolvedLedger(current, [
+    { field_id: 'first', value: 'one' },
+    { field_id: 'second', value: 'two' },
+  ]);
+  const plan = createBrowserActionPlan({
+    observation: current,
+    ledger,
+    decisions: [decision('first', 'fill_text', 'one'), decision('second', 'fill_text', 'two')],
+    answerAliases: {
+      first: { alias: 'first', value: 'one' },
+      second: { alias: 'second', value: 'two' },
+    },
+    optionMatches: {},
+    driver: 'omp_browser',
+  });
+  assert.equal(plan.mode, 'fill_batch');
+  assert.equal(plan.actions.length, 2);
+  assert.throws(() => createBrowserActionPlan({
+    observation: current,
+    ledger,
+    decisions: [decision('first', 'fill_text', 'one'), decision('second', 'toggle', true)],
+    answerAliases: {
+      first: { alias: 'first', value: 'one' },
+      second: { alias: 'second', value: true },
+    },
+    optionMatches: {},
+    driver: 'omp_browser',
+  }));
+});
+
+test('enforces aliases, options, locator uniqueness, and digest binding', () => {
+  const current = observation('obs-1', [control('name')]);
+  const ledger = resolvedLedger(current, [{ field_id: 'name', value: 'Ada' }]);
+  const base = {
+    observation: current,
+    ledger,
+    decisions: [decision('name', 'fill_text', 'Ada')],
+    answerAliases: { name: { alias: 'full_name', value: 'Ada' } },
+    optionMatches: {},
+    driver: 'omp_browser',
+  };
+  assert.throws(() => createBrowserActionPlan({ ...base, answerAliases: { name: { alias: 'full_name', value: 'wrong' } } }));
+  assert.throws(() => createBrowserActionPlan({ ...base, answerAliases: { name: { alias: 'full_name', value: 'Ada' }, extra: { alias: 'x', value: 'x' } } }));
+  assert.throws(() => createBrowserActionPlan({ ...base, decisions: [decision('name', 'final_submit', null)] }));
+  const duplicateLocator = observation('obs-1', [control('name'), control('other', {
+    locator: { strategy: 'id', value: 'name', role: null, name: null },
+  })]);
+  const duplicateLedger = resolvedLedger(duplicateLocator, [{ field_id: 'name', value: 'Ada' }]);
+  assert.throws(() => createBrowserActionPlan({ ...base, observation: duplicateLocator, ledger: duplicateLedger }));
+  const unknown = { ...base, answerAliases: { name: { alias: 'full_name', value: 'Ada' } }, extra: true };
+  assert.throws(() => createBrowserActionPlan(unknown));
+});
+
+test('requires current observation, field/ref bindings, and a computer screenshot', () => {
+  const plan = textPlan();
+  const current = observation('obs-1', [control('name')]);
+  const ledger = resolvedLedger(current, [{ field_id: 'name', value: 'Ada Lovelace' }]);
+  assert.throws(() => validateBrowserActionPlan({ ...plan, observation_id: 'obs-old' }, { observation: current, ledger }));
+  assert.throws(() => createBrowserActionPlan({
+    observation: current,
+    ledger,
+    decisions: [decision('name', 'fill_text', 'Ada Lovelace', { controlReference: 'ref-old' })],
+    answerAliases: { name: { alias: 'full_name', value: 'Ada Lovelace' } },
+    optionMatches: {},
+    driver: 'omp_browser',
+  }));
+  assert.throws(() => createBrowserActionPlan({
+    observation: current,
+    ledger,
+    decisions: [decision('name', 'fill_text', 'Ada Lovelace')],
+    answerAliases: { name: { alias: 'full_name', value: 'Ada Lovelace' } },
+    optionMatches: {},
+    driver: 'computer',
+  }));
+  assert.throws(() => validateBrowserActionPlan({ ...plan, fallback_order: ['omp_browser', 'omp_browser', 'computer'] }));
+});
+
+test('result validation returns ordered ledger-ready attempts and immutable receipts', () => {
+  const plan = textPlan();
+  const post = observation('obs-2', [control('name')], 'obs-1');
+  const result = resultFor(plan, [{
+    action_id: plan.actions[0].action_id,
+    outcome: 'succeeded',
+    error_code: null,
+    driver: 'omp_browser',
+    selected_option_text: null,
+  }], post);
+  assert.deepEqual(result.attempts, [{
+    action_id: plan.actions[0].action_id,
+    action: 'fill',
+    field_id: 'name',
+    observation_id: 'obs-1',
+    ref: 'ref-name',
+    outcome: 'succeeded',
+    retry_of: null,
+    error_code: null,
+  }]);
+  assert.deepEqual(result.formatted_values, [{ field_id: 'name', answer_alias: 'full_name', value: 'Ada Lovelace' }]);
+  assert.deepEqual(result.upload_proofs, {});
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(Object.isFrozen(result.attempts), true);
+  assert.equal(Object.isFrozen(result.attempts[0]), true);
+  assert.throws(() => { result.attempts[0].outcome = 'failed'; }, TypeError);
+});
+
+test('result enforces success/error semantics, exact select text, chain, and batch prefixes', () => {
+  const single = textPlan();
+  const post = observation('obs-2', [control('name')], 'obs-1');
+  const success = {
+    action_id: single.actions[0].action_id,
+    outcome: 'succeeded',
+    error_code: null,
+    driver: 'omp_browser',
+    selected_option_text: null,
+  };
+  assert.throws(() => resultFor(single, [{ ...success, error_code: 'unexpected' }], post));
+  assert.throws(() => resultFor(single, [{ ...success, outcome: 'failed' }], post));
+  assert.throws(() => resultFor(single, [{ ...success, selected_option_text: 'unexpected' }], post));
+  assert.throws(() => resultFor(single, [{ ...success }], observation('obs-3', [control('name')], 'obs-old')));
+
+  const current = observation('obs-1', [control('first'), control('second'), control('third')]);
+  const ledger = resolvedLedger(current, [
+    { field_id: 'first', value: 'one' },
+    { field_id: 'second', value: 'two' },
+    { field_id: 'third', value: 'three' },
+  ]);
+  const batch = createBrowserActionPlan({
+    observation: current,
+    ledger,
+    decisions: [
+      decision('first', 'fill_text', 'one'),
+      decision('second', 'fill_text', 'two'),
+      decision('third', 'fill_text', 'three'),
+    ],
+    answerAliases: {
+      first: { alias: 'first', value: 'one' },
+      second: { alias: 'second', value: 'two' },
+      third: { alias: 'third', value: 'three' },
+    },
+    optionMatches: {},
+    driver: 'omp_browser',
+  });
+  const prefix = [
+    {
+      action_id: batch.actions[0].action_id,
+      outcome: 'succeeded',
+      error_code: null,
+      driver: 'omp_browser',
+      selected_option_text: null,
+    },
+    {
+      action_id: batch.actions[1].action_id,
+      outcome: 'failed',
+      error_code: 'transport_failure',
+      driver: 'playwright_cli',
+      selected_option_text: null,
+    },
+  ];
+  const prefixResult = resultFor(batch, prefix, post);
+  assert.equal(prefixResult.attempts.length, 2);
+  assert.equal(prefixResult.attempts[1].outcome, 'failed');
+  assert.throws(() =>
+    resultFor(batch, [prefix[0], { ...prefix[1], outcome: 'attempted', error_code: null }], post));
+  assert.throws(() => resultFor(batch, [prefix[1], prefix[0]], post));
+});

@@ -32,6 +32,35 @@ invalidates generation or creates a new cache identity.
 - Keep unsupported or ambiguous requirements out of the resume and report them
   as unsupported rather than guessing.
 
+## Resume writing rules
+
+- Make every bullet a source-backed account of what the candidate built or
+  owned. When accurate, lead with a specific builder or ownership verb such as
+  designed, built, authored, shipped, modernized, or owned. Do not substitute a
+  stronger verb for the supported scope.
+- Avoid vague operator language, including worked on, contributed to,
+  responsible for, maintained, supported, or led initiatives, when the
+  evidence supports a more specific action. Never imply end-to-end ownership
+  when the evidence instead supports collaboration or a bounded contribution.
+- Name the actual product, team, feature, system, or user-facing surface. A
+  reader must be able to picture what the candidate would build, not merely
+  infer a broad category such as platform, AI, or backend.
+- Include the technical mechanism and the observable outcome whenever source
+  evidence supports them. Add relevant context, users, scale, baseline, delta,
+  time, or business impact only when it is verified and makes the claim more
+  concrete. Never invent a metric, baseline, or measurement method.
+- For AI work, name the evidenced implementation, such as the model,
+  inference stack, tool calling, retrieval pipeline, agent workflow, or
+  evaluation method. Do not reduce specific work to generic AI/ML, LLM
+  experience, or RAG language.
+- Keep bullets concise. Remove repeated technologies, filler, and claims that
+  do not clarify action, surface, mechanism, outcome, or context.
+- Use words instead of slash-separated terms in bullet prose. CI/CD is the
+  sole allowed exception.
+- Render Technical Skills as an evidence-backed list of concrete languages,
+  frameworks, systems, platforms, tools, or methods relevant to the target
+  role. Exclude soft skills and broad, non-technical categories.
+
 ## One-page density policy
 
 - Treat the one-page limit as a density target, not permission to publish a

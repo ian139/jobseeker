@@ -11,14 +11,23 @@ import {
   completeFinalSubmit,
   finalizeRun,
   prepareSubmission,
+  getPendingActionPlans,
   recordAction,
   recordActionBatch,
+  recordActionPlan,
+  recordPlannedActionResult,
+  resolveCanonicalUpload,
   resolveField,
   startRun,
   verifyRetention,
 } from '../src/phase1/session.mjs';
 import { approvalContextSha256 } from '../src/phase1/contract.mjs';
 import { digestPrivateValue } from '../src/phase1/ledger.mjs';
+import {
+  ACTION_RESULT_SCHEMA,
+  createBrowserActionPlan,
+} from '../src/phase1/action-plan.mjs';
+import EvidenceStore from '../src/phase1/evidence.mjs';
 
 function privateFile(root, name, contents) {
   const filePath = path.join(root, name);
@@ -54,6 +63,15 @@ function fieldControl(fieldId, value = null, valuePresent = false) {
     validity: { valid: true, aria_invalid: null, message: null },
     file: null,
     candidate: { class: 'field', reason: 'visible user-facing field control' },
+  };
+}
+function uploadControl(fieldId) {
+  return {
+    ...fieldControl(fieldId),
+    kind: 'file',
+    type: 'file',
+    role: 'input',
+    file: { accept: '.pdf', count: 0, names: [] },
   };
 }
 
@@ -196,11 +214,228 @@ async function finalizeRetained(session, screenshotPath) {
     attemptId: begun.attemptId,
     outcome: 'succeeded',
   });
-  const final = await finalizeRun(session, { screenshotPath });
+  await assert.rejects(
+    finalizeRun(session, { screenshotPath, finalUrl: screenshotPath }),
+    /fresh post-submit observation|absolute http/,
+  );
+  const post = structuredClone(session.observation);
+  post.observation_id = `${post.observation_id}-post-submit`;
+  post.previous_observation_id = session.observation.observation_id;
+  post.observed_at = '2026-07-25T08:01:00.000Z';
+  await acceptObservation(session, post);
+  await assert.rejects(
+    finalizeRun(session, { screenshotPath, finalUrl: 'https://example.invalid/wrong' }),
+    /match the post-submit observation URL/,
+  );
+  const final = await finalizeRun(session, { screenshotPath, finalUrl: post.url });
   assert.equal(final.finalized, true);
   assert.equal(final.submitActionCount, 1);
   assert.equal(session.finalized, true);
 }
+function plannedFillDecision(current, fieldId, value) {
+  return {
+    observationId: current.observation_id,
+    fieldId,
+    controlReference: `control-${fieldId}`,
+    fieldPolicy: 'qualification',
+    proposedAnswer: value,
+    answerSource: 'profile',
+    evidenceReferences: [`profile:${fieldId}`],
+    inferenceRationaleDigest: null,
+    inferenceEvidenceDigests: null,
+    proposedAction: 'fill_text',
+    expectedRetainedState: value,
+    modelTier: 'standard',
+    confidence: 1,
+    reasonCode: 'profile_exact',
+    reobservationRequired: true,
+    automaticSubmissionEligible: false,
+  };
+}
+
+function createFillPlan(session, fields, retryOf = undefined) {
+  const decisions = fields.map(({ fieldId, value }) =>
+    plannedFillDecision(session.observation, fieldId, value));
+  const answerAliases = Object.fromEntries(fields.map(({ fieldId, value }) => [
+    fieldId,
+    { alias: fieldId, value },
+  ]));
+  return createBrowserActionPlan({
+    observation: session.observation,
+    ledger: session.ledger,
+    decisions,
+    answerAliases,
+    optionMatches: {},
+    driver: 'omp_browser',
+    retryOf,
+    createdAt: '2026-07-25T08:00:10.000Z',
+    ats: 'greenhouse',
+  });
+}
+
+test('planned receipts recover without browser replay and support retained retries across restarts', async (t) => {
+  const harness = createHarness(t, { answers: { first: 'Ada', second: 'Lovelace' } });
+  const { run, runPath } = harness.runFor('planned-recovery');
+  const firstSession = await startRun(runPath, { startedAt: '2026-07-25T08:00:00.000Z' });
+  await acceptObservation(firstSession, observation(run.application_url, 1, [
+    fieldControl('first'),
+    fieldControl('second'),
+  ]));
+  await resolveField(firstSession, { field_id: 'first', alias: 'first' });
+  await resolveField(firstSession, { field_id: 'second', alias: 'second' });
+
+  const batch = createFillPlan(firstSession, [
+    { fieldId: 'first', value: 'Ada' },
+    { fieldId: 'second', value: 'Lovelace' },
+  ]);
+  await recordActionPlan(firstSession, batch);
+  await assert.rejects(
+    acceptObservation(firstSession, observation(run.application_url, 2, [
+      fieldControl('first', 'Ada', true),
+      fieldControl('second'),
+    ])),
+    /pending/,
+  );
+
+  const partialObservation = observation(run.application_url, 2, [
+    fieldControl('first', 'Ada', true),
+    fieldControl('second'),
+  ]);
+  const partialResult = {
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: batch.plan_id,
+    post_observation_id: partialObservation.observation_id,
+    outcomes: [
+      {
+        action_id: batch.actions[0].action_id,
+        outcome: 'succeeded',
+        error_code: null,
+        driver: 'omp_browser',
+        selected_option_text: null,
+      },
+      {
+        action_id: batch.actions[1].action_id,
+        outcome: 'failed',
+        error_code: 'synthetic_validation',
+        driver: 'omp_browser',
+        selected_option_text: null,
+      },
+    ],
+  };
+
+  const crashStore = new EvidenceStore(run.run_artifact_dir);
+  crashStore.recordActionResult(batch, partialResult, partialObservation);
+  for (const [index, outcome] of partialResult.outcomes.entries()) {
+    const planned = batch.actions[index];
+    crashStore.recordAction({
+      action_id: planned.action_id,
+      action: 'fill',
+      field_id: planned.field_id,
+      observation_id: batch.observation_id,
+      ref: planned.control_reference,
+      outcome: outcome.outcome,
+      retry_of: planned.retry_of,
+      error_code: outcome.error_code,
+      stale_ref: false,
+    });
+  }
+  crashStore.close();
+
+  const recovered = await startRun(runPath, { resumeExisting: true });
+  assert.deepEqual(await getPendingActionPlans(recovered), []);
+  assert.equal(recovered.ledger.action_attempts.length, 2);
+  assert.equal(
+    recovered.ledger.fields.find((field) => field.field_id === 'first').retained,
+    true,
+  );
+  const retryField = recovered.ledger.fields.find((field) => field.field_id === 'second');
+  assert.equal(retryField.retained, false);
+  assert.equal(retryField.retry_notes.length > 0, true);
+
+  const retryPlan = createFillPlan(
+    recovered,
+    [{ fieldId: 'second', value: 'Lovelace' }],
+    { second: 1 },
+  );
+  await recordActionPlan(recovered, retryPlan);
+  const retainedObservation = observation(run.application_url, 3, [
+    fieldControl('first', 'Ada', true),
+    fieldControl('second', 'Lovelace', true),
+  ]);
+  const retryResult = {
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: retryPlan.plan_id,
+    post_observation_id: retainedObservation.observation_id,
+    outcomes: [{
+      action_id: retryPlan.actions[0].action_id,
+      outcome: 'succeeded',
+      error_code: null,
+      driver: 'omp_browser',
+      selected_option_text: null,
+    }],
+  };
+  const completed = await recordPlannedActionResult(
+    recovered,
+    retryPlan,
+    retryResult,
+    retainedObservation,
+  );
+  assert.equal(completed.retention.ok, true, JSON.stringify(completed.retention.errors));
+
+  const restarted = await startRun(runPath, { resumeExisting: true });
+  assert.deepEqual(await getPendingActionPlans(restarted), []);
+  assert.equal(restarted.ledger.action_attempts.length, 3);
+  assert.equal(
+    restarted.ledger.fields.every((field) => field.final || field.retained),
+    true,
+  );
+});
+test('canonical upload resolution binds the configured resume identity to a persisted plan', async (t) => {
+  const harness = createHarness(t);
+  const { run, runPath } = harness.runFor('canonical-upload');
+  const session = await startRun(runPath, { startedAt: '2026-07-25T08:00:00.000Z' });
+  await acceptObservation(
+    session,
+    observation(run.application_url, 1, [uploadControl('resume')]),
+  );
+  const resolved = await resolveCanonicalUpload(session, {
+    field_id: 'resume',
+    alias: 'canonical_resume_upload',
+  });
+  assert.equal(resolved.answer.source, 'resume');
+  assert.equal(resolved.actionValue, session.runMetadata.resume_upload_path);
+  assert.equal(
+    resolved.resolution.value_digest,
+    digestPrivateValue(session.runMetadata.resume_upload_path),
+  );
+
+  const decision = {
+    ...plannedFillDecision(session.observation, 'resume', resolved.actionValue),
+    answerSource: 'resume',
+    evidenceReferences: [`resume-upload:${session.runMetadata.resume_upload_sha256}`],
+    proposedAction: 'upload_file',
+  };
+  const plan = createBrowserActionPlan({
+    observation: session.observation,
+    ledger: session.ledger,
+    decisions: [decision],
+    answerAliases: {},
+    optionMatches: {},
+    resumeUpload: {
+      path: session.runMetadata.resume_upload_path,
+      sha256: session.runMetadata.resume_upload_sha256,
+    },
+    driver: 'omp_browser',
+    createdAt: '2026-07-25T08:00:10.000Z',
+    ats: 'greenhouse',
+  });
+  const persisted = await recordActionPlan(session, plan);
+  assert.equal(persisted.plan.actions[0].steps[0].helper, 'uploadFile');
+  assert.equal(
+    persisted.plan.actions[0].retention.artifact_sha256,
+    session.runMetadata.resume_upload_sha256,
+  );
+});
 
 test('coordinator uses the sensitive structured country resolution contract', async (t) => {
   const harness = createHarness(t, {
@@ -231,6 +466,43 @@ test('coordinator uses the sensitive structured country resolution contract', as
     observation(run.application_url, 2, [
       fieldControl('country', 'Structured Country', true),
     ]),
+  );
+  await finalizeRetained(session, harness.screenshotPath);
+});
+
+test('formatted control values preserve profile provenance', async (t) => {
+  const harness = createHarness(t, {
+    profile: {
+      schema: 'phase1-profile-v1',
+      education: [{
+        institution: 'Example University',
+        level: 'college',
+        gpa: 3.7,
+      }],
+    },
+  });
+  const { run, runPath } = harness.runFor('formatted-profile-answer');
+  const session = await startRun(runPath, { startedAt: '2026-07-25T08:00:00.000Z' });
+
+  await acceptObservation(session, observation(run.application_url, 1, [fieldControl('gpa')]));
+  const resolution = await resolveField(session, {
+    field_id: 'gpa',
+    alias: 'GPA (Undergraduate)',
+    sensitive: true,
+    formatted_value: '3.7',
+  });
+  assert.equal(resolution.answer.source, 'profile');
+  assert.equal(resolution.answer.value, 3.7);
+  assert.equal(resolution.actionValue, '3.7');
+  assert.equal(
+    resolution.ledger.fields.find((field) => field.field_id === 'gpa').value_digest,
+    digestPrivateValue('3.7'),
+  );
+
+  await recordAction(session, { action: 'select', field_id: 'gpa', outcome: 'succeeded' });
+  await acceptObservation(
+    session,
+    observation(run.application_url, 2, [fieldControl('gpa', '3.7', true)]),
   );
   await finalizeRetained(session, harness.screenshotPath);
 });
@@ -491,8 +763,13 @@ test('prepareSubmission authorizes final_submit', async (t) => {
     attemptId: begun.attemptId,
     outcome: 'succeeded',
   });
+  const post = structuredClone(session.observation);
+  post.observation_id = `${post.observation_id}-post-submit`;
+  post.previous_observation_id = session.observation.observation_id;
+  post.observed_at = '2026-07-25T08:01:00.000Z';
+  await acceptObservation(session, post);
 
-  const final = await finalizeRun(session, { screenshotPath: harness.screenshotPath });
+  const final = await finalizeRun(session, { screenshotPath: harness.screenshotPath, finalUrl: post.url });
   assert.equal(final.finalized, true);
   assert.equal(final.submitActionCount, 1);
   assert.equal(session.finalized, true);
@@ -530,7 +807,7 @@ test('submission authorization is observation-bound and failed submits require f
   assert.equal(retryPreparation.authorized, true);
   const failedBegin = await beginFinalSubmit(session);
   await assert.rejects(
-    finalizeRun(session, { screenshotPath: harness.screenshotPath }),
+    finalizeRun(session, { screenshotPath: harness.screenshotPath, finalUrl: run.application_url }),
     /unresolved/,
   );
   await assert.rejects(
@@ -576,7 +853,12 @@ test('submission authorization is observation-bound and failed submits require f
     attemptId: finalBegin.attemptId,
     outcome: 'succeeded',
   });
-  const finalized = await finalizeRun(session, { screenshotPath: harness.screenshotPath });
+  const post = structuredClone(session.observation);
+  post.observation_id = `${post.observation_id}-post-submit`;
+  post.previous_observation_id = session.observation.observation_id;
+  post.observed_at = '2026-07-25T08:01:00.000Z';
+  await acceptObservation(session, post);
+  const finalized = await finalizeRun(session, { screenshotPath: harness.screenshotPath, finalUrl: post.url });
   assert.equal(finalized.finalized, true);
   assert.equal(finalized.submitActionCount, 2);
 });
@@ -671,7 +953,7 @@ test('agent inference is excluded for sensitive categories but resolves non-sens
         start_date: { value: '2024-01-01', rationale: 'Inferred from availability.' },
         credentials: { value: 'CPA', rationale: 'Inferred from certifications.' },
         role_summary: { value: 'Engineering lead', rationale: 'Inferred from experience.' },
-        optional_reason: { value: null, rationale: 'The role requirements make this optional question not applicable.' },
+        optional_reason: { value: 'Not applicable', rationale: 'The role requirements make this optional question not applicable.' },
       },
     }),
   });
@@ -760,6 +1042,7 @@ test('agent inference is excluded for sensitive categories but resolves non-sens
     semantic_choice: 'not_applicable',
   });
   assert.equal(inferredBlank.answer.source, 'agent_inference');
+  assert.equal(inferredBlank.actionValue, null);
   const optionalField = inferredBlank.ledger.fields.find((f) => f.field_id === 'optional_reason');
   assert.equal(optionalField.answer_state, 'blank');
   assert.equal(optionalField.answer_source, 'agent_inference');

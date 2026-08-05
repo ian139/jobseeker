@@ -33,7 +33,9 @@ export const QUEUE_PRIORITY = Object.freeze([
 
 export const TERMINAL_OUTCOMES = Object.freeze([
   'completed',
+  'blocked',
   'closed',
+  'failed',
   'skipped',
 ]);
 
@@ -137,6 +139,7 @@ const RUN_RESULT_KEYS = new Set([
   'answer_memory_path',
   'blocker_alias',
   'resume_artifact_sha256',
+  'resume_artifact_id',
   'source_table',
   'source_db',
   'source_rowid',
@@ -172,6 +175,7 @@ const RUN_SELECT_COLUMNS = `
   r.evidence_path AS evidence_path,
   r.resume_artifact_path AS resume_artifact_path,
   r.resume_artifact_sha256 AS resume_artifact_sha256,
+  r.resume_artifact_id AS resume_artifact_id,
   j.source_table AS source_table,
   j.source_db AS source_db,
   j.source_rowid AS source_rowid,
@@ -472,6 +476,9 @@ function normalizeRunResultRow(row) {
     && (typeof row.resume_artifact_sha256 !== 'string' || !SHA256_HEX.test(row.resume_artifact_sha256))) {
     fail('E_RUN_RESULT');
   }
+  const resumeArtifactId = row.resume_artifact_id === null
+    ? null
+    : requirePositiveInteger(row.resume_artifact_id, 'E_RUN_RESULT');
   if (row.active === 1
     && (ownerId === null
       || browserSessionId === null
@@ -481,6 +488,7 @@ function normalizeRunResultRow(row) {
       || workspacePath === null
       || resumeArtifactPath === null
       || row.resume_artifact_sha256 === null
+      || resumeArtifactId === null
       || answerMemoryPath === null
       || (row.status === 'needs_user' && row.blocker_alias === null))) {
     fail('E_RUN_RESULT');
@@ -528,6 +536,7 @@ function normalizeRunResultRow(row) {
     evidencePath,
     resumeArtifactPath,
     resumeArtifactSha256: row.resume_artifact_sha256,
+    resumeArtifactId,
     answerMemoryPath,
     blockerAlias: row.blocker_alias,
     sourceTable: row.source_table,
@@ -570,6 +579,7 @@ function claimSql(preflight, ownerId, browserSessionId, now, expiresAt) {
 PRAGMA foreign_keys = ON;
 BEGIN IMMEDIATE;
 CREATE TEMP TABLE _backlog_claim_result (run_id INTEGER PRIMARY KEY);
+CREATE TEMP TABLE _backlog_new_claim_result (run_id INTEGER PRIMARY KEY);
 UPDATE application_runs
 SET browser_session_id = ${sqlLiteral(browserSessionId)},
     lease_expires_at = ${sqlLiteral(expiresAt)},
@@ -602,6 +612,7 @@ INSERT INTO application_runs (
   workspace_path,
   resume_artifact_path,
   resume_artifact_sha256,
+  resume_artifact_id,
   answer_memory_path,
   blocker_alias
 )
@@ -624,17 +635,37 @@ SELECT
   ${sqlLiteral(rootPrefix)} || CAST(j.id AS TEXT),
   ${sqlLiteral(preflight.resumeArtifactPath)},
   ${sqlLiteral(preflight.resumeArtifactSha256)},
+  j.current_resume_artifact_id,
   ${sqlLiteral(preflight.answerMemoryPath)},
   NULL
 FROM application_jobs AS j
 WHERE j.status = 'queued'
   AND NOT EXISTS (SELECT 1 FROM _backlog_claim_result)
   AND NOT EXISTS (SELECT 1 FROM application_runs WHERE active = 1)
+  AND EXISTS (
+    SELECT 1
+    FROM resume_artifacts AS a
+    WHERE a.id = j.current_resume_artifact_id
+      AND a.application_job_id = j.id
+      AND a.pdf_path = ${sqlLiteral(preflight.resumeArtifactPath)}
+      AND a.pdf_sha256 = ${sqlLiteral(preflight.resumeArtifactSha256)}
+      AND a.job_description_path = ${sqlLiteral(preflight.jobDescriptionPath)}
+      AND a.pages = 1
+  )
 ORDER BY ${priority},
          j.source_last_seen_at IS NULL ASC,
          j.source_last_seen_at DESC,
          j.id ASC
 LIMIT 1;
+INSERT INTO _backlog_new_claim_result (run_id)
+SELECT last_insert_rowid()
+WHERE changes() = 1;
+UPDATE application_runs
+SET workspace_path = ${sqlLiteral(rootPrefix)} || CAST(job_id AS TEXT)
+      || '/run-' || CAST(id AS TEXT),
+    evidence_path = ${sqlLiteral(rootPrefix)} || CAST(job_id AS TEXT)
+      || '/run-' || CAST(id AS TEXT) || '/evidence'
+WHERE id IN (SELECT run_id FROM _backlog_new_claim_result);
 INSERT INTO _backlog_claim_result (run_id)
 SELECT r.id
 FROM application_runs AS r
@@ -1277,11 +1308,13 @@ export async function createJobWorkspace(run, options) {
     || normalizedRun.resumeArtifactSha256 !== preflight.resumeArtifactSha256) {
     fail('E_RESUME_BINDING');
   }
-  const expectedWorkspacePath = path.join(normalized.workspaceRoot, `job-${normalizedRun.jobId}`);
+  const jobWorkspaceRoot = path.join(normalized.workspaceRoot, `job-${normalizedRun.jobId}`);
+  const expectedWorkspacePath = path.join(jobWorkspaceRoot, `run-${normalizedRun.runId}`);
   const expectedEvidencePath = path.join(expectedWorkspacePath, 'evidence');
   if (normalizedRun.workspacePath !== expectedWorkspacePath) fail('E_WORKSPACE_BINDING');
   if (normalizedRun.evidencePath !== expectedEvidencePath) fail('E_EVIDENCE_BINDING');
   await ensurePrivateRoot(normalized.workspaceRoot);
+  await createPrivateDirectory(jobWorkspaceRoot);
   await createPrivateDirectory(expectedWorkspacePath);
   await createPrivateDirectory(expectedEvidencePath);
 
@@ -1563,4 +1596,55 @@ COMMIT;
   const result = normalizeRunRows(rows, 'E_OUTCOME_RESULT');
   if (result === null) fail('E_RUN_NOT_ACTIVE');
   return result;
+}
+
+/** Requeue a diagnosed failed or blocked job while preserving immutable run history. */
+export async function requeueTerminalJob(database, jobId, options = {}) {
+  const allowed = new Set(['reason']);
+  assertExactKeys(options, allowed, 'E_REQUEUE_OPTIONS');
+  const id = requirePositiveInteger(jobId, 'E_JOB_ID');
+  const reason = normalizeReasonCode(options.reason, 'diagnosed_terminal_retry');
+  const db = databasePath(database);
+  const rows = parseRows(await runSqlite(db, `
+PRAGMA foreign_keys = ON;
+BEGIN IMMEDIATE;
+CREATE TEMP TABLE _backlog_requeue_result (job_id INTEGER PRIMARY KEY);
+INSERT INTO _backlog_requeue_result (job_id)
+SELECT j.id
+FROM application_jobs AS j
+WHERE j.id = ${sqlLiteral(id)}
+  AND j.status IN ('failed', 'blocked')
+  AND NOT EXISTS (
+    SELECT 1
+    FROM application_runs AS active_run
+    WHERE active_run.job_id = j.id
+      AND active_run.active = 1
+  )
+  AND EXISTS (
+    SELECT 1
+    FROM application_runs AS terminal_run
+    WHERE terminal_run.job_id = j.id
+      AND terminal_run.active = 0
+      AND terminal_run.status = j.status
+  );
+UPDATE application_jobs
+SET status = 'queued',
+    status_reason = ${sqlLiteral(reason)},
+    claimed_at = NULL,
+    completed_at = NULL
+WHERE id IN (SELECT job_id FROM _backlog_requeue_result);
+SELECT
+  j.id AS job_id,
+  j.status,
+  j.status_reason AS reason_code
+FROM application_jobs AS j
+JOIN _backlog_requeue_result AS r ON r.job_id = j.id;
+COMMIT;
+`), 'E_REQUEUE_RESULT');
+  if (rows.length !== 1) fail('E_JOB_NOT_RETRYABLE');
+  return Object.freeze({
+    jobId: requirePositiveInteger(rows[0].job_id, 'E_REQUEUE_RESULT'),
+    status: rows[0].status,
+    reasonCode: rows[0].reason_code,
+  });
 }

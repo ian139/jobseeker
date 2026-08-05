@@ -337,6 +337,13 @@ test('memory outranks every lower source and aliases are exact', () => {
     const structuredProfile = {
         schema: PROFILE_SCHEMA,
         address: { country: 'Structured Country' },
+        location_preferences: { onsite: true },
+        relocation: { willing: true },
+        links: [{
+            label: 'Portfolio',
+            kind: 'portfolio',
+            url: 'https://example.test/work',
+        }],
         answers: { 'profile.address.country': 'Conflicting Alias Country' },
     };
     assert.deepEqual(
@@ -347,6 +354,27 @@ test('memory outranks every lower source and aliases are exact', () => {
             value: 'Structured Country',
             missing: false,
         },
+    );
+    assert.equal(
+        resolveAnswer({
+            alias: 'profile.location_preferences.onsite',
+            profile: structuredProfile,
+        }).value,
+        true,
+    );
+    assert.equal(
+        resolveAnswer({
+            alias: 'profile.relocation.willing',
+            profile: structuredProfile,
+        }).value,
+        true,
+    );
+    assert.equal(
+        resolveAnswer({
+            alias: 'Website/Portfolio',
+            profile: structuredProfile,
+        }).value,
+        'https://example.test/work',
     );
     assert.equal(
         resolveAnswer({

@@ -1,0 +1,32 @@
+{
+  "timezone": "America/New_York",
+  "databasePath": "data/RealJobs.sqlite",
+  "privateRoot": "private/artifacts",
+  "flagPath": "scheduler/wake-omp.flag",
+  "sources": [
+    {
+      "source": "theirstack",
+      "profile": "default",
+      "mode": "paid",
+      "options": {
+        "postedAtMaxAgeDays": 30
+      }
+    },
+    {
+      "source": "greenhouse",
+      "profile": "default",
+      "mode": "free",
+      "options": {
+        "boardTokens": ["stripe", "airbnb"]
+      }
+    },
+    {
+      "source": "ashby",
+      "profile": "default",
+      "mode": "free",
+      "options": {
+        "boardNames": ["notion", "linear"]
+      }
+    }
+  ]
+}

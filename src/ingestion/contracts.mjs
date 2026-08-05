@@ -9,7 +9,7 @@ export const WORKPLACE_TYPES = Object.freeze(['remote', 'hybrid', 'onsite', 'unk
 export const AVAILABILITY_STATES = Object.freeze(['open', 'closed', 'unknown']);
 export const FRESHNESS_STATES = Object.freeze(['current', 'stale', 'unverified']);
 export const ELIGIBILITY_STATES = Object.freeze(['eligible', 'ineligible', 'review']);
-export const DEDUPE_IDENTITY_KINDS = Object.freeze(['source', 'ats', 'application_url', 'review_fingerprint']);
+export const DEDUPE_IDENTITY_KINDS = Object.freeze(['ats', 'application_url', 'review_fingerprint']);
 export const SYNC_MODES = Object.freeze(['preview', 'paid']);
 export const SYNC_STATES = Object.freeze(['previewed', 'succeeded', 'failed', 'paid_ambiguous']);
 export const FAILURE_CLASSES = Object.freeze(['retryable', 'terminal', 'paid_ambiguous', 'authentication', 'account_health']);
@@ -284,6 +284,21 @@ function validateNormalizedShape(input, location = 'job') {
   requireBoolean(value.dedupeReviewRequired, `${location}.dedupeReviewRequired`);
   validateSafePayloadPath(value.rawPayloadPath, `${location}.rawPayloadPath`);
   requireDigest(value.rawPayloadSha256, `${location}.rawPayloadSha256`);
+  const classifiedAts = classifyAts(value.canonicalApplicationUrl);
+  if (classifiedAts.kind !== 'unknown' && (value.atsKind !== classifiedAts.kind || value.atsIdentifier !== classifiedAts.identifier)) fail('E_ATS_CLASSIFICATION', location);
+  const eligibility = classifyEligibility(value);
+  if (
+    value.eligibilityState !== eligibility.eligibilityState
+    || value.priority !== eligibility.priority
+    || value.eligibilityReasonCodes.length !== eligibility.eligibilityReasonCodes.length
+    || value.eligibilityReasonCodes.some((code, index) => code !== eligibility.eligibilityReasonCodes[index])
+  ) fail('E_ELIGIBILITY_CLASSIFICATION', location);
+  const identity = deriveDedupeIdentity(value);
+  if (
+    value.dedupeIdentityKind !== identity.kind
+    || value.dedupeIdentityKey !== identity.key
+    || value.dedupeReviewRequired !== identity.reviewRequired
+  ) fail('E_DEDUPE_CLASSIFICATION', location);
   return value;
 }
 
@@ -297,7 +312,7 @@ function validateSourceResultShape(input, location = 'result') {
   rejectUnknownKeys(value, SOURCE_RESULT_KEY_SET, location);
   for (const key of SOURCE_RESULT_KEYS) if (!Object.hasOwn(value, key)) fail('E_SCHEMA_REQUIRED', `${location}.${key}`);
   if (value.schema !== SOURCE_SYNC_RESULT_SCHEMA) fail('E_SCHEMA_VERSION', `${location}.schema`);
-  if (value.syncRunId !== null) requireString(value.syncRunId, `${location}.syncRunId`, { max: 128 });
+  if (value.syncRunId !== null) requireInteger(value.syncRunId, `${location}.syncRunId`, { min: 1, max: Number.MAX_SAFE_INTEGER });
   requireString(value.source, `${location}.source`, { max: 64, pattern: SOURCE_RE });
   requireString(value.profile, `${location}.profile`, { max: 128, pattern: PROFILE_RE });
   requireEnum(value.mode, SYNC_MODE_SET, `${location}.mode`);
@@ -307,9 +322,9 @@ function validateSourceResultShape(input, location = 'result') {
   requireNullableString(value.checkpointBefore, `${location}.checkpointBefore`, { max: 512 });
   requireNullableString(value.checkpointAfter, `${location}.checkpointAfter`, { max: 512 });
   if (value.mode === 'preview' && value.syncRunId !== null) fail('E_PREVIEW_RUN_ID', `${location}.syncRunId`);
-  if (value.mode === 'paid' && value.syncRunId === null) fail('E_PAID_RUN_ID', `${location}.syncRunId`);
+  if (value.mode === 'paid' && value.state !== 'failed' && value.syncRunId === null) fail('E_PAID_RUN_ID', `${location}.syncRunId`);
   if (value.state === 'previewed' && value.mode !== 'preview') fail('E_SYNC_STATE', `${location}.state`);
-  if (value.state !== 'previewed' && value.mode !== 'paid') fail('E_SYNC_STATE', `${location}.state`);
+  if ((value.state === 'succeeded' || value.state === 'paid_ambiguous') && value.mode !== 'paid') fail('E_SYNC_STATE', `${location}.state`);
   if (value.state === 'succeeded' && value.finishedAt === null) fail('E_SYNC_FINISHED', `${location}.finishedAt`);
   for (const key of ['pagesFetched', 'requestCount', 'jobsSeen', 'jobsInserted', 'jobsUpdated', 'jobsUnchanged', 'dedupeGroupsTouched', 'queueRowsInserted']) {
     requireInteger(value[key], `${location}.${key}`);
@@ -383,10 +398,21 @@ function atsFromUrl(value) {
   }
   const host = parsed.hostname.toLowerCase();
   const parts = parsed.pathname.split('/').filter(Boolean);
-  if (hostMatches(host, 'boards.greenhouse.io', 'greenhouse.io')) return { kind: 'greenhouse', identifier: parts[0] ?? null };
-  if (hostMatches(host, 'jobs.ashbyhq.com', 'ashbyhq.com')) return { kind: 'ashby', identifier: parts[0] ?? null };
-  if (hostMatches(host, 'jobs.lever.co', 'lever.co') || hostMatches(host, 'jobs.eu.lever.co', null)) return { kind: 'lever', identifier: parts[0] ?? null };
-  if (host === 'myworkdayjobs.com' || host.endsWith('.myworkdayjobs.com') || host === 'workdayjobs.com' || host.endsWith('.workdayjobs.com')) return { kind: 'workday', identifier: parts[0] ?? host };
+  if (host === 'grnh.se') {
+    return { kind: 'greenhouse', identifier: parts.length > 0 ? `grnh.se:${parts.join('/')}` : null };
+  }
+  if (hostMatches(host, 'boards.greenhouse.io', 'greenhouse.io') || hostMatches(host, 'job-boards.greenhouse.io', null)) {
+    const jobsIndex = parts.findIndex((part) => part.toLowerCase() === 'jobs');
+    const postingId = parsed.searchParams.get('gh_jid') ?? parsed.searchParams.get('token') ?? (jobsIndex >= 0 ? parts[jobsIndex + 1] ?? null : null);
+    const board = parsed.searchParams.get('for') ?? (jobsIndex > 0 ? parts[jobsIndex - 1] : null);
+    return { kind: 'greenhouse', identifier: board && postingId ? `${board}:${postingId}` : null };
+  }
+  if (hostMatches(host, 'jobs.ashbyhq.com', 'ashbyhq.com')) return { kind: 'ashby', identifier: parts[0] && parts[1] ? `${parts[0]}:${parts[1]}` : null };
+  if (hostMatches(host, 'jobs.lever.co', 'lever.co') || hostMatches(host, 'jobs.eu.lever.co', null)) return { kind: 'lever', identifier: parts[0] && parts[1] ? `${parts[0]}:${parts[1]}` : null };
+  if (host === 'myworkdayjobs.com' || host.endsWith('.myworkdayjobs.com') || host === 'workdayjobs.com' || host.endsWith('.workdayjobs.com')) {
+    const postingId = parsed.searchParams.get('jobReqId') ?? parts.at(-1) ?? null;
+    return { kind: 'workday', identifier: postingId ? `${host}:${postingId}` : null };
+  }
   if (host === 'linkedin.com' || host.endsWith('.linkedin.com')) {
     const jobPart = parts.find((part) => /^\d{5,}$/u.test(part)) ?? parts.at(-1) ?? null;
     return { kind: 'linkedin', identifier: jobPart };
@@ -407,15 +433,10 @@ function normalizeIdentityText(value) {
 
 export function deriveDedupeIdentity(job) {
   const value = requireObject(job, 'job');
-  const source = typeof value.source === 'string' ? value.source.trim().toLowerCase() : '';
-  const sourceJobId = value.sourceJobId;
   let kind;
   let key;
   let reviewRequired = false;
-  if (source && typeof sourceJobId === 'string' && sourceJobId.length > 0) {
-    kind = 'source';
-    key = `${source}:${sourceJobId}`;
-  } else if (ATS_SET.has(value.atsKind) && value.atsKind !== 'unknown' && value.atsKind !== 'custom' && typeof value.atsIdentifier === 'string' && value.atsIdentifier.length > 0) {
+  if (ATS_SET.has(value.atsKind) && value.atsKind !== 'unknown' && value.atsKind !== 'custom' && typeof value.atsIdentifier === 'string' && value.atsIdentifier.length > 0) {
     kind = 'ats';
     key = `${value.atsKind}:${value.atsIdentifier}`;
   } else if (typeof value.canonicalApplicationUrl === 'string' && value.canonicalApplicationUrl.length > 0) {

@@ -2,7 +2,7 @@
 
 This file remains authoritative for the established Phase 1–3 contracts and evidence gates. `.omp/work-context/20260803T232006Z-full-job-automation-roadmap.md` is the durable authority for the forward production expansion. `PROJECT_HANDOFF.md`, `ComputerUse.md`, and older work records are historical evidence only.
 
-**Current phase:** Expanded-roadmap Phase B unified job ingestion is active. Phase A baseline reconciliation is complete: Node 24.19.0 is supported, one DOM-first interaction hierarchy and five-source answer contract are authoritative, legacy answer records are quarantined, historical completion evidence is classified, and `data/RealJobs.sqlite` is the sole active database. Existing Phase 3 backlog processing remains authorized: process exactly one active job at a time through the persistent supervised OMP session. The remaining Phase 1 headed live-submission checklist entries stay evidence-gated and are not marked complete by either authorization.
+**Current phase:** Expanded-roadmap Phase E deterministic ATS execution is active. Greenhouse run 23001/job 69 is the sole active headed proof, but successful mechanics must now be routed through a reusable repository-owned ATS action-plan, normalization, recovery, and evidence contract before submission. The keychain prompt is cleared and all application answers are owner-private. Ordinary OMP browser actions on the visible CMUX/CDP surface are primary; the repository-pinned Playwright CLI is an exact-control fallback only after the browser helper fails, and computer/coordinates are permitted only after both fail. Live evidence proved exact text fill/retention and exposed recurring React-select requirements: rendered-option clicks, retained-value normalization, bounded retries, and paginated education lookup. Per-job page scripts are diagnostic evidence only. No final-submit authorization or click has occurred. Phase A baseline reconciliation, Phase B unified TheirStack ingestion, and Phase D resume-before-claim integration are complete and verified. Phase C public-board/company discovery and scheduler/wake implementation are verified, while authenticated visible-browser LinkedIn proof and Ubuntu timer enablement/missed-run proof remain externally blocked. Migration 008 keeps `data/RealJobs.sqlite` as the resume-binding authority.
 
 ## How an OMP agent must use this file
 
@@ -322,9 +322,12 @@ queued
   -> needs_input      (run remains active; exact user fact or external challenge only)
   -> completed        (audit passed; OMP submission succeeded and is recorded)
      or skipped
+     or blocked       (diagnosed tool, infrastructure, or non-resumeable blocker)
+     or failed        (diagnosed bounded evidence-integrity or infrastructure failure)
+     or closed        (posting no longer available or ineligible)
 ```
 
-Operational failures remain active/retryable until diagnosed. An error or sensitive field must not be relabeled `completed`. Claims and status transitions must be atomic so restarts do not duplicate an application run.
+Operational failures remain active/retryable until diagnosed. A bounded, diagnosed failure or external blocker may be persisted as a terminal `blocked`, `failed`, or `closed` outcome. An error or sensitive field must not be relabeled `completed`. Claims and status transitions must be atomic so restarts do not duplicate an application run.
 
 ## Step A — Source, backlog, and Phase 1 worker
 
@@ -340,11 +343,11 @@ Operational failures remain active/retryable until diagnosed. An error or sensit
 
 ## Step B — Insert the Phase 2 resume generator
 
-- [ ] Before opening the browser, generate or reuse the canonical resume for the claimed job description.
-- [ ] Validate the generator manifest, one-page PDF, and hashes before use.
-- [ ] Record the canonical artifact identity in `resume_artifacts` and bind that identity to the application run.
-- [ ] Stage one owned copy of the verified PDF for browser upload; do not create another resume format or renderer.
-- [ ] Pass the staged job-specific PDF as `resume_upload_path` to the unchanged Phase 1 workflow.
+- [x] Before opening the browser, generate or reuse the canonical resume for the queued job's exact current description.
+- [x] Validate the generator manifest, one-page PDF, description artifact, and hashes before use.
+- [x] Record the canonical artifact identity in `resume_artifacts` and bind that identity to the application job and active run.
+- [x] Keep the verified PDF owner-private and pass its canonical path directly; create a separate owned upload copy only if a browser control requires it.
+- [x] Pass the verified job-specific PDF as `resume_upload_path` to the unchanged Phase 1 workflow.
 - [ ] Verify from run evidence that the uploaded file hash matches the selected canonical artifact.
 - [ ] Demonstrate the complete source-to-backlog-to-resume-to-browser flow on a real queued job.
 
@@ -375,7 +378,7 @@ recover-or-claim
   -> inspect the backlog again
 ```
 
-`recoverOrClaimBacklogRun` owns startup ordering: recover an existing active run first; only when none exists may it preflight and atomically claim one prepared job. `selectSafeApplicationBatch` may batch only conservative independent routine controls. Newly revealed/dependency controls, validation recovery, uploads, widgets, choices, navigation, and submission remain single-action units.
+`recoverPrepareOrClaimBacklogRun` owns startup ordering: recover an existing active run first; only when none exists may it generate/reuse and validate the next queued job's exact resume, persist the binding, preflight those exact paths, and atomically claim that same prepared job. `claimNextQueuedJob` enforces the persisted artifact ID/path/hash/description-path binding in its transaction. `selectSafeApplicationBatch` may batch only conservative independent routine controls. Newly revealed/dependency controls, validation recovery, uploads, widgets, choices, navigation, and submission remain single-action units.
 
 If no work exists, the OMP session waits and checks again using a configured interval or an explicit wake signal. Scripts may provide deterministic source, database, resume, or observation operations to the agent; they do not own the loop.
 

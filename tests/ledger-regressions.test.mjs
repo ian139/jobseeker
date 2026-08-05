@@ -8,6 +8,7 @@ import {
   markFieldSensitive,
   mergeObservation,
   recordActionAttempt,
+  recordActionBatch,
   recordResolution,
   validateLedger,
   validateObservation,
@@ -275,6 +276,51 @@ test('persists candidate classes and rejects targetless, stale, and mismatched a
     observation_id: 'obs-2',
   }), /current|candidate|stale/i);
   validateLedger(ledger);
+});
+
+test('records clear as a canonical field mutation', () => {
+  const first = observation('obs-1', [control('alpha', { value: 'answer' }), finalCandidate()]);
+  const ledger = recordActionAttempt(createLedger(first), {
+    action: 'clear',
+    field_id: 'alpha',
+    ref: 'ref-alpha',
+    observation_id: 'obs-1',
+    outcome: 'succeeded',
+  });
+  assert.equal(ledger.action_attempts.at(-1).action, 'clear');
+  assert.equal(fieldById(ledger, 'alpha').retained, false);
+  assert.equal(fieldById(ledger, 'alpha').valid, false);
+});
+test('fill batches preserve succeeded retry ancestry and terminal stale outcomes', () => {
+  const current = observation('obs-1', [
+    control('alpha'),
+    control('beta'),
+    finalCandidate(),
+  ]);
+  const ledger = recordActionBatch(createLedger(current), [
+    {
+      action_id: 'retry-success',
+      action: 'fill',
+      field_id: 'alpha',
+      ref: 'ref-alpha',
+      observation_id: 'obs-1',
+      outcome: 'succeeded',
+      retry_of: 0,
+      error_code: null,
+    },
+    {
+      action_id: 'stale-stop',
+      action: 'fill',
+      field_id: 'beta',
+      ref: 'ref-beta',
+      observation_id: 'obs-1',
+      outcome: 'stale',
+      retry_of: null,
+      error_code: 'stale_reference',
+    },
+  ]);
+  assert.equal(ledger.action_attempts[0].retry_of, 0);
+  assert.equal(ledger.action_attempts[1].outcome, 'stale');
 });
 
 test('invalidates mutation retention until a newer chained observation verifies it', () => {

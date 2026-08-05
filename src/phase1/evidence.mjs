@@ -2,8 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
+import { validateBrowserActionPlan, validateBrowserActionResult } from './action-plan.mjs';
+import { validateObservation } from './ledger.mjs';
 
 export const EVIDENCE_SCHEMA_VERSION = 'phase1-evidence-v1';
+export const ACTION_RESULT_RECEIPT_SCHEMA = 'phase1-browser-action-execution-v1';
+export const RETENTION_PROOFS_SCHEMA = 'phase1-retention-proofs-v1';
+export const SUBMISSION_AUTHORIZATION_SCHEMA = 'phase1-submission-authorization-v1';
 export const DEFAULT_MAX_CANONICAL_JSON_BYTES = 1024 * 1024;
 export const DEFAULT_MAX_INPUT_BYTES = 256 * 1024 * 1024;
 
@@ -17,11 +22,19 @@ const HEX_SHA256 = /^[0-9a-f]{64}$/;
 const ARTIFACT_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SEQUENCED_NAME = /^([a-z][a-z0-9-]*)-(\d+)\.json$/;
 const ACTION_PREFIX = 'action';
+const ACTION_PLAN_PREFIX = 'action-plan';
+const ACTION_RESULT_PREFIX = 'action-result';
+const RETENTION_PREFIX = 'retention';
+const AUTHORIZATION_PREFIX = 'submission-authorization';
 const IDENTITY_PREFIXES = new Set(['input', 'screenshot', 'upload']);
 const RECORD_PREFIXES = new Set([
   'observation',
   'diff',
   'action',
+  'action-plan',
+  'action-result',
+  'retention',
+  'submission-authorization',
   'retry',
   'ledger',
   'audit',
@@ -61,6 +74,7 @@ const MAX_FINAL_AUDIT_FIELD_COUNT = 1_000_000;
 const COMPLETION_KEYS = new Set([
   'schema_version',
   'finalized_at',
+  'final_url',
   'final_audit',
   'screenshot',
   'upload',
@@ -72,7 +86,17 @@ const COMPLETION_IDENTITY_KEYS = new Set(['artifact', 'path', 'size', 'sha256'])
 const COMPLETION_JOURNAL_KEYS = new Set(['artifact', 'entries', 'sha256']);
 const TERMINAL_SUBMIT_OUTCOMES = new Set(['succeeded', 'failed', 'blocked']);
 const MAX_ACTION_ID_BYTES = 180;
+const MAX_URL_BYTES = 16 * 1024;
 const AUDIT_ARTIFACT_NAME = /^audit-\d+\.json$/;
+const UPLOAD_BASENAME = /^(?!\.{1,2}$)(?!\s)[^/\\\u0000-\u001f\u007f]{1,255}$/u;
+const SUBMISSION_AUTHORIZATION_KEYS = new Set([
+  'schema',
+  'observation_id',
+  'final_ref',
+  'ledger_sha256',
+  'audit',
+]);
+const SUBMISSION_AUTHORIZATION_AUDIT_KEYS = new Set(['artifact', 'sha256']);
 
 const FLAGS = fs.constants;
 const O_NOFOLLOW = FLAGS.O_NOFOLLOW ?? 0;
@@ -383,10 +407,47 @@ function validateFinalAudit(value) {
   if (value.final_candidate_refs.length === 0 && value.final_review_boundary !== true) fail('FINAL_AUDIT_REQUIRED');
   return value;
 }
+
+function validateSubmissionAuthorizationShape(value, code = 'PAYLOAD_INVALID') {
+  if (!isPlainObject(value)) fail(code);
+  requireExactKeys(value, SUBMISSION_AUTHORIZATION_KEYS, code);
+  if (value.schema !== SUBMISSION_AUTHORIZATION_SCHEMA
+    || typeof value.observation_id !== 'string'
+    || value.observation_id.length === 0
+    || Buffer.byteLength(value.observation_id, 'utf8') > MAX_FINAL_AUDIT_OBSERVATION_ID_BYTES
+    || typeof value.final_ref !== 'string'
+    || value.final_ref.length === 0
+    || Buffer.byteLength(value.final_ref, 'utf8') > MAX_FINAL_AUDIT_REF_BYTES
+    || !HEX_SHA256.test(value.ledger_sha256)
+    || !isPlainObject(value.audit)) {
+    fail(code);
+  }
+  requireExactKeys(value.audit, SUBMISSION_AUTHORIZATION_AUDIT_KEYS, code);
+  if (!AUDIT_ARTIFACT_NAME.test(value.audit.artifact)
+    || !HEX_SHA256.test(value.audit.sha256)) {
+    fail(code);
+  }
+  return frozenClone(value);
+}
 function requireExactKeys(value, allowed, code) {
   if (!isPlainObject(value)) fail(code);
   const keys = Object.keys(value);
   if (keys.length !== allowed.size || keys.some((key) => !allowed.has(key))) fail(code);
+}
+
+function validateHttpUrl(value, code) {
+  if (typeof value !== 'string'
+    || value.length === 0
+    || value.includes('\0')
+    || Buffer.byteLength(value, 'utf8') > MAX_URL_BYTES) fail(code);
+  let parsed;
+  try {
+    parsed = new URL(value);
+  } catch {
+    fail(code);
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') fail(code);
+  return value;
 }
 
 function deepFreeze(value) {
@@ -397,11 +458,75 @@ function deepFreeze(value) {
   return value;
 }
 
+function frozenClone(value) {
+  return deepFreeze(structuredClone(value));
+}
+
 function validActionId(value) {
   return typeof value === 'string'
     && value.length > 0
     && !value.includes('\0')
     && Buffer.byteLength(value, 'utf8') <= MAX_ACTION_ID_BYTES;
+}
+
+function coreValidation(fn, value, code) {
+  try {
+    return fn(value);
+  } catch {
+    fail(code);
+  }
+}
+
+function validateActionResultReceipt(value, code = 'PAYLOAD_INVALID') {
+  requireExactKeys(value, new Set(['schema', 'plan', 'result', 'post_observation']), code);
+  if (value.schema !== ACTION_RESULT_RECEIPT_SCHEMA) fail(code);
+  const plan = coreValidation((candidate) => validateBrowserActionPlan(candidate), value.plan, code);
+  coreValidation(validateObservation, value.post_observation, code);
+  coreValidation(
+    (candidate) => validateBrowserActionResult(candidate, plan, value.post_observation),
+    value.result,
+    code,
+  );
+  if (value.result.post_observation_id !== value.post_observation.observation_id) fail(code);
+  return {
+    schema: ACTION_RESULT_RECEIPT_SCHEMA,
+    plan,
+    result: frozenClone(value.result),
+    post_observation: frozenClone(value.post_observation),
+  };
+}
+
+function validateRetentionAggregate(value, code = 'PAYLOAD_INVALID') {
+  requireExactKeys(value, new Set(['schema', 'observation_id', 'proofs']), code);
+  if (value.schema !== RETENTION_PROOFS_SCHEMA
+    || typeof value.observation_id !== 'string'
+    || value.observation_id.length === 0
+    || value.observation_id.includes('\0')
+    || Buffer.byteLength(value.observation_id, 'utf8') > MAX_FINAL_AUDIT_OBSERVATION_ID_BYTES
+    || !isPlainObject(value.proofs)) {
+    fail(code);
+  }
+  const proofs = {};
+  for (const [fieldId, proof] of Object.entries(value.proofs)) {
+    if (typeof fieldId !== 'string' || fieldId.length === 0 || fieldId.includes('\0')) fail(code);
+    requireExactKeys(proof, new Set(['value_digest', 'action_id', 'file_name']), code);
+    if (!HEX_SHA256.test(proof.value_digest)
+      || !validActionId(proof.action_id)
+      || typeof proof.file_name !== 'string'
+      || !UPLOAD_BASENAME.test(proof.file_name)) {
+      fail(code);
+    }
+    proofs[fieldId] = {
+      value_digest: proof.value_digest,
+      action_id: proof.action_id,
+      file_name: proof.file_name,
+    };
+  }
+  return frozenClone({
+    schema: RETENTION_PROOFS_SCHEMA,
+    observation_id: value.observation_id,
+    proofs,
+  });
 }
 
 function validateFinalSubmitJournal(journal) {
@@ -483,6 +608,7 @@ function validateCompletionReportShape(report) {
     || report.submit_action_count < 0) {
     fail('ARTIFACT_CORRUPT');
   }
+  validateHttpUrl(report.final_url, 'ARTIFACT_CORRUPT');
   validateCompletionHash(report.final_audit, COMPLETION_AUDIT_KEYS);
   if (!AUDIT_ARTIFACT_NAME.test(report.final_audit.artifact)) fail('ARTIFACT_CORRUPT');
   validateCompletionHash(report.action_journal, COMPLETION_JOURNAL_KEYS, JOURNAL_NAME);
@@ -887,14 +1013,37 @@ export class EvidenceStore {
   writeArtifact(name, value) {
     return this.writeJsonArtifact(name, value);
   }
-
   readArtifact(name) {
     const safe = safeName(name);
     if (safe === COMPLETION_NAME) return this._readValidatedCompletion().report;
+    if (/^action-plan-\d+\.json$/.test(safe)) return this.readActionPlan(safe);
+    if (/^action-result-\d+\.json$/.test(safe)) return this.readActionResult(safe);
+    if (/^retention-\d+\.json$/.test(safe)) return this.readRetentionProofs(safe);
+    if (/^submission-authorization-\d+\.json$/.test(safe)) {
+      return this.readSubmissionAuthorization(safe);
+    }
     const bytes = this._rawArtifact(safe);
     return canonicalParse(bytes, this._maxJsonBytes, false);
   }
 
+  listActionResults() {
+    const names = this.listArtifacts().filter((name) => /^action-result-\d+\.json$/.test(name));
+    for (const name of names) this.readActionResult(name);
+    return names;
+  }
+
+  listRetentionProofs() {
+    const names = this.listArtifacts().filter((name) => /^retention-\d+\.json$/.test(name));
+    for (const name of names) this.readRetentionProofs(name);
+    return names;
+  }
+
+  listSubmissionAuthorizations() {
+    const names = this.listArtifacts()
+      .filter((name) => /^submission-authorization-\d+\.json$/.test(name));
+    for (const name of names) this.readSubmissionAuthorization(name);
+    return names;
+  }
   readJson(name) {
     return this.readArtifact(name);
   }
@@ -960,6 +1109,44 @@ export class EvidenceStore {
   recordFinalAudit(audit) {
     return this.recordAudit(audit, { final: true });
   }
+  _validatedSubmissionAuthorization(value) {
+    const normalized = validateSubmissionAuthorizationShape(value);
+    const auditBytes = this._rawArtifact(normalized.audit.artifact);
+    if (crypto.createHash('sha256').update(auditBytes).digest('hex') !== normalized.audit.sha256) {
+      fail('ARTIFACT_CORRUPT');
+    }
+    const audit = canonicalParse(auditBytes, this._maxJsonBytes, false);
+    validateFinalAudit(audit);
+    if (audit.observation_id !== normalized.observation_id
+      || !audit.final_candidate_refs.includes(normalized.final_ref)) {
+      fail('PAYLOAD_INVALID');
+    }
+    return normalized;
+  }
+
+  recordSubmissionAuthorization(value) {
+    this._ensureMutable();
+    const normalized = this._validatedSubmissionAuthorization(value);
+    for (const name of this.listSubmissionAuthorizations()) {
+      const existing = this.readSubmissionAuthorization(name);
+      if (existing.observation_id !== normalized.observation_id) continue;
+      if (existing.final_ref !== normalized.final_ref
+        || existing.ledger_sha256 !== normalized.ledger_sha256
+        || existing.audit.sha256 !== normalized.audit.sha256) {
+        fail('PAYLOAD_INVALID');
+      }
+      return this._publicationRef(name, this._rawArtifact(name));
+    }
+    return this._writeUnique(AUTHORIZATION_PREFIX, normalized);
+  }
+
+  readSubmissionAuthorization(name) {
+    const safe = safeName(name);
+    if (!/^submission-authorization-\d+\.json$/.test(safe)) fail('PAYLOAD_INVALID');
+    return this._validatedSubmissionAuthorization(
+      canonicalParse(this._rawArtifact(safe), this._maxJsonBytes, false),
+    );
+  }
 
   _acquireJournalLock() {
     this._assertRoot();
@@ -1007,10 +1194,19 @@ export class EvidenceStore {
     if (!text.endsWith('\n')) fail('JOURNAL_CORRUPT');
     const lines = text.slice(0, -1).split('\n');
     const entries = [];
+    const actionIds = new Set();
     for (const line of lines) {
       if (!line || Buffer.byteLength(line, 'utf8') > this._maxJsonBytes) fail('JOURNAL_CORRUPT');
       const value = canonicalParse(Buffer.from(line, 'utf8'), this._maxJsonBytes, true);
-      if (!isPlainObject(value) || !Number.isSafeInteger(value.sequence) || value.sequence !== entries.length + 1) fail('JOURNAL_CORRUPT');
+      if (!isPlainObject(value)
+        || !Number.isSafeInteger(value.sequence)
+        || value.sequence !== entries.length + 1) {
+        fail('JOURNAL_CORRUPT');
+      }
+      if (Object.prototype.hasOwnProperty.call(value, 'action_id')) {
+        if (!validActionId(value.action_id) || actionIds.has(value.action_id)) fail('JOURNAL_CORRUPT');
+        actionIds.add(value.action_id);
+      }
       entries.push(value);
     }
     return entries;
@@ -1067,21 +1263,207 @@ export class EvidenceStore {
     };
   }
 
-  recordAction(action) {
-    this._ensureMutable();
-    if (!isPlainObject(action)) fail('PAYLOAD_INVALID');
-    const artifact = this._writeUnique(ACTION_PREFIX, action);
-    const journal = this._appendJournalEntry(action);
+  _actionArtifactRecords() {
+    const records = [];
+    const actionIds = new Set();
+    for (const name of this.listArtifacts().filter((item) => /^action-\d+\.json$/.test(item))) {
+      const bytes = this._rawArtifact(name);
+      const value = canonicalParse(bytes, this._maxJsonBytes, false);
+      if (!isPlainObject(value)) fail('ARTIFACT_CORRUPT');
+      if (Object.prototype.hasOwnProperty.call(value, 'action_id')) {
+        if (!validActionId(value.action_id) || actionIds.has(value.action_id)) {
+          fail('ARTIFACT_CORRUPT');
+        }
+        actionIds.add(value.action_id);
+      }
+      records.push({ value, ref: this._publicationRef(name, bytes) });
+    }
+    return records;
+  }
+
+  _actionPublication(artifact, journalEntry) {
+    const artifactRef = artifact.ref ?? artifact;
+    const journalBytes = this._rawArtifact(JOURNAL_NAME, {
+      maxBytes: this._maxJsonBytes * 16,
+      journal: true,
+    });
     return {
-      ...artifact,
-      sequence: journal.entry.sequence,
+      ...artifactRef,
+      sequence: journalEntry.sequence,
       journalPath: JOURNAL_NAME,
-      journalSequence: journal.entry.sequence,
+      journalSequence: journalEntry.sequence,
+      journal: {
+        ...this._publicationRef(JOURNAL_NAME, journalBytes),
+        sequence: journalEntry.sequence,
+        entry: frozenClone(journalEntry),
+      },
     };
   }
 
+  recordAction(action) {
+    this._ensureMutable();
+    if (!isPlainObject(action)) fail('PAYLOAD_INVALID');
+    const hasActionId = Object.prototype.hasOwnProperty.call(action, 'action_id');
+    if (hasActionId && !validActionId(action.action_id)) fail('PAYLOAD_INVALID');
+    const requested = canonicalJson(action, { maxBytes: this._maxJsonBytes });
+    const artifacts = this._actionArtifactRecords();
+    const journal = this._readJournal();
+    const journalById = new Map();
+    for (const entry of journal) {
+      if (!Object.prototype.hasOwnProperty.call(entry, 'action_id')) continue;
+      journalById.set(entry.action_id, entry);
+      const artifact = artifacts.find((item) => item.value.action_id === entry.action_id);
+      if (!artifact) fail('JOURNAL_CORRUPT');
+      const artifactPayload = canonicalJson(artifact.value, { maxBytes: this._maxJsonBytes });
+      const journalPayload = { ...entry };
+      delete journalPayload.sequence;
+      if (canonicalJson(journalPayload, { maxBytes: this._maxJsonBytes }) !== artifactPayload) {
+        fail('JOURNAL_CORRUPT');
+      }
+    }
+
+    if (!hasActionId) {
+      const artifact = this._writeUnique(ACTION_PREFIX, action);
+      const appended = this._appendJournalEntry(action);
+      return this._actionPublication(artifact, appended.entry);
+    }
+
+    const artifact = artifacts.find((item) => item.value.action_id === action.action_id) ?? null;
+    const journalEntry = journalById.get(action.action_id) ?? null;
+    if (artifact !== null
+      && canonicalJson(artifact.value, { maxBytes: this._maxJsonBytes }) !== requested) {
+      fail('PAYLOAD_INVALID');
+    }
+    if (journalEntry !== null) {
+      const journalPayload = { ...journalEntry };
+      delete journalPayload.sequence;
+      if (canonicalJson(journalPayload, { maxBytes: this._maxJsonBytes }) !== requested) {
+        fail('PAYLOAD_INVALID');
+      }
+    }
+    if (artifact !== null && journalEntry !== null) return this._actionPublication(artifact, journalEntry);
+    if (artifact !== null) {
+      const appended = this._appendJournalEntry(action);
+      return this._actionPublication(artifact, appended.entry);
+    }
+    if (journalEntry !== null) fail('JOURNAL_CORRUPT');
+
+
+    const published = this._writeUnique(ACTION_PREFIX, action);
+    const appended = this._appendJournalEntry(action);
+    return this._actionPublication(published, appended.entry);
+  }
+
+  _assertJournalArtifacts(entries) {
+    const artifacts = this._actionArtifactRecords();
+    for (const entry of entries) {
+      if (!Object.prototype.hasOwnProperty.call(entry, 'action_id')) continue;
+      const artifact = artifacts.find((item) => item.value.action_id === entry.action_id);
+      if (!artifact) fail('JOURNAL_CORRUPT');
+      const payload = { ...entry };
+      delete payload.sequence;
+      if (canonicalJson(payload, { maxBytes: this._maxJsonBytes })
+        !== canonicalJson(artifact.value, { maxBytes: this._maxJsonBytes })) {
+        fail('JOURNAL_CORRUPT');
+      }
+    }
+    return entries;
+  }
+
+  recordActionPlan(plan) {
+    this._ensureMutable();
+    const normalized = validateBrowserActionPlan(plan);
+    const artifact = this._writeUnique(ACTION_PLAN_PREFIX, normalized);
+    return frozenClone(artifact);
+  }
+
+  readActionPlan(name) {
+    const safe = safeName(name);
+    if (!/^action-plan-\d+\.json$/.test(safe)) fail('ARTIFACT_CORRUPT');
+    let value;
+    try {
+      value = canonicalParse(this._rawArtifact(safe), this._maxJsonBytes, false);
+      return validateBrowserActionPlan(value);
+    } catch (error) {
+      if (error instanceof EvidenceStoreError) throw error;
+      fail('ARTIFACT_CORRUPT');
+    }
+  }
+
+  recordActionResult(plan, result, postObservation) {
+    this._ensureMutable();
+    const receipt = validateActionResultReceipt({
+      schema: ACTION_RESULT_RECEIPT_SCHEMA,
+      plan,
+      result,
+      post_observation: postObservation,
+    });
+    for (const name of this.listActionResults()) {
+      const existing = this.readActionResult(name);
+      if (existing.plan.plan_id !== receipt.plan.plan_id) continue;
+      if (canonicalJson(existing, { maxBytes: this._maxJsonBytes }) !== canonicalJson(receipt, { maxBytes: this._maxJsonBytes })) {
+        fail('ARTIFACT_EXISTS');
+      }
+      const bytes = this._rawArtifact(name);
+      return frozenClone({ ...this._publicationRef(name, bytes), receipt: existing });
+    }
+    const ref = this._writeUnique(ACTION_RESULT_PREFIX, receipt);
+    return frozenClone({ ...ref, receipt });
+  }
+
+  readActionResult(name) {
+    const safe = safeName(name);
+    if (!/^action-result-\d+\.json$/.test(safe)) fail('ARTIFACT_CORRUPT');
+    try {
+      const value = canonicalParse(this._rawArtifact(safe), this._maxJsonBytes, false);
+      return frozenClone(validateActionResultReceipt(value, 'ARTIFACT_CORRUPT'));
+    } catch (error) {
+      if (error instanceof EvidenceStoreError) throw error;
+      fail('ARTIFACT_CORRUPT');
+    }
+  }
+
+  recordRetentionProofs(observationIdOrAggregate, proofs = undefined) {
+    this._ensureMutable();
+    const aggregate = isPlainObject(observationIdOrAggregate) && proofs === undefined
+      ? observationIdOrAggregate
+      : {
+        schema: RETENTION_PROOFS_SCHEMA,
+        observation_id: observationIdOrAggregate,
+        proofs: proofs ?? {},
+      };
+    const normalized = validateRetentionAggregate(aggregate);
+    for (const name of this.listRetentionProofs()) {
+      const existing = this.readRetentionProofs(name);
+      if (existing.observation_id !== normalized.observation_id) continue;
+      if (canonicalJson(existing, { maxBytes: this._maxJsonBytes }) !== canonicalJson(normalized, { maxBytes: this._maxJsonBytes })) {
+        fail('ARTIFACT_EXISTS');
+      }
+      const bytes = this._rawArtifact(name);
+      return frozenClone({ ...this._publicationRef(name, bytes), aggregate: existing });
+    }
+    const ref = this._writeUnique(RETENTION_PREFIX, normalized);
+    return frozenClone({ ...ref, aggregate: normalized });
+  }
+
+  readRetentionProofs(name) {
+    const safe = safeName(name);
+    if (!/^retention-\d+\.json$/.test(safe)) fail('ARTIFACT_CORRUPT');
+    try {
+      const value = canonicalParse(this._rawArtifact(safe), this._maxJsonBytes, false);
+      return validateRetentionAggregate(value, 'ARTIFACT_CORRUPT');
+    } catch (error) {
+      if (error instanceof EvidenceStoreError) throw error;
+      fail('ARTIFACT_CORRUPT');
+    }
+  }
+
+  listActionPlans() {
+    return this.listArtifacts().filter((name) => /^action-plan-\d+\.json$/.test(name));
+  }
+
   readActionJournal() {
-    return this._readJournal();
+    return this._assertJournalArtifacts(this._readJournal());
   }
 
   recordFileIdentity(filePath, kind = 'input') {
@@ -1267,7 +1649,7 @@ export class EvidenceStore {
       if (name === JOURNAL_NAME || name === COMPLETION_NAME) continue;
       if (name.endsWith('.json')) this.readArtifact(name);
     }
-    this._readJournal();
+    this._assertJournalArtifacts(this._readJournal());
   }
   _validateCompletionIdentity(prefix, reference) {
     const record = this._artifactRecord(reference.artifact);
@@ -1294,7 +1676,7 @@ export class EvidenceStore {
     if (auditRecord.ref.sha256 !== report.final_audit.sha256) fail('ARTIFACT_CORRUPT');
     validateFinalAudit(auditRecord.value);
 
-    const screenshot = this._validateCompletionIdentity('screenshot', report.screenshot);
+    this._validateCompletionIdentity('screenshot', report.screenshot);
     const upload = this._validateCompletionIdentity('upload', report.upload);
     const configuredUpload = this._verifiedResumeIdentity();
     if (!sameIdentityFields(configuredUpload, upload.identity)) fail('IDENTITY_INVALID');
@@ -1315,6 +1697,7 @@ export class EvidenceStore {
       report,
       runMetadata,
       applicationUrl: runMetadata.application_url,
+      finalUrl: report.final_url,
       submitActionCount: report.submit_action_count,
       actionSummary: submit.actionSummary,
     });
@@ -1336,6 +1719,8 @@ export class EvidenceStore {
     if (!isPlainObject(options)) fail('FINALIZATION_FAILED');
     const hasSubmitCount = Object.prototype.hasOwnProperty.call(options, 'submitActionCount') || Object.prototype.hasOwnProperty.call(options, 'submit_action_count');
     if (!hasSubmitCount) fail('SUBMIT_COUNT_REQUIRED');
+    const finalUrl = options.finalUrl ?? options.final_url;
+    validateHttpUrl(finalUrl, 'FINALIZATION_FAILED');
     const submitActionCount = options.submitActionCount ?? options.submit_action_count;
     if (!Number.isSafeInteger(submitActionCount) || submitActionCount < 0) fail('SUBMISSION_EVIDENCE');
 
@@ -1354,6 +1739,7 @@ export class EvidenceStore {
     const report = {
       schema_version: EVIDENCE_SCHEMA_VERSION,
       finalized_at: new Date().toISOString(),
+      final_url: finalUrl,
       final_audit: { artifact: audit.ref.name, sha256: audit.ref.sha256 },
       screenshot: { artifact: screenshot.ref.name, path: screenshot.identity.path, size: screenshot.identity.size, sha256: screenshot.identity.sha256 },
       upload: { artifact: upload.ref.name, path: upload.identity.path, size: upload.identity.size, sha256: upload.identity.sha256 },
@@ -1439,10 +1825,14 @@ export async function createEvidenceStore(root, runMetadata, options = {}) {
       recordRun: async (value) => store.recordRun(value),
       recordDiff: async (value) => store.recordDiff(value),
       recordAction: async (value) => store.recordAction(value),
+      recordActionResult: async (plan, result, postObservation) => store.recordActionResult(plan, result, postObservation),
+      recordActionPlan: async (value) => store.recordActionPlan(value),
+      recordRetentionProofs: async (observationIdOrAggregate, proofs) => store.recordRetentionProofs(observationIdOrAggregate, proofs),
       recordRetry: async (value) => store.recordRetry(value),
       recordLedger: async (value) => store.recordLedger(value),
       recordAudit: async (value, optionsForAudit) => store.recordAudit(value, optionsForAudit),
       recordFileIdentity: async (...args) => store.recordFileIdentity(...args),
+      recordSubmissionAuthorization: async (value) => store.recordSubmissionAuthorization(value),
       hashFile: async (value) => store.hashFile(value),
       sha256File: async (value) => store.sha256File(value),
       recordScreenshot: async (value) => store.recordScreenshot(value),
@@ -1450,7 +1840,14 @@ export async function createEvidenceStore(root, runMetadata, options = {}) {
       appendAction: async (value) => store.appendAction(value),
       finalize: async (value) => store.finalize(value),
       readArtifact: async (value) => store.readArtifact(value),
-      readActionJournal: async () => store.readActionJournal(),
+      readActionPlan: async (value) => store.readActionPlan(value),
+      readActionResult: async (value) => store.readActionResult(value),
+      readRetentionProofs: async (value) => store.readRetentionProofs(value),
+      listActionPlans: async () => store.listActionPlans(),
+      readSubmissionAuthorization: async (value) => store.readSubmissionAuthorization(value),
+      listSubmissionAuthorizations: async () => store.listSubmissionAuthorizations(),
+      listActionResults: async () => store.listActionResults(),
+      listRetentionProofs: async () => store.listRetentionProofs(),
       readCompletionReport: async () => store.readCompletionReport(),
       close: async () => store.close(),
     };

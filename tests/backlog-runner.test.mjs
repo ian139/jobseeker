@@ -20,6 +20,7 @@ import {
   heartbeatActiveRun,
   pauseRunForUser,
   persistTerminalOutcome,
+  requeueTerminalJob,
   preflightBacklogRun,
   recoverActiveRun,
   recoverOrClaimBacklogRun,
@@ -63,6 +64,9 @@ async function migration004() {
   const name = names.find((entry) => /^004-.*\.sql$/u.test(entry));
   assert.ok(name, 'migration 004 must be present');
   return fsp.readFile(path.join('migrations', name), 'utf8');
+}
+async function migration008() {
+  return fsp.readFile('migrations/008-resume-artifacts.sql', 'utf8');
 }
 
 async function createPost003Database(database, rows) {
@@ -117,6 +121,11 @@ ${rows.map((row) => `INSERT INTO application_jobs (
 );`).join('\n')}
 `);
   await sqlite(database, await migration004());
+  await sqlite(database, `
+CREATE TABLE jobs (id INTEGER PRIMARY KEY);
+${rows.map((row) => `INSERT INTO jobs (id) VALUES (${sql(row.id)});`).join('\n')}
+${await migration008()}
+`);
 }
 
 function profileValue() {
@@ -143,6 +152,26 @@ async function fixture(rows) {
   await privateInput(resumeUploadPath, '%PDF-1.7\nfixture selected resume\n');
   await privateInput(answerMemoryPath, '');
   await createPost003Database(database, rows);
+  const descriptionSha256 = sha256Bytes(Buffer.from('fixture job description; no applicant values'));
+  const resumeSha256 = sha256Bytes(Buffer.from('%PDF-1.7\nfixture selected resume\n'));
+  await sqlite(database, `
+${rows.map((row) => `INSERT INTO resume_artifacts (
+  application_job_id, normalized_job_id, job_description_sha256,
+  generator_fingerprint_sha256, generator_schema_version, manifest_path,
+  manifest_sha256, pdf_path, pdf_sha256, job_description_path, pages, created_at
+) VALUES (
+  ${sql(row.id)}, ${sql(row.id)}, ${sql(descriptionSha256)}, ${sql('a'.repeat(64))},
+  'fixture-generator-v1', ${sql(path.join(root, `manifest-${row.id}.json`))},
+  ${sql('b'.repeat(64))}, ${sql(resumeUploadPath)}, ${sql(resumeSha256)},
+  ${sql(jobDescriptionPath)}, 1, ${sql(NOW)}
+);
+UPDATE application_jobs
+SET current_resume_artifact_id = last_insert_rowid(),
+    resume_preparation_state = 'ready',
+    resume_preparation_attempted_at = ${sql(NOW)},
+    resume_prepared_at = ${sql(NOW)}
+WHERE id = ${sql(row.id)};`).join('\n')}
+`);
   return {
     root,
     database,
@@ -192,6 +221,7 @@ async function publishCanonicalCompletion({
   contractPath,
   contractSha256,
   resumeUploadPath,
+  finalUrl,
 }) {
   const screenshotPath = path.join(root, `screenshot-${path.basename(evidencePath)}.png`);
   const uploadBytes = await fsp.readFile(resumeUploadPath);
@@ -246,6 +276,7 @@ async function publishCanonicalCompletion({
       audit,
       screenshotPath,
       uploadPath: resumeUploadPath,
+      finalUrl: finalUrl ?? applicationUrl,
       submitActionCount: 1,
     });
   } finally {
@@ -925,6 +956,50 @@ test('terminal persistence updates the active row without creating a duplicate',
   }
 });
 
+test('diagnosed failed job requeues without rewriting terminal run history', async () => {
+  const value = await fixture([{ id: 101 }]);
+  try {
+    const first = await claimNextQueuedJob(value.database, claimOptions(value));
+    const workspace = await createWorkspace(value, first);
+    await persistTerminalOutcome(value.database, {
+      runId: first.runId,
+      ownerId: first.ownerId,
+      browserSessionId: first.browserSessionId,
+      jobId: first.jobId,
+      status: 'failed',
+      reasonCode: 'browser_input_unavailable',
+      finishedAt: '2026-07-26T00:01:00.000Z',
+      finalUrl: 'https://example.test/jobs/101',
+      evidencePath: workspace.evidencePath,
+      actionSummary: [{ action: 'fill', outcome: 'failed' }],
+    });
+
+    const requeued = await requeueTerminalJob(value.database, first.jobId, {
+      reason: 'browser_input_restored',
+    });
+    assert.deepEqual(requeued, {
+      jobId: first.jobId,
+      status: 'queued',
+      reasonCode: 'browser_input_restored',
+    });
+
+    const second = await claimNextQueuedJob(value.database, claimOptions(value, {
+      now: '2026-07-26T00:02:00.000Z',
+    }));
+    assert.equal(second.jobId, first.jobId);
+    assert.notEqual(second.runId, first.runId);
+    assert.deepEqual(await readRows(
+      value.database,
+      'SELECT id, status, active FROM application_runs ORDER BY id',
+    ), [
+      { id: first.runId, status: 'failed', active: 0 },
+      { id: second.runId, status: 'applying', active: 1 },
+    ]);
+  } finally {
+    await removeFixture(value);
+  }
+});
+
 test('canonical completion is evidence-derived and binds URL, evidence directory, and resume identity', async (t) => {
   await t.test('valid evidence completes the exact application URL', async () => {
     const value = await fixture([{ id: 110 }]);
@@ -973,6 +1048,7 @@ test('canonical completion is evidence-derived and binds URL, evidence directory
         applicationUrl: 'https://example.test/jobs/111',
         contractPath: workspace.contractPath,
         resumeUploadPath: value.preflight.resumeUploadPath,
+        finalUrl: 'https://example.test/jobs/111/confirmation',
       });
       const outcome = await persistTerminalOutcome(value.database, {
         runId: run.runId,
@@ -1006,6 +1082,7 @@ test('canonical completion is evidence-derived and binds URL, evidence directory
         applicationUrl: 'https://example.test/jobs/different-application',
         contractPath: workspace.contractPath,
         resumeUploadPath: value.preflight.resumeUploadPath,
+        finalUrl: 'https://example.test/jobs/114/confirmation',
       });
       await assert.rejects(() => persistTerminalOutcome(value.database, {
         runId: run.runId,

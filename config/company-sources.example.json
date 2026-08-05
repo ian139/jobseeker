@@ -1,0 +1,7 @@
+{
+  "companies": [
+    { "id": "example-greenhouse", "source": "greenhouse", "hostname": "boards.greenhouse.io", "boardToken": "example" },
+    { "id": "example-ashby", "source": "ashby", "hostname": "jobs.ashbyhq.com", "boardName": "example" },
+    { "id": "example-custom", "source": "custom", "hostname": "careers.example.com", "careerUrl": "https://careers.example.com/jobs" }
+  ]
+}

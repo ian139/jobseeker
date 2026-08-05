@@ -1029,16 +1029,21 @@
     return null;
   }
 
+  function fileControlIdFromLabelledBy(value) {
+    const match = /^upload-label-([A-Za-z][A-Za-z0-9_:-]{0,127})$/u.exec(value);
+    return match ? match[1] : "";
+  }
+
   function stableIdFor(element, info, frameId, label, name, identityElement = null, identityLabel = null) {
     const source = info.type === "file"
       ? (fileIdentityElement(element, identityElement) || identityElement || uploadContainerFor(element) || element)
       : (identityElement || element);
     const testId = testIdFor(source);
-    const id = attr(source, "id");
-    const sourceName = text(attr(source, "name"), MAX_LOCATOR_CHARS);
     const labelledBy = info.type === "file"
       ? text(attr(source, "aria-labelledby"), MAX_LOCATOR_CHARS)
       : null;
+    const id = attr(source, "id") || fileControlIdFromLabelledBy(labelledBy);
+    const sourceName = text(attr(source, "name"), MAX_LOCATOR_CHARS);
     const optionIdentity = info.type === "file" ? null : choiceIdentity(element, info, label, identityLabel);
     const parts = info.type === "file"
       ? [frameId, "upload", "file"]
@@ -1205,6 +1210,78 @@
     blockers.push({ code, label: labels[code] || "Visible access-control UI", frame_id: frameId, visible: true });
   }
 
+  function isPassiveMediaFrame(element, url) {
+    const src = urlText(url) || "";
+    const title = attr(element, "title") || "";
+    const id = attr(element, "id") || "";
+    const name = attr(element, "name") || "";
+    const className = attr(element, "class") || "";
+    const combined = [src, title, id, name, className].join(" ").toLowerCase();
+
+    const isRelevantAppOrBlocker = /(?:workday|greenhouse|lever|smartrecruiters|ashby|bamboohr|icims|jobvite|taleo|successfactors|workable|formstack|typeform|jotform|login|sign[ -]?in|auth|password|sso|oauth|assessment|hackerrank|codility|testgorilla|challenge|permission|access|captcha|recaptcha|hcaptcha|turnstile)/i.test(combined);
+    if (isRelevantAppOrBlocker) {
+      return false;
+    }
+
+    if (/(?:youtube\.com|youtube-nocookie\.com|youtu\.be|vimeo\.com|player\.vimeo\.com|wistia\.com|wistia\.net|fast\.wistia|loom\.com|spotify\.com|soundcloud\.com|w\.soundcloud\.com|dailymotion\.com|vidyard\.com|kaltura\.com|brightcove\.com|players\.brightcove\.net)/i.test(combined)) {
+      return true;
+    }
+
+    if (/(?:embed\/video|embed\/audio|video[-_ ]?player|audio[-_ ]?player|media[-_ ]?player|\bvideo\b|\baudio\b|\bmedia\b)/i.test(combined)) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function hasCaptchaResponse(elements, document) {
+    if (elements && elements.length) {
+      for (const element of elements) {
+        const name = attr(element, "name") || "";
+        const id = attr(element, "id") || "";
+        const dataState = attr(element, "data-state") || attr(element, "data-status") || "";
+        const marker = metadataFor(element);
+
+        if (/(?:g-recaptcha-response|h-captcha-response|cf-turnstile-response|captcha-response|recaptcha-response|hcaptcha-response|turnstile-response)/i.test(name) ||
+            /(?:g-recaptcha-response|h-captcha-response|cf-turnstile-response|captcha-response|recaptcha-response|hcaptcha-response|turnstile-response)/i.test(id)) {
+          let val = null;
+          try { val = element.value; } catch (_) { val = null; }
+          if (val == null) val = attr(element, "value");
+          if (val == null) {
+            try { val = element.textContent; } catch (_) { val = null; }
+          }
+          if (val != null && String(val).trim().length > 0) {
+            return true;
+          }
+        }
+        if (/^solved$/i.test(dataState) &&
+            /(?:captcha|recaptcha|hcaptcha|turnstile)/i.test(marker)) {
+          return true;
+        }
+      }
+    }
+    try {
+      if (document && document.querySelector) {
+        const selector = '[name="g-recaptcha-response"], [name="h-captcha-response"], [name="cf-turnstile-response"], [id="g-recaptcha-response"], [id="h-captcha-response"], [id="cf-turnstile-response"]';
+        const candidate = document.querySelector(selector);
+        if (candidate) {
+          let val = null;
+          try { val = candidate.value; } catch (_) { val = null; }
+          if (val == null) val = candidate.getAttribute('value');
+          if (val == null) {
+            try { val = candidate.textContent; } catch (_) { val = null; }
+          }
+          if (val != null && String(val).trim().length > 0) {
+            return true;
+          }
+        }
+      }
+    } catch (_) {
+      // Fall through
+    }
+    return false;
+  }
+
   function isInactiveInvisibleCaptchaFrame(element, marker) {
     const captcha = /(?:captcha|recaptcha|hcaptcha|turnstile|not a robot)/i.test(marker);
     if (!captcha) return false;
@@ -1219,7 +1296,7 @@
     }
   }
 
-  function detectBlockers(document, elements, controls, frameId, blockers) {
+  function detectBlockers(document, elements, controls, frameId, blockers, topCaptchaResponsePresent = false) {
     const signals = highSignalTexts(document, elements);
     const signalText = signals.join(" ");
     const password = controls.some((control) => control.tag === "input" && control.type === "password");
@@ -1247,12 +1324,17 @@
       if (["html", "body", "main", "section", "article", "div"].includes(tag)) return false;
       return /(?:captcha|recaptcha|hcaptcha|turnstile|i.?m not a robot|not a robot)/i.test(elementText(element) || "");
     });
-    if (captcha || /\b(captcha|recaptcha|hcaptcha|turnstile)\b/i.test(signalText)) addBlocker(blockers, "captcha", frameId);
+    if (captcha || /\b(captcha|recaptcha|hcaptcha|turnstile)\b/i.test(signalText)) {
+      const responsePresent = topCaptchaResponsePresent || hasCaptchaResponse(elements, document);
+      if (!responsePresent) {
+        addBlocker(blockers, "captcha", frameId);
+      }
+    }
     if (/\b(assessment|coding challenge|integrity check|skills? test|hackerrank|codility)\b/i.test(signalText)) addBlocker(blockers, "assessment", frameId);
     if (/\b(access denied|forbidden|unauthori[sz]ed|permission denied|not authorized|restricted access|security check)\b/i.test(signalText)) addBlocker(blockers, "access_control", frameId);
   }
 
-  function inspectWindow(win, parentId, path, frameElement, frames, controls, blockers, seenWindows, observationId) {
+  function inspectWindow(win, parentId, path, frameElement, frames, controls, blockers, seenWindows, observationId, captchaResponsePresent = null) {
     let document;
     try { document = win.document; } catch (_) { return null; }
     if (!document || seenWindows.has(win)) return null;
@@ -1265,6 +1347,9 @@
     const frame = { id: frameId, parent_id: parentId || null, url: currentUrl, origin: originFor(currentUrl), accessible: true };
     frames.push(frame);
     const elements = walkDocument(document);
+    const topCaptchaResponsePresent = captchaResponsePresent == null
+      ? hasCaptchaResponse(elements, document)
+      : captchaResponsePresent;
     const ids = idMapFor(elements);
     const popupIds = controlledPopupIds(elements);
     const binaryChoices = binaryChoiceMetadata(elements, ids, frameId);
@@ -1279,7 +1364,6 @@
       if (controls.length >= MAX_CONTROLS) throw new Error("observer_control_limit_exceeded");
       const control = controlFor(element, effectiveInfo, frameId, elements, ids, controls.length, observationId, choice);
       if (info.type === "file") {
-        if (fileWidgetIds.has(control.stable_id)) continue;
         fileWidgetIds.add(control.stable_id);
       }
       control.__element = element;
@@ -1304,7 +1388,7 @@
       fileWidgetIds.add(control.stable_id);
       controls.push(control);
     }
-    detectBlockers(document, elements, controls.slice(start), frameId, blockers);
+    detectBlockers(document, elements, controls.slice(start), frameId, blockers, topCaptchaResponsePresent);
 
     const frameElements = elements.filter((element) => {
       const tag = element.tagName && element.tagName.toLowerCase();
@@ -1330,17 +1414,27 @@
       if (!accessible) {
         if (frames.length >= MAX_FRAMES) throw new Error("observer_frame_limit_exceeded");
         frames.push({ id: childId, parent_id: frameId, url: childUrl, origin: originFor(childUrl), accessible: false });
+        if (isPassiveMediaFrame(childElement, childUrl)) {
+          continue;
+        }
         const marker = metadataFor(childElement) + " " + (attr(childElement, "title") || "");
-        const captchaFrame = /(?:captcha|recaptcha|hcaptcha|turnstile|not a robot)/i.test(marker);
+        const captchaFrame = /(?:captcha|recaptcha|hcaptcha|turnstile|not a robot)/i.test(marker) ||
+                             /(?:recaptcha|hcaptcha|turnstile)/i.test(childUrl);
         const invisibleCaptchaFrame = isInactiveInvisibleCaptchaFrame(childElement, marker);
-        if (!invisibleCaptchaFrame) addBlocker(blockers, "inaccessible_frame", childId);
-        if (captchaFrame && !invisibleCaptchaFrame) addBlocker(blockers, "captcha", frameId);
+        const responsePresent = topCaptchaResponsePresent || hasCaptchaResponse(elements, document);
+        if (captchaFrame) {
+          if (!responsePresent && !invisibleCaptchaFrame) {
+            addBlocker(blockers, "captcha", frameId);
+          }
+        } else {
+          if (!invisibleCaptchaFrame) addBlocker(blockers, "inaccessible_frame", childId);
+        }
         if (/(?:login|sign[ -]?in|auth|password)/i.test(marker)) addBlocker(blockers, "authentication", frameId);
         if (/(?:assessment|hackerrank|codility|coding challenge)/i.test(marker)) addBlocker(blockers, "assessment", frameId);
         if (/(?:access.denied|forbidden|unauthori[sz]ed|permission)/i.test(marker)) addBlocker(blockers, "access_control", frameId);
         continue;
       }
-      inspectWindow(childWindow, frameId, childPath, childElement, frames, controls, blockers, seenWindows, observationId);
+      inspectWindow(childWindow, frameId, childPath, childElement, frames, controls, blockers, seenWindows, observationId, topCaptchaResponsePresent);
     }
     return frame;
   }

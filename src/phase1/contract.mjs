@@ -981,6 +981,8 @@ function candidateValue(candidate, alias) {
 
 const PROFILE_CANONICAL_PATHS = Object.freeze({
     'profile.address.country': Object.freeze(['address', 'country']),
+    'profile.location_preferences.onsite': Object.freeze(['location_preferences', 'onsite']),
+    'profile.relocation.willing': Object.freeze(['relocation', 'willing']),
     'Full Name': Object.freeze(['contact', 'name']),
     Name: Object.freeze(['contact', 'name']),
     'Preferred First Name': Object.freeze(['contact', 'preferred_name']),
@@ -1078,6 +1080,35 @@ function semanticEducationValue(profile, alias) {
         : { found: false };
 }
 
+function semanticLinkValue(profile, alias) {
+    if (!isPlainObject(profile) || !Array.isArray(profile.links)) {
+        return { found: false };
+    }
+    const question = normalizedQuestion(alias);
+    let matches;
+    if (/\blinkedin\b/.test(question)) {
+        matches = profile.links.filter((link) => {
+            if (!isPlainObject(link) || typeof link.url !== 'string') return false;
+            try {
+                return /(?:^|\.)linkedin\.com$/i.test(new URL(link.url).hostname);
+            } catch {
+                return false;
+            }
+        });
+    } else if (/\b(?:portfolio|website|personal site)\b/.test(question)) {
+        matches = profile.links.filter((link) => {
+            if (!isPlainObject(link) || typeof link.url !== 'string') return false;
+            const marker = normalizedQuestion(`${link.kind ?? ''} ${link.label ?? ''}`);
+            return /\b(?:portfolio|website|personal site)\b/.test(marker);
+        });
+    } else {
+        return { found: false };
+    }
+    return matches.length === 1
+        ? { found: true, value: matches[0].url }
+        : { found: false };
+}
+
 function semanticStatusValue(profile, alias) {
     if (!isPlainObject(profile)) {
         return { found: false };
@@ -1149,6 +1180,10 @@ function profileValue(profile, alias) {
     const exact = candidateValue(profile, alias);
     if (exact.found) {
         return exact;
+    }
+    const link = semanticLinkValue(profile, alias);
+    if (link.found) {
+        return link;
     }
     const education = semanticEducationValue(profile, alias);
     return education.found ? education : semanticStatusValue(profile, alias);

@@ -11,7 +11,7 @@ from typing import Any, NoReturn
 
 from .generator import ResumeJob, generate_resume
 
-_MAX_STDIN_BYTES = 64 * 1024
+_MAX_STDIN_BYTES = 4 * 1024 * 1024
 _INPUT_KEYS = frozenset({
     "schema",
     "id",

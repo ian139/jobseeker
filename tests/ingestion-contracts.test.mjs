@@ -24,7 +24,7 @@ function normalized(overrides = {}) {
     canonicalListingUrl: 'https://example.test/jobs/job-1',
     canonicalApplicationUrl: 'https://boards.greenhouse.io/acme/jobs/1',
     atsKind: 'greenhouse',
-    atsIdentifier: 'acme',
+    atsIdentifier: 'acme:1',
     title: 'Role',
     company: 'Company',
     location: 'Remote',
@@ -40,8 +40,8 @@ function normalized(overrides = {}) {
     eligibilityState: 'eligible',
     eligibilityReasonCodes: [],
     priority: 835,
-    dedupeIdentityKind: 'source',
-    dedupeIdentityKey: 'fixture:job-1',
+    dedupeIdentityKind: 'ats',
+    dedupeIdentityKey: 'greenhouse:acme:1',
     dedupeReviewRequired: false,
     rawPayloadPath: '/private/payload/fixture/a.json',
     rawPayloadSha256: DIGEST,
@@ -59,7 +59,9 @@ test('canonical URL normalization removes credentials and tracking state', () =>
 });
 
 test('ATS matching is boundary-aware', () => {
-  assert.deepEqual(classifyAts('https://boards.greenhouse.io/acme/jobs/1'), { kind: 'greenhouse', identifier: 'acme' });
+  assert.deepEqual(classifyAts('https://boards.greenhouse.io/acme/jobs/1'), { kind: 'greenhouse', identifier: 'acme:1' });
+  assert.deepEqual(classifyAts('https://jobs.ashbyhq.com/acme/role-123'), { kind: 'ashby', identifier: 'acme:role-123' });
+  assert.deepEqual(classifyAts('https://jobs.lever.co/acme/role-456'), { kind: 'lever', identifier: 'acme:role-456' });
   assert.deepEqual(classifyAts('https://boards.greenhouse.io.evil.test/acme/jobs/1'), { kind: 'unknown', identifier: null });
   assert.deepEqual(classifyAts(null), { kind: 'unknown', identifier: null });
 });
@@ -75,7 +77,8 @@ test('normalized validation clones and freezes exact records', () => {
 });
 
 test('identity precedence and deterministic eligibility are explicit', () => {
-  assert.deepEqual(deriveDedupeIdentity(normalized()), { kind: 'source', key: 'fixture:job-1', reviewRequired: false });
+  assert.deepEqual(deriveDedupeIdentity(normalized()), { kind: 'ats', key: 'greenhouse:acme:1', reviewRequired: false });
+  assert.deepEqual(deriveDedupeIdentity(normalized({ source: 'other', sourceJobId: 'different' })), { kind: 'ats', key: 'greenhouse:acme:1', reviewRequired: false });
   const fallbackIdentity = deriveDedupeIdentity(normalized({ sourceJobId: null, atsKind: 'unknown', atsIdentifier: null, canonicalApplicationUrl: null }));
   assert.equal(fallbackIdentity.kind, 'review_fingerprint');
   assert.match(fallbackIdentity.key, /^[0-9a-f]{64}$/);
@@ -120,5 +123,27 @@ test('source sync result validation rejects raw or unknown fields', () => {
   const output = validateSourceSyncResult(result);
   assert(Object.isFrozen(output));
   assert.throws(() => validateSourceSyncResult({ ...result, raw: {} }), /E_SCHEMA_UNKNOWN_KEY/);
+  assert.throws(() => validateSourceSyncResult({ ...result, syncRunId: 0 }), /E_SCHEMA_INTEGER/);
   assert.equal(canonicalJson({ b: 2, a: 1 }), '{"a":1,"b":2}');
+  const previewFailure = validateSourceSyncResult({
+    ...result,
+    state: 'failed',
+    pagesFetched: 0,
+    jobsSeen: 0,
+    jobsUnchanged: 0,
+    failureClass: 'terminal',
+    reasonCode: 'preview_failed',
+  });
+  assert.equal(previewFailure.syncRunId, null);
+  assert.throws(() => validateSourceSyncResult({
+    ...result,
+    mode: 'paid',
+    state: 'succeeded',
+  }), /E_PAID_RUN_ID/);
+  assert.throws(() => validateSourceSyncResult({
+    ...result,
+    state: 'failed',
+    failureClass: null,
+    reasonCode: null,
+  }), /E_SYNC_FAILURE_DETAIL/);
 });

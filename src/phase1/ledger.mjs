@@ -30,6 +30,7 @@ const SEMANTIC_CHOICES = new Set([
 ]);
 const ACTIONS = new Set([
   'fill',
+  'clear',
   'type',
   'select',
   'check',
@@ -44,6 +45,7 @@ const ACTION_OUTCOMES = new Set(['attempted', 'succeeded', 'failed', 'blocked', 
 const FINAL_SUBMIT_TERMINAL_OUTCOMES = new Set(['succeeded', 'failed', 'blocked']);
 const FIELD_MUTATION_ACTIONS = new Set([
   'fill',
+  'clear',
   'type',
   'select',
   'check',
@@ -1407,7 +1409,7 @@ export function recordActionAttempt(ledger, attempt) {
 }
 
 const BATCH_SUCCESS_OUTCOMES = new Set(['succeeded']);
-const BATCH_TERMINAL_STOP_OUTCOMES = new Set(['attempted', 'failed', 'retry', 'blocked']);
+const BATCH_TERMINAL_STOP_OUTCOMES = new Set(['attempted', 'failed', 'retry', 'blocked', 'stale']);
 
 function validateBatchAttempt(ledger, normalized, index, finalIndex, fieldIds, refs, actionIds) {
   const path = `attempts[${index}]`;
@@ -1428,11 +1430,11 @@ function validateBatchAttempt(ledger, normalized, index, finalIndex, fieldIds, r
   if (!succeeded && !(terminalStop && index === finalIndex)) {
     fail(`${path}.outcome`, 'batch actions must succeed before an optional terminal non-success');
   }
-  if (succeeded && (normalized.retry_of !== null || normalized.error_code !== null)) {
-    fail(`${path}.outcome`, 'successful batch fills cannot carry retry or error semantics');
+  if (succeeded && normalized.error_code !== null) {
+    fail(`${path}.outcome`, 'successful batch fills cannot carry error semantics');
   }
   if (terminalStop && normalized.outcome !== 'attempted' && normalized.error_code === null) {
-    fail(`${path}.error_code`, 'terminal failed/retry/blocked batch fill requires error_code');
+    fail(`${path}.error_code`, 'terminal failed/retry/blocked/stale batch fill requires error_code');
   }
 
   const field = validateActionBinding(ledger, normalized);

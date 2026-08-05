@@ -132,6 +132,14 @@ Equivalent invariant only: `loadRunContract(runPath, { local: false })` for pars
 8. Produce a preflight field inventory from every reachable observer field: stable field ID, normalized label, type, required/sensitive state, ref, current validity, and candidate class. Use normalized labels only with the live observer, never as a substitute for current refs.
 
 Stop and repair preflight failures before any field mutation. Do not invent a fallback contract, observer result, field, evidence artifact, or session.
+### Durable operator command path
+
+Use `node src/phase1/application-cli.mjs` as the repository-owned process boundary for a live run. Do not build ad hoc `node -e` session wrappers or keep a second in-memory ledger. Commands are `accept-observation`, `plan`, `pending-plan`, `complete-action`, `verify-retention`, `prepare-submit`, `begin-submit`, `complete-submit`, and `finalize`; each accepts only the flags declared by `application-cli.mjs`. All request, plan, result, observation, proof, submit-attempt, and screenshot inputs remain in owner-private files. The `plan` request must satisfy `schemas/browser-action-request.schema.json`; the emitted plan and supplied result must satisfy `schemas/browser-action-plan.schema.json`.
+
+Before replaying any browser action after interruption, run `pending-plan`. Receipt-first recovery consumes a durable completed result without replay; only the returned pending plan may be acted. For Greenhouse education controls, use the request's bounded `greenhouse_education` option resolver rather than embedding a job-specific option ID.
+
+`prepare-submit` is an automated internal gate. When it returns `authorized: true`, immediately run `begin-submit`, activate only its returned ref, capture a fresh observation, and run `complete-submit`; do not request human confirmation or park for manual review.
+
 
 ## Resolve, act, and verify loop
 
@@ -243,7 +251,7 @@ Answer the parent first, re-observe, inventory all newly reachable questions, an
 3. Select the visible Submit control's current ref from the final observation. Call `const authorized = await prepareSubmission(session, { finalRef });` and require `authorized.authorized` to be true and `authorized.authorizedFinalRef === finalRef`.
 4. Before any browser click, call `const begun = await beginFinalSubmit(session);` and require `begun.ref === finalRef`. Map `begun.ref` to exactly one live browser selector, then activate it with `tab.click(finalSelector)` through the OMP `browser` tool on the visible CMUX browser surface. If the browser helper cannot operate the exact control, pinned CLI may click its freshly mapped current ref; the OMP `computer` tool must never cross the final-submit boundary.
 5. Re-observe the resulting page even when the click helper reports a timeout or error, then call `completeFinalSubmit(session, { attemptId: begun.attemptId, outcome, errorCode })` exactly once with the observed terminal outcome. Never click before `beginFinalSubmit`, and never leave a begun attempt unresolved. A failed or blocked attempt requires a fresh chained observation and a fresh `prepareSubmission` audit before retrying; never reuse an authorization across observations.
-6. After one final-submit attempt succeeds, capture the post-submit screenshot into the owner-private artifact directory and call `const finalized = await finalizeRun(session, { screenshotPath });`. Require `finalized.finalized` to be true. Persist `completed` only from the validated canonical `completion.json`; SQLite derives every submission attempt and the exact count from its paired journal events.
+6. After one final-submit attempt succeeds, capture the post-submit screenshot into the owner-private artifact directory and call `const finalized = await finalizeRun(session, { screenshotPath, finalUrl: postSubmitObservation.url });`. Require `finalized.finalized` to be true. Persist `completed` only from the validated canonical `completion.json`; SQLite derives every submission attempt and the exact count from its paired journal events.
 7. Leave the headed browser open after submission long enough to capture post-submit evidence. Report only private artifact paths and blockers, never applicant values or answer contents.
 ## Run outcome classification
 

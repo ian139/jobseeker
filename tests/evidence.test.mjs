@@ -97,6 +97,7 @@ function publishValidCompletion(parent, store) {
     audit: auditRef,
     screenshotPath,
     uploadPath,
+    finalUrl: 'https://example.invalid/success',
     submitActionCount: 1,
   });
   return { completion, screenshotPath, uploadPath, auditRef };
@@ -176,6 +177,84 @@ test('recordAction publishes both action artifact and journal entry', () => with
   assert.deepEqual(store.readActionJournal()[0], { ref: 'field-1', sequence: 1, type: 'fill' });
 }));
 
+test('recordAction reconciles exact action artifacts and rejects conflicts', () => withStore(({ root, store }) => {
+  const action = {
+    action_id: 'action-idempotent',
+    action: 'fill',
+    field_id: 'field-1',
+    observation_id: 'obs-1',
+    ref: 'ref-1',
+    outcome: 'succeeded',
+    retry_of: null,
+    error_code: null,
+  };
+  const artifactPath = path.join(root, 'action-000001.json');
+  fs.writeFileSync(artifactPath, canonicalJson(action), { mode: 0o600 });
+  const recovered = store.recordAction(action);
+  assert.equal(recovered.path, 'action-000001.json');
+  assert.equal(store.readActionJournal().length, 1);
+  const same = store.recordAction(action);
+  assert.equal(same.path, recovered.path);
+  assert.equal(store.readActionJournal().length, 1);
+  assert.throws(
+    () => store.recordAction({ ...action, ref: 'conflict' }),
+    (error) => error instanceof EvidenceStoreError && error.code === 'PAYLOAD_INVALID',
+  );
+}));
+
+test('recordAction rejects a journal action without its artifact', () => withStore(({ root, store }) => {
+  const action = { action_id: 'journal-only', action: 'fill', outcome: 'succeeded' };
+  fs.writeFileSync(
+    path.join(root, 'action-journal.jsonl'),
+    `${canonicalJson({ ...action, sequence: 1 })}\n`,
+    { mode: 0o600 },
+  );
+  expectCode(() => store.readActionJournal(), 'JOURNAL_CORRUPT');
+  expectCode(() => store.recordAction(action), 'JOURNAL_CORRUPT');
+}));
+
+test('retention proof aggregates are typed, private, and idempotent', () => withStore(({ store }) => {
+  const proof = {
+    value_digest: 'a'.repeat(64),
+    action_id: 'upload-action',
+    file_name: 'Ian Smith Resume.pdf',
+  };
+  const first = store.recordRetentionProofs('obs-1', { resume: proof });
+  const second = store.recordRetentionProofs('obs-1', { resume: proof });
+  assert.equal(first.path, second.path);
+  assert.deepEqual(store.readRetentionProofs(first.path).proofs, { resume: proof });
+  assert.deepEqual(store.listRetentionProofs(), [first.path]);
+  expectCode(() => store.recordRetentionProofs('obs-1', { resume: { ...proof, file_name: 'other.pdf' } }), 'ARTIFACT_EXISTS');
+}));
+test('submission authorizations bind the exact audit, final ref, and ledger digest', () => withStore(({ root, store }) => {
+  const auditRef = store.recordFinalAudit(finalAudit('obs-auth', {
+    final_candidate_refs: ['final-ref'],
+    final_review_boundary: false,
+  }));
+  const authorization = {
+    schema: 'phase1-submission-authorization-v1',
+    observation_id: 'obs-auth',
+    final_ref: 'final-ref',
+    ledger_sha256: 'b'.repeat(64),
+    audit: { artifact: auditRef.path, sha256: auditRef.sha256 },
+  };
+  const first = store.recordSubmissionAuthorization(authorization);
+  const second = store.recordSubmissionAuthorization(authorization);
+  assert.equal(first.path, second.path);
+  assert.deepEqual(store.readSubmissionAuthorization(first.path), authorization);
+  assert.deepEqual(store.listSubmissionAuthorizations(), [first.path]);
+  expectCode(
+    () => store.recordSubmissionAuthorization({ ...authorization, final_ref: 'other-ref' }),
+    'PAYLOAD_INVALID',
+  );
+  fs.writeFileSync(
+    path.join(root, auditRef.path),
+    canonicalJson({ ...finalAudit('obs-auth'), unexpected: true }),
+    { mode: 0o600 },
+  );
+  expectCode(() => store.readSubmissionAuthorization(first.path), 'ARTIFACT_CORRUPT');
+}));
+
 test('detects corrupt and missing artifacts instead of treating them as evidence', () => withStore(({ root, store }) => {
   const ref = store.recordLedger({ complete: true });
   fs.writeFileSync(path.join(root, ref.path), '{corrupt', { mode: 0o600 });
@@ -198,6 +277,7 @@ test('finalizes with complete audit, screenshot identity, upload identity, and n
     audit: auditRef,
     screenshotPath,
     uploadPath,
+    finalUrl: 'https://example.invalid/success',
     submitActionCount: 1,
   });
   assert.equal(completion.report.submit_action_count, 1);
@@ -220,7 +300,7 @@ test('requires explicit submit count and complete audit', () => withStore(({ par
   fs.writeFileSync(uploadPath, 'upload', { mode: 0o600 });
   recordFinalSubmit(store);
   expectCode(() => store.finalize({ audit: { complete: true }, screenshotPath, uploadPath }), 'SUBMIT_COUNT_REQUIRED');
-  expectCode(() => store.finalize({ audit: { complete: false }, screenshotPath, uploadPath, submitActionCount: 1 }), 'FINAL_AUDIT_REQUIRED');
+  expectCode(() => store.finalize({ audit: { complete: false }, screenshotPath, uploadPath, finalUrl: 'https://example.invalid/success', submitActionCount: 1 }), 'FINAL_AUDIT_REQUIRED');
 }));
 
 test('requires non-negative submit action count', () => withStore(({ parent, store }) => {
@@ -228,7 +308,7 @@ test('requires non-negative submit action count', () => withStore(({ parent, sto
   const uploadPath = path.join(parent, 'resume.pdf');
   fs.writeFileSync(screenshotPath, 'screen', { mode: 0o600 });
   fs.writeFileSync(uploadPath, 'upload', { mode: 0o600 });
-  expectCode(() => store.finalize({ audit: finalAudit(), screenshotPath, uploadPath, submitActionCount: -1 }), 'SUBMISSION_EVIDENCE');
+  expectCode(() => store.finalize({ audit: finalAudit(), screenshotPath, uploadPath, finalUrl: 'https://example.invalid/success', submitActionCount: -1 }), 'SUBMISSION_EVIDENCE');
 }));
 
 test('requires the exact final audit payload and artifact shape', () => withStore(({ parent, root, store }) => {
@@ -244,6 +324,7 @@ test('requires the exact final audit payload and artifact shape', () => withStor
     audit: { ...audit, final: false },
     screenshotPath,
     uploadPath,
+    finalUrl: 'https://example.invalid/success',
     submitActionCount: 1,
   }), 'FINAL_AUDIT_REQUIRED');
   const auditRef = store.recordFinalAudit(audit);
@@ -252,6 +333,7 @@ test('requires the exact final audit payload and artifact shape', () => withStor
     audit: auditRef,
     screenshotPath,
     uploadPath,
+    finalUrl: 'https://example.invalid/success',
     submitActionCount: 1,
   }), 'FINAL_AUDIT_REQUIRED');
 }));
@@ -271,6 +353,7 @@ test('reopens supplied identities and binds artifact refs to their kind', () => 
     audit: auditRef,
     screenshot: screenshotRef,
     upload: uploadRef,
+    finalUrl: 'https://example.invalid/success',
     submitActionCount: 1,
   }), 'IDENTITY_INVALID');
   fs.writeFileSync(screenshotPath, 'screen', { mode: 0o600 });
@@ -278,6 +361,7 @@ test('reopens supplied identities and binds artifact refs to their kind', () => 
     audit: auditRef,
     screenshot: screenshotRef,
     upload: screenshotRef,
+    finalUrl: 'https://example.invalid/success',
     submitActionCount: 1,
   }), 'IDENTITY_INVALID');
   const link = path.join(parent, 'upload-link');
@@ -287,6 +371,7 @@ test('reopens supplied identities and binds artifact refs to their kind', () => 
     audit: auditRef,
     screenshot: screenshotPath,
     upload: { path: link, size: 6, sha256: digest },
+    finalUrl: 'https://example.invalid/success',
     submitActionCount: 1,
   }), 'INPUT_INVALID');
 }));
@@ -303,6 +388,7 @@ test('propagates submit context through nested targets without matching job text
     audit: finalAudit(),
     screenshotPath,
     uploadPath,
+    finalUrl: 'https://example.invalid/success',
     submitActionCount: 1,
   });
   assert.equal(completion.report.submit_action_count, 1);
@@ -321,6 +407,7 @@ test('allows unrelated job text while finalizing a valid run', () => withStore((
     audit: finalAudit(),
     screenshotPath,
     uploadPath,
+    finalUrl: 'https://example.invalid/success',
     submitActionCount: 1,
   });
   assert.equal(completion.report.submit_action_count, 1);
@@ -353,6 +440,7 @@ test('rejects unresolved final submit attempts before publication', () => withSt
     audit: finalAudit(),
     screenshotPath,
     uploadPath,
+    finalUrl: 'https://example.invalid/success',
     submitActionCount: 1,
   }), 'SUBMISSION_EVIDENCE');
 }));
@@ -361,11 +449,22 @@ test('rejects mutated canonical references and external identities', () => withS
   const { completion, auditRef } = publishValidCompletion(parent, store);
   const mutatedAudit = { ...finalAudit(), field_count: 1 };
   fs.writeFileSync(path.join(root, auditRef.path), canonicalJson(mutatedAudit), { mode: 0o600 });
+
   expectCode(() => validateCompletionEvidence(root), 'ARTIFACT_CORRUPT');
   fs.writeFileSync(path.join(root, 'completion.json'), canonicalJson({
     ...completion.report,
     final_audit: { ...completion.report.final_audit, sha256: '0'.repeat(64) },
   }), { mode: 0o600 });
+  expectCode(() => store.readCompletionReport(), 'ARTIFACT_CORRUPT');
+}));
+
+test('validates the final URL in completion evidence', () => withStore(({ parent, root, store }) => {
+  const { completion } = publishValidCompletion(parent, store);
+  fs.writeFileSync(
+    path.join(root, 'completion.json'),
+    canonicalJson({ ...completion.report, final_url: '/relative' }),
+    { mode: 0o600 },
+  );
   expectCode(() => store.readCompletionReport(), 'ARTIFACT_CORRUPT');
 }));
 
@@ -389,6 +488,7 @@ test('rejects uploads that do not match the configured resume identity', () => w
     audit: finalAudit(),
     screenshotPath,
     uploadPath: otherPath,
+    finalUrl: 'https://example.invalid/success',
     submitActionCount: 1,
   }), 'IDENTITY_INVALID');
 }));

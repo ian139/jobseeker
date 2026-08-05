@@ -370,6 +370,13 @@ def _failure_payload(stderr: str) -> dict[str, Any]:
     return payload
 
 
+def test_resume_job_matches_normalized_ingestion_description_bound() -> None:
+    accepted = _job(description="x" * 1_000_000)
+    assert len(accepted.description) == 1_000_000
+    with pytest.raises(ValueError, match="exceeds 1000000 characters"):
+        _job(description="x" * 1_000_001)
+
+
 def test_profile_loader_rejects_malformed_unknown_and_duplicate_keys(tmp_path: Path) -> None:
     malformed = tmp_path / "malformed.json"
     malformed.write_text("{\"schema_version\":", encoding="utf-8")

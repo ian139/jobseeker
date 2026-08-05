@@ -103,6 +103,142 @@ function publishValidCompletion(parent, store) {
   return { completion, screenshotPath, uploadPath, auditRef };
 }
 
+function historicalPlan() {
+  const actionId = 'action-historical';
+  return {
+    schema: 'phase1-browser-action-plan-v1',
+    plan_id: 'plan-historical',
+    created_at: '2026-08-04T00:00:00.000Z',
+    ats: 'example',
+    observation_id: 'obs-1',
+    driver: 'omp_browser',
+    screenshot_sha256: null,
+    mode: 'single_action',
+    actions: [{
+      action_id: actionId,
+      field_id: 'name',
+      stable_id: 'name',
+      control_reference: 'ref-name',
+      answer_alias: 'full_name',
+      semantic_action: 'fill_text',
+      retry_of: null,
+      decision: {
+        observationId: 'obs-1',
+        fieldId: 'name',
+        controlReference: 'ref-name',
+        fieldPolicy: 'qualification',
+        proposedAnswer: 'Ada Lovelace',
+        answerSource: 'user',
+        evidenceReferences: [],
+        inferenceRationaleDigest: null,
+        inferenceEvidenceDigests: null,
+        proposedAction: 'fill_text',
+        expectedRetainedState: 'Ada Lovelace',
+        modelTier: 'standard',
+        confidence: 0.9,
+        reasonCode: 'test_answer',
+        reobservationRequired: true,
+        automaticSubmissionEligible: false,
+      },
+      steps: [{
+        sequence: 1,
+        helper: 'fill',
+        selector: '#name',
+        value: 'Ada Lovelace',
+        option_value: null,
+        file_path: null,
+        option_text: null,
+        exact: true,
+        normalized_action: {
+          action: 'fill_text',
+          observationId: 'obs-1',
+          fieldId: 'name',
+          controlReference: 'ref-name',
+          value: 'Ada Lovelace',
+        },
+      }],
+      retention: {
+        kind: 'exact_value',
+        expected_value_digest: 'a'.repeat(64),
+        option_text_digest: null,
+        file_name: null,
+        artifact_sha256: null,
+      },
+    }],
+    fallback_order: ['omp_browser', 'playwright_cli', 'computer'],
+    reobserve_after: true,
+  };
+}
+
+function historicalPostObservation() {
+  return {
+    schema: 'phase1-observation-v1',
+    observation_id: 'obs-2',
+    previous_observation_id: 'obs-1',
+    observed_at: '2026-08-04T00:00:02.000Z',
+    url: 'https://example.test/app',
+    title: 'Synthetic application',
+    snapshot_sha256: 'b'.repeat(64),
+    frames: [{
+      id: 'frame-main',
+      parent_id: null,
+      url: 'https://example.test/app',
+      origin: 'https://example.test',
+      accessible: true,
+    }],
+    controls: [],
+    blockers: [],
+  };
+}
+
+function historicalReceipt() {
+  const plan = historicalPlan();
+  return {
+    schema: 'phase1-browser-action-execution-v1',
+    plan,
+    result: {
+      schema: 'phase1-browser-action-result-v1',
+      plan_id: plan.plan_id,
+      post_observation_id: 'obs-2',
+      outcomes: [{
+        action_id: plan.actions[0].action_id,
+        outcome: 'succeeded',
+        error_code: null,
+        driver: 'omp_browser',
+        selected_option_text: null,
+      }],
+    },
+    post_observation: historicalPostObservation(),
+  };
+}
+
+test('reads canonical historical v1 plan and receipt without migration', () => withStore(({ root, store }) => {
+  const plan = historicalPlan();
+  const receipt = historicalReceipt();
+  const planBytes = Buffer.from(canonicalJson(plan));
+  const receiptBytes = Buffer.from(canonicalJson(receipt));
+  fs.writeFileSync(path.join(root, 'action-plan-000001.json'), planBytes, { mode: 0o600 });
+  fs.writeFileSync(path.join(root, 'action-result-000001.json'), receiptBytes, { mode: 0o600 });
+
+  const readPlan = store.readActionPlan('action-plan-000001.json');
+  const readReceipt = store.readActionResult('action-result-000001.json');
+  assert.deepEqual(readPlan, plan);
+  assert.deepEqual(readReceipt, receipt);
+  assert.equal(Object.isFrozen(readPlan), true);
+  assert.equal(Object.isFrozen(readReceipt), true);
+  assert.equal(fs.readFileSync(path.join(root, 'action-plan-000001.json')).toString(), planBytes.toString());
+  assert.equal(fs.readFileSync(path.join(root, 'action-result-000001.json')).toString(), receiptBytes.toString());
+  assert.equal(fs.statSync(path.join(root, 'action-plan-000001.json')).mode & 0o777, 0o600);
+  assert.equal(fs.statSync(path.join(root, 'action-result-000001.json')).mode & 0o777, 0o600);
+}));
+
+test('rejects historical v1 plan and receipt on new recording paths', () => withStore(({ store }) => {
+  const plan = historicalPlan();
+  const receipt = historicalReceipt();
+  assert.throws(() => store.recordActionPlan(plan));
+  assert.throws(() => store.recordActionResult(receipt.plan, receipt.result, receipt.post_observation));
+}));
+
 test('creates and verifies an owner-private root and artifacts', () => withStore(({ root, store }) => {
   assert.equal(fs.statSync(root).mode & 0o777, 0o700);
   const ref = store.recordObservation({ z: 1, a: { y: true, x: 'safe' } });

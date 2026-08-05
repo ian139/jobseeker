@@ -477,13 +477,17 @@ function coreValidation(fn, value, code) {
   }
 }
 
-function validateActionResultReceipt(value, code = 'PAYLOAD_INVALID') {
+function validateActionResultReceipt(value, code = 'PAYLOAD_INVALID', options = {}) {
   requireExactKeys(value, new Set(['schema', 'plan', 'result', 'post_observation']), code);
   if (value.schema !== ACTION_RESULT_RECEIPT_SCHEMA) fail(code);
-  const plan = coreValidation((candidate) => validateBrowserActionPlan(candidate), value.plan, code);
+  const plan = coreValidation(
+    (candidate) => validateBrowserActionPlan(candidate, options),
+    value.plan,
+    code,
+  );
   coreValidation(validateObservation, value.post_observation, code);
   coreValidation(
-    (candidate) => validateBrowserActionResult(candidate, plan, value.post_observation),
+    (candidate) => validateBrowserActionResult(candidate, plan, value.post_observation, options),
     value.result,
     code,
   );
@@ -495,6 +499,7 @@ function validateActionResultReceipt(value, code = 'PAYLOAD_INVALID') {
     post_observation: frozenClone(value.post_observation),
   };
 }
+
 
 function validateRetentionAggregate(value, code = 'PAYLOAD_INVALID') {
   requireExactKeys(value, new Set(['schema', 'observation_id', 'proofs']), code);
@@ -1383,7 +1388,7 @@ export class EvidenceStore {
     let value;
     try {
       value = canonicalParse(this._rawArtifact(safe), this._maxJsonBytes, false);
-      return validateBrowserActionPlan(value);
+      return validateBrowserActionPlan(value, { historical: true });
     } catch (error) {
       if (error instanceof EvidenceStoreError) throw error;
       fail('ARTIFACT_CORRUPT');
@@ -1410,13 +1415,12 @@ export class EvidenceStore {
     const ref = this._writeUnique(ACTION_RESULT_PREFIX, receipt);
     return frozenClone({ ...ref, receipt });
   }
-
   readActionResult(name) {
     const safe = safeName(name);
     if (!/^action-result-\d+\.json$/.test(safe)) fail('ARTIFACT_CORRUPT');
     try {
       const value = canonicalParse(this._rawArtifact(safe), this._maxJsonBytes, false);
-      return frozenClone(validateActionResultReceipt(value, 'ARTIFACT_CORRUPT'));
+      return frozenClone(validateActionResultReceipt(value, 'ARTIFACT_CORRUPT', { historical: true }));
     } catch (error) {
       if (error instanceof EvidenceStoreError) throw error;
       fail('ARTIFACT_CORRUPT');

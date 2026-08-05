@@ -726,9 +726,13 @@
     return { value: value == null ? null : exactString(value, "control_value"), present: value != null && String(value) !== "" };
   }
 
-  function selectedFor(info, options) {
+  function selectedFor(element, info, options, state) {
     if (!["select", "combobox", "listbox"].includes(info.kind) && !["combobox", "listbox"].includes(info.role)) return null;
-    return options.filter((option) => option.selected).map((option) => option.value);
+    const selected = options.filter((option) => option.selected).map((option) => option.value);
+    if (selected.length > 0) return selected;
+    const reactSelect = info.role === "combobox" &&
+      ancestor(element, (candidate) => hasClassToken(candidate, "select__control"));
+    return reactSelect && state.present ? [state.value] : selected;
   }
 
   function validityFor(element, ids) {
@@ -1096,7 +1100,7 @@
     const state = binaryChoice
       ? { value: binaryChoice.value, present: checked === true }
       : valueFor(element, info, options, checked, label);
-    const selected = selectedFor(info, options);
+    const selected = selectedFor(element, info, options, state);
     const validity = validityFor(element, ids);
     const file = fileFor(element, info);
     const disabled = boolProperty(element, "disabled", "aria-disabled");

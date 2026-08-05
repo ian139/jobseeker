@@ -1562,6 +1562,18 @@ function normalizedChoiceText(value) {
     .replace(/\s+/g, ' ')
     .trim();
 }
+function customComboboxRetainsAnswer(field, control) {
+  if (control.role !== 'combobox' || control.tag === 'select') return null;
+  const selected = Array.isArray(control.selected) ? control.selected : [];
+  if (selected.length !== 1) return false;
+  const candidates = [...selected];
+  for (const option of control.options) {
+    if (!option.selected) continue;
+    candidates.push(option.value, option.label);
+  }
+  return candidates.some((value) => digestObservedValue(control, value) === field.value_digest);
+}
+
 
 function optionSupportsSemanticChoice(option, choice) {
   if (!option.selected) return false;
@@ -1635,7 +1647,9 @@ function retentionResultFor(field, control, proof, ledger, pendingMutation) {
     } else if (proof !== undefined) {
       errors.push('proof-not-allowed');
     } else {
-      retained = control.value_present && digestObservedValue(control, control.value) === field.value_digest;
+      const customSelection = customComboboxRetainsAnswer(field, control);
+      retained = control.value_present && (customSelection ??
+        digestObservedValue(control, control.value) === field.value_digest);
     }
     if (!retained && !errors.includes('proof-required') && !errors.includes('invalid-proof') &&
         !errors.includes('proof-not-allowed')) {

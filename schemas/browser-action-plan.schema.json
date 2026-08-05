@@ -311,7 +311,7 @@
       "additionalProperties": false,
       "required": ["schema", "plan_id", "created_at", "ats", "observation_id", "driver", "screenshot_sha256", "mode", "actions", "fallback_order", "reobserve_after"],
       "properties": {
-        "schema": { "const": "phase1-browser-action-plan-v1" },
+        "schema": { "const": "phase1-browser-action-plan-v2" },
         "plan_id": { "$ref": "#/$defs/identifier" },
         "created_at": { "$ref": "#/$defs/timestamp" },
         "ats": { "$ref": "#/$defs/identifier" },

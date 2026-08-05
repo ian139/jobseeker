@@ -9,7 +9,8 @@ import {
   validateObservation,
 } from './ledger.mjs';
 
-export const ACTION_PLAN_SCHEMA = 'phase1-browser-action-plan-v1';
+export const ACTION_PLAN_SCHEMA = 'phase1-browser-action-plan-v2';
+export const LEGACY_ACTION_PLAN_SCHEMA = 'phase1-browser-action-plan-v1';
 export const ACTION_RESULT_SCHEMA = 'phase1-browser-action-result-v1';
 
 const DRIVERS = Object.freeze(['omp_browser', 'playwright_cli', 'computer']);
@@ -830,11 +831,16 @@ function validateFollowup(value, primary, expectedAction, location) {
   return normalized;
 }
 
-function validateStep(value, action, index, location) {
-  const keys = [
-    'sequence', 'helper', 'selector', 'value', 'option_value', 'file_path',
-    'option_text', 'exact', 'normalized_action', 'wait_after', 'reobserve_after',
-  ];
+function validateStep(value, action, index, location, { legacy = false } = {}) {
+  const keys = legacy
+    ? [
+      'sequence', 'helper', 'selector', 'value', 'option_value', 'file_path',
+      'option_text', 'exact', 'normalized_action',
+    ]
+    : [
+      'sequence', 'helper', 'selector', 'value', 'option_value', 'file_path',
+      'option_text', 'exact', 'normalized_action', 'wait_after', 'reobserve_after',
+    ];
   exactKeys(value, keys, location);
   requiredKeys(value, keys, location);
   boundedInteger(value.sequence, `${location}.sequence`, 1);
@@ -853,9 +859,16 @@ function validateStep(value, action, index, location) {
   if (value.exact !== null && typeof value.exact !== 'boolean') fail('INVALID_STEP_ARGUMENT', `${location}.exact`);
   const normalized = normalizeBrowserAction(value.normalized_action, `${location}.normalized_action`);
   if (!deepEqual(normalized, value.normalized_action)) fail('INVALID_NORMALIZED_ACTION', `${location}.normalized_action`);
-  validateFollowup(value.wait_after, normalized, 'wait', `${location}.wait_after`);
-  validateFollowup(value.reobserve_after, normalized, 'reobserve', `${location}.reobserve_after`);
-  if (value.value === '' && normalized.action !== 'clear') {
+  if (!legacy) {
+    validateFollowup(value.wait_after, normalized, 'wait', `${location}.wait_after`);
+    validateFollowup(value.reobserve_after, normalized, 'reobserve', `${location}.reobserve_after`);
+  }
+  const legacyCustomEmptyFill = legacy
+    && action.semantic_action === 'select_option'
+    && value.helper === 'fill'
+    && value.value === ''
+    && normalized.action === 'fill_text';
+  if (value.value === '' && normalized.action !== 'clear' && !legacyCustomEmptyFill) {
     fail('INVALID_STEP_ARGUMENT', `${location}.value`);
   }
   if (normalized.observationId === undefined || normalized.fieldId === undefined
@@ -868,7 +881,7 @@ function validateStep(value, action, index, location) {
   } else if (action.semantic_action === 'select_option') {
     if (value.helper === 'select') expectedAction = 'select_option';
     else if (value.helper === 'click' || value.helper === 'click_exact_option') expectedAction = 'click';
-    else expectedAction = value.value === '' ? 'clear' : 'fill_text';
+    else expectedAction = value.value === '' && !legacyCustomEmptyFill ? 'clear' : 'fill_text';
   } else {
     expectedAction = action.semantic_action === 'toggle' ? 'toggle' : 'upload_file';
   }
@@ -877,7 +890,7 @@ function validateStep(value, action, index, location) {
     fail('STEP_BINDING_MISMATCH', `${location}.normalized_action.controlReference`);
   }
 }
-function validateActionShape(value, index) {
+function validateActionShape(value, index, { legacy = false } = {}) {
   const location = `actions[${index}]`;
   exactKeys(
     value,
@@ -930,11 +943,12 @@ function validateActionShape(value, index) {
     fail('ACTION_DECISION_MISMATCH', location);
   }
   const steps = boundedArray(value.steps, `${location}.steps`, { min: 1, max: MAX_STEPS });
-  const customSelectSteps = value.semantic_action === 'select_option' && steps.length === 3;
-  const expectedCount = customSelectSteps ? 3 : 1;
+  const customSelectSteps = value.semantic_action === 'select_option'
+    && (legacy ? (steps.length === 2 || steps.length === 3) : steps.length === 3);
+  const expectedCount = customSelectSteps ? steps.length : 1;
   if (steps.length !== expectedCount) fail('INVALID_STEPS', `${location}.steps`);
   steps.forEach((step, stepIndex) => {
-    validateStep(step, value, stepIndex, `${location}.steps[${stepIndex}]`);
+    validateStep(step, value, stepIndex, `${location}.steps[${stepIndex}]`, { legacy });
     if (step.sequence !== stepIndex + 1) fail('INVALID_STEP_SEQUENCE', `${location}.steps[${stepIndex}].sequence`);
     if (step.normalized_action.observationId !== value.decision.observationId
         || step.normalized_action.fieldId !== value.field_id
@@ -942,7 +956,16 @@ function validateActionShape(value, index) {
       fail('STEP_BINDING_MISMATCH', `${location}.steps[${stepIndex}].normalized_action`);
     }
   });
-  if (customSelectSteps) {
+  if (customSelectSteps && legacy && steps.length === 2) {
+    if (steps[0].helper !== 'fill' || steps[1].helper !== 'click_exact_option') {
+      fail('INVALID_STEPS', `${location}.steps`);
+    }
+  } else if (customSelectSteps && legacy && steps.length === 3) {
+    const openFirst = steps[0].helper === 'click' && steps[1].helper === 'fill';
+    if (!openFirst || steps[2].helper !== 'click_exact_option') {
+      fail('INVALID_STEPS', `${location}.steps`);
+    }
+  } else if (customSelectSteps) {
     const openFirst = steps[0].helper === 'click' && steps[1].helper === 'fill';
     const optionWait = steps[1].wait_after?.state === OPTION_VISIBLE_STATE;
     const selectionWait = steps[2].wait_after?.state === SELECTION_STABLE_STATE;
@@ -954,7 +977,7 @@ function validateActionShape(value, index) {
       fail('INVALID_STEPS', `${location}.steps`);
     }
   } else {
-    if (steps.some((step) => step.wait_after !== null || step.reobserve_after !== null)) {
+    if (!legacy && steps.some((step) => step.wait_after !== null || step.reobserve_after !== null)) {
       fail('INVALID_STEPS', `${location}.steps`);
     }
     const helperByAction = {
@@ -969,7 +992,7 @@ function validateActionShape(value, index) {
   validateRetention(value.retention, value, `${location}.retention`);
 }
 
-function validatePlanShape(plan) {
+function validatePlanShape(plan, { historical = false } = {}) {
   exactKeys(
     plan,
     ['schema', 'plan_id', 'created_at', 'ats', 'observation_id', 'driver', 'screenshot_sha256', 'mode', 'actions', 'fallback_order', 'reobserve_after'],
@@ -980,7 +1003,8 @@ function validatePlanShape(plan) {
     ['schema', 'plan_id', 'created_at', 'ats', 'observation_id', 'driver', 'screenshot_sha256', 'mode', 'actions', 'fallback_order', 'reobserve_after'],
     '$',
   );
-  if (plan.schema !== ACTION_PLAN_SCHEMA) fail('INVALID_SCHEMA', 'schema');
+  const legacy = historical && plan.schema === LEGACY_ACTION_PLAN_SCHEMA;
+  if (plan.schema !== ACTION_PLAN_SCHEMA && !legacy) fail('INVALID_SCHEMA', 'schema');
   safeString(plan.plan_id, 'plan_id', { identifier: true });
   timestamp(plan.created_at, 'created_at');
   safeString(plan.ats, 'ats', { identifier: true });
@@ -1006,14 +1030,15 @@ function validatePlanShape(plan) {
   const actionIds = new Set();
   const fieldIds = new Set();
   actions.forEach((action, index) => {
-    validateActionShape(action, index);
+    validateActionShape(action, index, { legacy });
     if (actionIds.has(action.action_id)) fail('DUPLICATE_ACTION', `actions[${index}].action_id`);
     if (fieldIds.has(action.field_id)) fail('DUPLICATE_FIELD', `actions[${index}].field_id`);
     actionIds.add(action.action_id);
     fieldIds.add(action.field_id);
   });
-  return true;
+  return legacy;
 }
+
 
 function validateRetryBinding(action, ledger, location) {
   if (action.retry_of === null) return;
@@ -1101,10 +1126,17 @@ function validatePlanContext(plan, observation, ledger) {
 }
 
 export function validateBrowserActionPlan(plan, context = {}) {
-  validatePlanShape(plan);
-  if (context === undefined || context === null) return immutable(plan);
+  if (context === undefined || context === null) {
+    validatePlanShape(plan);
+    return immutable(plan);
+  }
   if (!isObject(context)) fail('INVALID_CONTEXT', '$context');
-  exactKeys(context, ['observation', 'ledger'], '$context');
+  exactKeys(context, ['observation', 'ledger', 'historical'], '$context');
+  if (hasOwn(context, 'historical') && typeof context.historical !== 'boolean') {
+    fail('INVALID_CONTEXT', '$context.historical');
+  }
+  const historical = context.historical === true;
+  validatePlanShape(plan, { historical });
   if (hasOwn(context, 'observation') || hasOwn(context, 'ledger')) {
     if (!hasOwn(context, 'observation') || !hasOwn(context, 'ledger')) fail('INVALID_CONTEXT', '$context');
     validatePlanContext(plan, context.observation, context.ledger);
@@ -1240,8 +1272,17 @@ function validateCommittedSelection(action, postObservation, location) {
 }
 
 
-export function validateBrowserActionResult(result, plan, postObservation) {
-  const normalizedPlan = validateBrowserActionPlan(plan);
+export function validateBrowserActionResult(result, plan, postObservation, context = {}) {
+  let historical = false;
+  if (context !== undefined && context !== null) {
+    if (!isObject(context)) fail('INVALID_CONTEXT', '$context');
+    exactKeys(context, ['historical'], '$context');
+    if (hasOwn(context, 'historical') && typeof context.historical !== 'boolean') {
+      fail('INVALID_CONTEXT', '$context.historical');
+    }
+    historical = context.historical === true;
+  }
+  const normalizedPlan = validateBrowserActionPlan(plan, { historical });
   exactKeys(result, ['schema', 'plan_id', 'post_observation_id', 'outcomes'], 'result');
   requiredKeys(result, ['schema', 'plan_id', 'post_observation_id', 'outcomes'], 'result');
   if (result.schema !== ACTION_RESULT_SCHEMA) fail('INVALID_SCHEMA', 'result.schema');
@@ -1288,7 +1329,9 @@ export function validateBrowserActionResult(result, plan, postObservation) {
     validateOutcome(outcome, action, `result.outcomes[${index}]`);
     if (outcome.action_id !== action.action_id) fail('OUTCOME_ORDER', `result.outcomes[${index}].action_id`);
     if (!normalizedPlan.fallback_order.includes(outcome.driver)) fail('INVALID_DRIVER', `result.outcomes[${index}].driver`);
-    if (outcome.outcome === 'succeeded' && action.semantic_action === 'select_option') {
+    if (outcome.outcome === 'succeeded'
+        && action.semantic_action === 'select_option'
+        && normalizedPlan.schema !== LEGACY_ACTION_PLAN_SCHEMA) {
       validateCommittedSelection(action, postObservation, `result.outcomes[${index}]`);
     }
     attempts.push({

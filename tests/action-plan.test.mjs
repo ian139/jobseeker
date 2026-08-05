@@ -5,6 +5,7 @@ import test from 'node:test';
 import {
   ACTION_PLAN_SCHEMA,
   ACTION_RESULT_SCHEMA,
+  LEGACY_ACTION_PLAN_SCHEMA,
   createBrowserActionPlan,
   validateBrowserActionPlan,
   validateBrowserActionResult,
@@ -138,6 +139,59 @@ function resultFor(plan, outcomes, post = null) {
     outcomes,
   }, plan, post ?? observation('obs-2', [], 'obs-1'));
 }
+function customSelectPlan() {
+  const current = observation('obs-1', [control('role', {
+    kind: 'input',
+    type: 'text',
+    role: 'combobox',
+    value: null,
+    value_present: false,
+    options: [{ value: 'eng', label: 'Engineering', disabled: false, selected: false }],
+  })]);
+  const ledger = resolvedLedger(current, [{ field_id: 'role', value: 'eng' }]);
+  return createBrowserActionPlan({
+    observation: current,
+    ledger,
+    decisions: [decision('role', 'select_option', 'eng')],
+    answerAliases: { role: { alias: 'role', value: 'eng' } },
+    optionMatches: { role: { option_text: 'Engineering', option_value: 'eng' } },
+    driver: 'omp_browser',
+  });
+}
+
+function legacyPlan(plan, { twoStep = false } = {}) {
+  const historical = structuredClone(plan);
+  historical.schema = LEGACY_ACTION_PLAN_SCHEMA;
+  for (const action of historical.actions) {
+    for (const step of action.steps) {
+      delete step.wait_after;
+      delete step.reobserve_after;
+    }
+  }
+  if (twoStep) {
+    const action = historical.actions[0];
+    const [query, option] = action.steps.slice(1);
+    action.steps = [
+      {
+        ...query,
+        sequence: 1,
+        value: '',
+        normalized_action: { ...query.normalized_action, value: '' },
+      },
+      { ...option, sequence: 2 },
+    ];
+  }
+  return historical;
+}
+
+function resultInput(plan, outcomes, postObservation) {
+  return {
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: plan.plan_id,
+    post_observation_id: postObservation.observation_id,
+    outcomes,
+  };
+}
 
 test('schema and runtime expose strict plan/result roots', async () => {
   const schema = JSON.parse(await readFile(new URL('../schemas/browser-action-plan.schema.json', import.meta.url), 'utf8'));
@@ -163,7 +217,9 @@ test('schema and runtime expose strict plan/result roots', async () => {
     schema.$defs.step.properties.value.oneOf[0].$ref,
     '#/$defs/possiblyEmptyString',
   );
-  assert.equal(ACTION_PLAN_SCHEMA, 'phase1-browser-action-plan-v1');
+  assert.equal(schema.$defs.plan.properties.schema.const, 'phase1-browser-action-plan-v2');
+  assert.equal(ACTION_PLAN_SCHEMA, 'phase1-browser-action-plan-v2');
+  assert.equal(LEGACY_ACTION_PLAN_SCHEMA, 'phase1-browser-action-plan-v1');
   assert.equal(ACTION_RESULT_SCHEMA, 'phase1-browser-action-result-v1');
 });
 
@@ -532,4 +588,90 @@ test('result enforces success/error semantics, exact select text, chain, and bat
   assert.throws(() =>
     resultFor(batch, [prefix[0], { ...prefix[1], outcome: 'attempted', error_code: null }], post));
   assert.throws(() => resultFor(batch, [prefix[1], prefix[0]], post));
+});
+test('rejects v1 plans by default but validates them in historical mode', () => {
+  const legacy = legacyPlan(textPlan());
+  assert.throws(
+    () => validateBrowserActionPlan(legacy),
+    (error) => error.code === 'INVALID_SCHEMA',
+  );
+  const accepted = validateBrowserActionPlan(legacy, { historical: true });
+  assert.deepEqual(accepted, legacy);
+  assert.equal(Object.hasOwn(accepted.actions[0].steps[0], 'wait_after'), false);
+  assert.equal(Object.isFrozen(accepted), true);
+
+  for (const twoStep of [false, true]) {
+    const custom = legacyPlan(customSelectPlan(), { twoStep });
+    const validated = validateBrowserActionPlan(custom, { historical: true });
+    assert.deepEqual(
+      validated.actions[0].steps.map((step) => step.helper),
+      twoStep
+        ? ['fill', 'click_exact_option']
+        : ['click', 'fill', 'click_exact_option'],
+    );
+  }
+});
+
+test('requires bounded wait and reobserve metadata for current v2 custom selects', () => {
+  const plan = customSelectPlan();
+  const missingWait = structuredClone(plan);
+  delete missingWait.actions[0].steps[1].wait_after;
+  assert.throws(
+    () => validateBrowserActionPlan(missingWait),
+    (error) => error.code === 'MISSING_KEY',
+  );
+  const missingReobserve = structuredClone(plan);
+  delete missingReobserve.actions[0].steps[2].reobserve_after;
+  assert.throws(
+    () => validateBrowserActionPlan(missingReobserve),
+    (error) => error.code === 'MISSING_KEY',
+  );
+});
+
+test('historical results skip only committed selection while v2 rejects uncommitted success', () => {
+  const current = customSelectPlan();
+  const post = observation('obs-2', [control('role', {
+    kind: 'input',
+    type: 'text',
+    role: 'combobox',
+    options: [{ value: 'eng', label: 'Engineering', disabled: false, selected: false }],
+  })], 'obs-1');
+  const outcome = {
+    action_id: current.actions[0].action_id,
+    outcome: 'succeeded',
+    error_code: null,
+    driver: 'omp_browser',
+    selected_option_text: 'Engineering',
+  };
+  assert.throws(
+    () => validateBrowserActionResult(resultInput(current, [outcome], post), current, post),
+    (error) => error.code === 'OPTION_SELECTION_UNCOMMITTED',
+  );
+
+  const historical = legacyPlan(current, { twoStep: true });
+  const receipt = validateBrowserActionResult(
+    resultInput(historical, [{ ...outcome, action_id: historical.actions[0].action_id }], post),
+    historical,
+    post,
+    { historical: true },
+  );
+  assert.equal(receipt.attempts[0].outcome, 'succeeded');
+  assert.throws(
+    () => validateBrowserActionResult(
+      resultInput(historical, [{ ...outcome, action_id: 'wrong-action' }], post),
+      historical,
+      post,
+      { historical: true },
+    ),
+    (error) => error.code === 'OUTCOME_ORDER',
+  );
+  assert.throws(
+    () => validateBrowserActionResult(
+      resultInput(historical, [{ ...outcome, error_code: 'unexpected' }], post),
+      historical,
+      post,
+      { historical: true },
+    ),
+    (error) => error.code === 'SUCCESS_ERROR_CODE',
+  );
 });

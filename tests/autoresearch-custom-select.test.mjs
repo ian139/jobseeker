@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  ActionPlanError,
   ACTION_RESULT_SCHEMA,
   createBrowserActionPlan,
   validateBrowserActionResult,
@@ -159,7 +160,7 @@ function retentionAfterResult(fixture, postObservation) {
   return { result, ledger: afterObservation, retention: verifyRetention(afterObservation, postObservation) };
 }
 
-test('rejects a succeeded custom-select action when a fresh chained post-observation has an empty selection', () => {
+test('rejects a succeeded custom-select result when the fresh observation has no committed option', () => {
   const fixture = initialFixture();
   const post = observation('obs-2', customSelectControl({
     observationId: 'obs-2',
@@ -171,12 +172,11 @@ test('rejects a succeeded custom-select action when a fresh chained post-observa
     ],
   }), 'obs-1');
 
-  const { result, retention } = retentionAfterResult(fixture, post);
-  assert.equal(result.attempts[0].outcome, 'succeeded');
-  assert.equal(result.formatted_values[0].value, PROVIDER_VALUE);
+  assert.throws(
+    () => successfulResult(fixture.plan, post),
+    (error) => error instanceof ActionPlanError && error.code === 'OPTION_SELECTION_UNCOMMITTED',
+  );
   assert.equal(post.previous_observation_id, fixture.plan.observation_id);
-  assert.equal(retention.ok, false, 'canonical retention must reject an empty custom-select selection');
-  assert.equal(retention.errors[0]?.code, 'VALUE_NOT_RETAINED');
 });
 
 test('accepts a fresh rerender only when committed custom-select label and provider value are exact', () => {

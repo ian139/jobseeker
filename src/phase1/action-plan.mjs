@@ -857,17 +857,22 @@ function validateStep(value, action, index, location, { legacy = false } = {}) {
   nullableString(value.file_path, `${location}.file_path`);
   nullableString(value.option_text, `${location}.option_text`);
   if (value.exact !== null && typeof value.exact !== 'boolean') fail('INVALID_STEP_ARGUMENT', `${location}.exact`);
-  const normalized = normalizeBrowserAction(value.normalized_action, `${location}.normalized_action`);
+  const legacyCustomEmptyFill = legacy
+    && action.semantic_action === 'select_option'
+    && value.helper === 'fill'
+    && value.value === ''
+    && value.normalized_action?.action === 'fill_text'
+    && value.normalized_action?.value === '';
+  const normalizationInput = legacyCustomEmptyFill
+    ? { ...value.normalized_action, value: 'legacy-empty-query' }
+    : value.normalized_action;
+  let normalized = normalizeBrowserAction(normalizationInput, `${location}.normalized_action`);
+  if (legacyCustomEmptyFill) normalized = { ...normalized, value: '' };
   if (!deepEqual(normalized, value.normalized_action)) fail('INVALID_NORMALIZED_ACTION', `${location}.normalized_action`);
   if (!legacy) {
     validateFollowup(value.wait_after, normalized, 'wait', `${location}.wait_after`);
     validateFollowup(value.reobserve_after, normalized, 'reobserve', `${location}.reobserve_after`);
   }
-  const legacyCustomEmptyFill = legacy
-    && action.semantic_action === 'select_option'
-    && value.helper === 'fill'
-    && value.value === ''
-    && normalized.action === 'fill_text';
   if (value.value === '' && normalized.action !== 'clear' && !legacyCustomEmptyFill) {
     fail('INVALID_STEP_ARGUMENT', `${location}.value`);
   }

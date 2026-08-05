@@ -320,6 +320,7 @@ test('CLI persists plan, receipt, authorization, submit, and final URL across pr
     '--run', runPath,
     '--plan', planPath,
     '--result', resultPath,
+    '--observation', secondPath,
   ]);
   assert.equal(completed.retention_ok, true);
   assert.equal(completed.status, 'ok');

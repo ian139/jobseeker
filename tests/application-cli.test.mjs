@@ -397,9 +397,13 @@ test('CLI resolves Greenhouse education options through the bounded catalog', as
   ], { fetchImpl });
   const plan = await secureReadJson(outputPath);
   assert.equal(plan.actions[0].steps.length, 3);
-  assert.equal(plan.actions[0].steps[0].value, school);
-  assert.equal(plan.actions[0].steps[1].helper, 'click');
+  assert.equal(plan.actions[0].steps[0].helper, 'click');
+  assert.equal(plan.actions[0].steps[1].helper, 'fill');
+  assert.equal(plan.actions[0].steps[1].value, school);
+  assert.equal(plan.actions[0].steps[1].wait_after.state, 'exact_option_visible');
   assert.equal(plan.actions[0].steps[2].option_text, school);
   assert.equal(plan.actions[0].steps[2].option_value, school);
   assert.equal(plan.actions[0].steps[2].helper, 'click_exact_option');
+  assert.equal(plan.actions[0].steps[2].wait_after.state, 'custom_select_committed_menu_closed');
+  assert.equal(plan.actions[0].steps[2].reobserve_after.action, 'reobserve');
 });

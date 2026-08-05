@@ -1167,6 +1167,25 @@ function validateOutcome(value, action, location) {
     fail('SELECTED_OPTION_INVALID', `${location}.selected_option_text`);
   }
 }
+function validateCommittedSelection(action, postObservation, location) {
+  const controls = postObservation.controls.filter((control) => control.stable_id === action.field_id);
+  if (controls.length !== 1) fail('POST_CONTROL_BINDING', location);
+  const control = controls[0];
+  const selectedOptions = control.options.filter((option) => option.selected);
+  const selected = Array.isArray(control.selected) ? control.selected : [];
+  if (control.options.length === 0 && selected.length === 0) return;
+  if (control.options.length > 0 && selectedOptions.length !== 1) {
+    fail('OPTION_SELECTION_UNCOMMITTED', location);
+  }
+  const optionStep = action.steps.find((step) => step.option_text !== null);
+  const expected = new Set([optionStep?.option_text, optionStep?.option_value]);
+  const actual = new Set(selected);
+  for (const option of selectedOptions) actual.add(option.label).add(option.value);
+  if (![...actual].some((value) => expected.has(value))) {
+    fail('OPTION_SELECTION_MISMATCH', location);
+  }
+}
+
 
 export function validateBrowserActionResult(result, plan, postObservation) {
   const normalizedPlan = validateBrowserActionPlan(plan);
@@ -1216,6 +1235,9 @@ export function validateBrowserActionResult(result, plan, postObservation) {
     validateOutcome(outcome, action, `result.outcomes[${index}]`);
     if (outcome.action_id !== action.action_id) fail('OUTCOME_ORDER', `result.outcomes[${index}].action_id`);
     if (!normalizedPlan.fallback_order.includes(outcome.driver)) fail('INVALID_DRIVER', `result.outcomes[${index}].driver`);
+    if (outcome.outcome === 'succeeded' && action.semantic_action === 'select_option') {
+      validateCommittedSelection(action, postObservation, `result.outcomes[${index}]`);
+    }
     attempts.push({
       action_id: action.action_id,
       action: canonicalLedgerAction(action),

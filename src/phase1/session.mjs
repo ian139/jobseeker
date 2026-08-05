@@ -590,6 +590,46 @@ function mergeProofObjects(left, right) {
   }
   return frozenClone(merged);
 }
+function actionRetentionSummary(validation, retention, observation) {
+  const attempts = validation.attempts;
+  const fieldIds = [...new Set(
+    attempts
+      .map((attempt) => attempt.field_id)
+      .filter((fieldId) => fieldId !== null),
+  )];
+  const attemptedFieldIds = new Set(fieldIds);
+  const errors = retention.errors
+    .filter((error) => attemptedFieldIds.has(error.field_id))
+    .map((error) => ({ ...error }));
+  const fieldsById = new Map(retention.ledger.fields.map((field) => [field.field_id, field]));
+  let allOutcomesSucceeded = true;
+  for (const attempt of attempts) {
+    if (attempt.outcome === 'succeeded') continue;
+    allOutcomesSucceeded = false;
+    errors.push({
+      code: 'ACTION_OUTCOME_FAILED',
+      field_id: attempt.field_id,
+      message: attempt.error_code ?? attempt.outcome,
+    });
+  }
+  const allFieldsRetained = attempts.every((attempt) => {
+    if (attempt.field_id === null) return true;
+    const field = fieldsById.get(attempt.field_id);
+    return field !== undefined
+      && field.latest_observation_id === observation.observation_id
+      && field.present_in_latest_observation === true
+      && field.reachable === true
+      && field.retained === true
+      && field.valid === true;
+  });
+  return frozenClone({
+    ok: allOutcomesSucceeded && allFieldsRetained,
+    retryRequired: !(allOutcomesSucceeded && allFieldsRetained),
+    fieldIds,
+    errors,
+  });
+}
+
 
 async function recoverReceiptInState(state, receipt) {
   const validation = validatedReceipt(receipt);
@@ -1228,7 +1268,16 @@ export async function recordPlannedActionResult(session, plan, result, postObser
     state.ledger = retention.ledger;
     state.retentionProofs = proofs;
     state.pendingPlan = null;
-    return frozenClone({ receiptRef, validation, recorded, accepted, retention, retentionLedgerRef });
+    const actionRetention = actionRetentionSummary(validation, retention, postInput);
+    return frozenClone({
+      receiptRef,
+      validation,
+      recorded,
+      accepted,
+      retention,
+      retentionLedgerRef,
+      actionRetention,
+    });
   });
 }
 

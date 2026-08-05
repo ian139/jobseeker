@@ -550,11 +550,12 @@ export async function runCli(argv = process.argv.slice(2), deps = {}) {
       await secureReadJson(args.observation),
     );
     return Object.freeze({
-      status: result.retention.ok ? 'ok' : 'blocked',
+      status: result.actionRetention.ok ? 'ok' : 'blocked',
       command,
       attempt_count: result.validation.attempts.length,
-      retention_ok: result.retention.ok,
-      retry_required: result.retention.retry_required,
+      retention_ok: result.actionRetention.ok,
+      aggregate_retention_ok: result.retention.ok,
+      retry_required: result.actionRetention.retryRequired,
     });
   }
   if (command === 'verify-retention') {

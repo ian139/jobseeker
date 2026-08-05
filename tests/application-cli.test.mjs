@@ -14,6 +14,8 @@ import {
   validateBrowserActionRequest,
 } from '../src/phase1/application-cli.mjs';
 import { ACTION_RESULT_SCHEMA } from '../src/phase1/action-plan.mjs';
+import { resolveField, startRun } from '../src/phase1/session.mjs';
+
 
 function privateFile(root, name, contents) {
   const filePath = path.join(root, name);
@@ -318,9 +320,11 @@ test('CLI persists plan, receipt, authorization, submit, and final URL across pr
     '--run', runPath,
     '--plan', planPath,
     '--result', resultPath,
-    '--observation', secondPath,
   ]);
   assert.equal(completed.retention_ok, true);
+  assert.equal(completed.status, 'ok');
+  assert.equal(completed.aggregate_retention_ok, true);
+  assert.equal(completed.retry_required, false);
 
   const prepared = await runCli([
     'prepare-submit', '--run', runPath, '--final-ref', 'control-final',
@@ -360,6 +364,103 @@ test('CLI persists plan, receipt, authorization, submit, and final URL across pr
   assert.equal(completion.final_url, finalUrl);
   assert.equal(completion.submit_action_count, 1);
 });
+test('complete-action scopes retention while prepare-submit keeps aggregate gate', async (t) => {
+  const { root, run, runPath } = createHarness(t, { name: 'Ada', other: 'Expected' });
+  const firstObservation = observation(run.application_url, 1, [
+    fieldControl('name'),
+    fieldControl('other'),
+    finalControl(),
+  ]);
+  const firstPath = await writePrivateJson(root, 'scope-observation-1.json', firstObservation);
+  await runCli(['accept-observation', '--run', runPath, '--observation', firstPath]);
+  const resumed = await startRun(runPath, { resumeExisting: true });
+  await resolveField(resumed, { field_id: 'other', alias: 'other' });
+  const requestPath = await writePrivateJson(root, 'scope-request.json', request({
+    resolution: answerResolution('name'),
+    decision: decision('obs-1', 'name', 'Ada'),
+    option: null,
+  }));
+  const planPath = path.join(root, 'scope-plan.json');
+  await runCli(['plan', '--run', runPath, '--request', requestPath, '--output', planPath]);
+  const plan = await secureReadJson(planPath);
+  const resultPath = await writePrivateJson(root, 'scope-result.json', {
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: plan.plan_id,
+    post_observation_id: 'obs-2',
+    outcomes: [{
+      action_id: plan.actions[0].action_id,
+      outcome: 'succeeded',
+      error_code: null,
+      driver: 'omp_browser',
+      selected_option_text: null,
+    }],
+  });
+  const postPath = await writePrivateJson(root, 'scope-observation-2.json', observation(run.application_url, 2, [
+    fieldControl('name', 'Ada', true),
+    fieldControl('other', 'Wrong', true),
+    finalControl(),
+  ]));
+  const completed = await runCli([
+    'complete-action',
+    '--run', runPath,
+    '--plan', planPath,
+    '--result', resultPath,
+    '--observation', postPath,
+  ]);
+  assert.equal(completed.status, 'ok');
+  assert.equal(completed.retention_ok, true);
+  assert.equal(completed.aggregate_retention_ok, false);
+  assert.equal(completed.retry_required, false);
+  const prepared = await runCli(['prepare-submit', '--run', runPath, '--final-ref', 'control-final']);
+  assert.equal(prepared.status, 'blocked');
+  assert.equal(prepared.authorized, false);
+});
+
+test('complete-action reports failed attempted outcomes as blocked', async (t) => {
+  const { root, run, runPath } = createHarness(t, { name: 'Ada' });
+  const firstPath = await writePrivateJson(root, 'failed-observation-1.json', observation(
+    run.application_url,
+    1,
+    [fieldControl('name'), finalControl()],
+  ));
+  await runCli(['accept-observation', '--run', runPath, '--observation', firstPath]);
+  const requestPath = await writePrivateJson(root, 'failed-request.json', request({
+    resolution: answerResolution('name'),
+    decision: decision('obs-1', 'name', 'Ada'),
+    option: null,
+  }));
+  const planPath = path.join(root, 'failed-plan.json');
+  await runCli(['plan', '--run', runPath, '--request', requestPath, '--output', planPath]);
+  const plan = await secureReadJson(planPath);
+  const resultPath = await writePrivateJson(root, 'failed-result.json', {
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: plan.plan_id,
+    post_observation_id: 'obs-2',
+    outcomes: [{
+      action_id: plan.actions[0].action_id,
+      outcome: 'failed',
+      error_code: 'synthetic_failure',
+      driver: 'omp_browser',
+      selected_option_text: null,
+    }],
+  });
+  const postPath = await writePrivateJson(root, 'failed-observation-2.json', observation(
+    run.application_url,
+    2,
+    [fieldControl('name'), finalControl()],
+  ));
+  const completed = await runCli([
+    'complete-action',
+    '--run', runPath,
+    '--plan', planPath,
+    '--result', resultPath,
+    '--observation', postPath,
+  ]);
+  assert.equal(completed.status, 'blocked');
+  assert.equal(completed.retention_ok, false);
+  assert.equal(completed.retry_required, true);
+});
+
 
 test('CLI resolves Greenhouse education options through the bounded catalog', async (t) => {
   const school = 'Massachusetts Institute of Technology';

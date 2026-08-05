@@ -390,6 +390,69 @@ test('planned receipts recover without browser replay and support retained retri
     true,
   );
 });
+test('planned action retention is scoped away from unrelated aggregate failures', async (t) => {
+  const harness = createHarness(t, { answers: { first: 'Ada', second: 'Lovelace' } });
+  const { run, runPath } = harness.runFor('action-scoped-retention');
+  const session = await startRun(runPath, { startedAt: '2026-07-25T08:00:00.000Z' });
+  await acceptObservation(session, observation(run.application_url, 1, [
+    fieldControl('first'),
+    fieldControl('second'),
+  ]));
+  await resolveField(session, { field_id: 'first', alias: 'first' });
+  await resolveField(session, { field_id: 'second', alias: 'second' });
+  const plan = createFillPlan(session, [{ fieldId: 'first', value: 'Ada' }]);
+  await recordActionPlan(session, plan);
+  const postObservation = observation(run.application_url, 2, [
+    fieldControl('first', 'Ada', true),
+    fieldControl('second', 'Wrong', true),
+  ]);
+  const completed = await recordPlannedActionResult(session, plan, {
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: plan.plan_id,
+    post_observation_id: postObservation.observation_id,
+    outcomes: [{
+      action_id: plan.actions[0].action_id,
+      outcome: 'succeeded',
+      error_code: null,
+      driver: 'omp_browser',
+      selected_option_text: null,
+    }],
+  }, postObservation);
+  assert.equal(completed.actionRetention.ok, true);
+  assert.equal(completed.actionRetention.retryRequired, false);
+  assert.deepEqual(completed.actionRetention.fieldIds, ['first']);
+  assert.equal(completed.retention.ok, false);
+  assert.equal(Object.isFrozen(completed.actionRetention), true);
+  const prepared = await prepareSubmission(session, { finalRef: 'control-final' });
+  assert.equal(prepared.authorized, false);
+});
+
+test('failed planned action outcomes cannot report action retention success', async (t) => {
+  const harness = createHarness(t, { answers: { first: 'Ada' } });
+  const { run, runPath } = harness.runFor('action-failed-retention');
+  const session = await startRun(runPath, { startedAt: '2026-07-25T08:00:00.000Z' });
+  await acceptObservation(session, observation(run.application_url, 1, [fieldControl('first')]));
+  await resolveField(session, { field_id: 'first', alias: 'first' });
+  const plan = createFillPlan(session, [{ fieldId: 'first', value: 'Ada' }]);
+  await recordActionPlan(session, plan);
+  const postObservation = observation(run.application_url, 2, [fieldControl('first')]);
+  const completed = await recordPlannedActionResult(session, plan, {
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: plan.plan_id,
+    post_observation_id: postObservation.observation_id,
+    outcomes: [{
+      action_id: plan.actions[0].action_id,
+      outcome: 'failed',
+      error_code: 'synthetic_failure',
+      driver: 'omp_browser',
+      selected_option_text: null,
+    }],
+  }, postObservation);
+  assert.equal(completed.actionRetention.ok, false);
+  assert.equal(completed.actionRetention.retryRequired, true);
+  assert.equal(completed.actionRetention.errors.some((error) => error.code === 'ACTION_OUTCOME_FAILED'), true);
+});
+
 test('canonical upload resolution binds the configured resume identity to a persisted plan', async (t) => {
   const harness = createHarness(t);
   const { run, runPath } = harness.runFor('canonical-upload');

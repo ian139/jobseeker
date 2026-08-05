@@ -159,7 +159,7 @@ function customSelectPlan() {
   });
 }
 
-function legacyPlan(plan, { twoStep = false } = {}) {
+function legacyPlan(plan, { twoStep = false, filterFirst = false } = {}) {
   const historical = structuredClone(plan);
   historical.schema = LEGACY_ACTION_PLAN_SCHEMA;
   for (const action of historical.actions) {
@@ -168,8 +168,8 @@ function legacyPlan(plan, { twoStep = false } = {}) {
       delete step.reobserve_after;
     }
   }
+  const action = historical.actions[0];
   if (twoStep) {
-    const action = historical.actions[0];
     const [query, option] = action.steps.slice(1);
     action.steps = [
       {
@@ -179,6 +179,13 @@ function legacyPlan(plan, { twoStep = false } = {}) {
         normalized_action: { ...query.normalized_action, value: '' },
       },
       { ...option, sequence: 2 },
+    ];
+  } else if (filterFirst) {
+    const [open, query, option] = action.steps;
+    action.steps = [
+      { ...query, sequence: 1 },
+      { ...open, sequence: 2 },
+      option,
     ];
   }
   return historical;
@@ -610,6 +617,12 @@ test('rejects v1 plans by default but validates them in historical mode', () => 
         : ['click', 'fill', 'click_exact_option'],
     );
   }
+  const filterFirst = legacyPlan(customSelectPlan(), { filterFirst: true });
+  assert.deepEqual(
+    validateBrowserActionPlan(filterFirst, { historical: true })
+      .actions[0].steps.map((step) => step.helper),
+    ['fill', 'click', 'click_exact_option'],
+  );
 });
 
 test('requires bounded wait and reobserve metadata for current v2 custom selects', () => {

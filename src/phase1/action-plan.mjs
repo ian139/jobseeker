@@ -967,7 +967,8 @@ function validateActionShape(value, index, { legacy = false } = {}) {
     }
   } else if (customSelectSteps && legacy && steps.length === 3) {
     const openFirst = steps[0].helper === 'click' && steps[1].helper === 'fill';
-    if (!openFirst || steps[2].helper !== 'click_exact_option') {
+    const filterFirst = steps[0].helper === 'fill' && steps[1].helper === 'click';
+    if ((!openFirst && !filterFirst) || steps[2].helper !== 'click_exact_option') {
       fail('INVALID_STEPS', `${location}.steps`);
     }
   } else if (customSelectSteps) {

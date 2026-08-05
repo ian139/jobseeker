@@ -712,8 +712,13 @@
     let value = null;
     const selectedValue = options.find((option) => option.selected);
     if (info.native && (tag === "input" || tag === "textarea" || tag === "select")) {
-      try { value = element.value; } catch (_) { value = ""; }
-      if (!value && info.role === "combobox") value = reactSelectSingleValue(element);
+      const reactSelect = info.role === "combobox" &&
+        ancestor(element, (candidate) => hasClassToken(candidate, "select__control"));
+      if (reactSelect) {
+        value = reactSelectSingleValue(element) || (selectedValue && selectedValue.label) || "";
+      } else {
+        try { value = element.value; } catch (_) { value = ""; }
+      }
     } else if (info.kind === "contenteditable" || info.role === "textbox" || info.role === "combobox") {
       const renderedValue = info.role === "combobox" ? reactSelectSingleValue(element) : "";
       value = attr(element, "aria-valuetext") || attr(element, "aria-valuenow") || (selectedValue && selectedValue.value) || renderedValue || exactElementText(element, "control_value") || "";

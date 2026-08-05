@@ -29,6 +29,9 @@ const MAX_IDENTIFIER = 512;
 const MAX_STRING = 16 * 1024;
 const MAX_ACTIONS = 3;
 const MAX_STEPS = 3;
+const CUSTOM_SELECT_WAIT_MS = 15_000;
+const OPTION_VISIBLE_STATE = 'exact_option_visible';
+const SELECTION_STABLE_STATE = 'custom_select_committed_menu_closed';
 const MAX_ERROR_CODE = 128;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const ISO_TIMESTAMP = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/u;
@@ -481,6 +484,8 @@ function makeStep({
   optionText = null,
   exact = null,
   normalizedAction,
+  waitAfter = null,
+  reobserveAfter = null,
 }) {
   return {
     sequence,
@@ -492,6 +497,8 @@ function makeStep({
     option_text: optionText,
     exact,
     normalized_action: normalizedAction,
+    wait_after: waitAfter,
+    reobserve_after: reobserveAfter,
   };
 }
 
@@ -612,6 +619,30 @@ function buildAction({ decision, observation, ledger, aliases, optionMatches, re
         {},
         `${location}.steps[2]`,
       );
+      const optionReady = buildNormalizedAction(
+        'wait',
+        observation,
+        fieldId,
+        controlReference,
+        { state: OPTION_VISIBLE_STATE, timeoutMs: CUSTOM_SELECT_WAIT_MS },
+        `${location}.steps[1].wait_after`,
+      );
+      const selectionStable = buildNormalizedAction(
+        'wait',
+        observation,
+        fieldId,
+        controlReference,
+        { state: SELECTION_STABLE_STATE, timeoutMs: CUSTOM_SELECT_WAIT_MS },
+        `${location}.steps[2].wait_after`,
+      );
+      const reobserve = buildNormalizedAction(
+        'reobserve',
+        observation,
+        fieldId,
+        controlReference,
+        {},
+        `${location}.steps[2].reobserve_after`,
+      );
       steps = [
         makeStep({
           sequence: 1,
@@ -628,6 +659,7 @@ function buildAction({ decision, observation, ledger, aliases, optionMatches, re
           optionText: null,
           exact: true,
           normalizedAction: query,
+          waitAfter: optionReady,
         }),
         makeStep({
           sequence: 3,
@@ -637,6 +669,8 @@ function buildAction({ decision, observation, ledger, aliases, optionMatches, re
           optionText: selected.label,
           exact: true,
           normalizedAction: click,
+          waitAfter: selectionStable,
+          reobserveAfter: reobserve,
         }),
       ];
     } else {
@@ -778,17 +812,31 @@ function validateRetention(value, action, location) {
   }
 }
 
+function validateFollowup(value, primary, expectedAction, location) {
+  if (value === null) return null;
+  const normalized = normalizeBrowserAction(value, location);
+  if (!deepEqual(normalized, value) || normalized.action !== expectedAction) {
+    fail('INVALID_STEP_FOLLOWUP', location);
+  }
+  if (normalized.observationId !== primary.observationId
+      || normalized.fieldId !== primary.fieldId
+      || normalized.controlReference !== primary.controlReference) {
+    fail('STEP_BINDING_MISMATCH', location);
+  }
+  if (expectedAction === 'wait'
+      && (!Number.isSafeInteger(normalized.timeoutMs) || normalized.timeoutMs <= 0)) {
+    fail('INVALID_STEP_FOLLOWUP', location);
+  }
+  return normalized;
+}
+
 function validateStep(value, action, index, location) {
-  exactKeys(
-    value,
-    ['sequence', 'helper', 'selector', 'value', 'option_value', 'file_path', 'option_text', 'exact', 'normalized_action'],
-    location,
-  );
-  requiredKeys(
-    value,
-    ['sequence', 'helper', 'selector', 'value', 'option_value', 'file_path', 'option_text', 'exact', 'normalized_action'],
-    location,
-  );
+  const keys = [
+    'sequence', 'helper', 'selector', 'value', 'option_value', 'file_path',
+    'option_text', 'exact', 'normalized_action', 'wait_after', 'reobserve_after',
+  ];
+  exactKeys(value, keys, location);
+  requiredKeys(value, keys, location);
   boundedInteger(value.sequence, `${location}.sequence`, 1);
   safeString(value.helper, `${location}.helper`, { max: 64, identifier: true });
   if (!HELPERS.has(value.helper)) fail('INVALID_HELPER', `${location}.helper`);
@@ -805,6 +853,8 @@ function validateStep(value, action, index, location) {
   if (value.exact !== null && typeof value.exact !== 'boolean') fail('INVALID_STEP_ARGUMENT', `${location}.exact`);
   const normalized = normalizeBrowserAction(value.normalized_action, `${location}.normalized_action`);
   if (!deepEqual(normalized, value.normalized_action)) fail('INVALID_NORMALIZED_ACTION', `${location}.normalized_action`);
+  validateFollowup(value.wait_after, normalized, 'wait', `${location}.wait_after`);
+  validateFollowup(value.reobserve_after, normalized, 'reobserve', `${location}.reobserve_after`);
   if (value.value === '' && normalized.action !== 'clear') {
     fail('INVALID_STEP_ARGUMENT', `${location}.value`);
   }
@@ -880,9 +930,8 @@ function validateActionShape(value, index) {
     fail('ACTION_DECISION_MISMATCH', location);
   }
   const steps = boundedArray(value.steps, `${location}.steps`, { min: 1, max: MAX_STEPS });
-  const customSelectSteps = value.semantic_action === 'select_option'
-    && (steps.length === 2 || steps.length === 3);
-  const expectedCount = customSelectSteps ? steps.length : 1;
+  const customSelectSteps = value.semantic_action === 'select_option' && steps.length === 3;
+  const expectedCount = customSelectSteps ? 3 : 1;
   if (steps.length !== expectedCount) fail('INVALID_STEPS', `${location}.steps`);
   steps.forEach((step, stepIndex) => {
     validateStep(step, value, stepIndex, `${location}.steps[${stepIndex}]`);
@@ -893,17 +942,21 @@ function validateActionShape(value, index) {
       fail('STEP_BINDING_MISMATCH', `${location}.steps[${stepIndex}].normalized_action`);
     }
   });
-  if (value.semantic_action === 'select_option' && steps.length === 2) {
-    if (steps[0].helper !== 'fill' || steps[1].helper !== 'click_exact_option') {
-      fail('INVALID_STEPS', `${location}.steps`);
-    }
-  } else if (value.semantic_action === 'select_option' && steps.length === 3) {
+  if (customSelectSteps) {
     const openFirst = steps[0].helper === 'click' && steps[1].helper === 'fill';
-    const filterFirst = steps[0].helper === 'fill' && steps[1].helper === 'click';
-    if ((!openFirst && !filterFirst) || steps[2].helper !== 'click_exact_option') {
+    const optionWait = steps[1].wait_after?.state === OPTION_VISIBLE_STATE;
+    const selectionWait = steps[2].wait_after?.state === SELECTION_STABLE_STATE;
+    const freshObservation = steps[2].reobserve_after?.action === 'reobserve';
+    if (!openFirst || steps[2].helper !== 'click_exact_option'
+        || steps[0].wait_after !== null || steps[0].reobserve_after !== null
+        || steps[1].reobserve_after !== null
+        || !optionWait || !selectionWait || !freshObservation) {
       fail('INVALID_STEPS', `${location}.steps`);
     }
   } else {
+    if (steps.some((step) => step.wait_after !== null || step.reobserve_after !== null)) {
+      fail('INVALID_STEPS', `${location}.steps`);
+    }
     const helperByAction = {
       fill_text: 'fill',
       clear: 'fill',

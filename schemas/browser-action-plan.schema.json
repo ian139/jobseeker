@@ -213,6 +213,30 @@
         "controlReference": { "$ref": "#/$defs/identifier" }
       }
     },
+    "normalizedWait": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "observationId", "fieldId", "controlReference", "state", "timeoutMs"],
+      "properties": {
+        "action": { "const": "wait" },
+        "observationId": { "$ref": "#/$defs/identifier" },
+        "fieldId": { "$ref": "#/$defs/identifier" },
+        "controlReference": { "$ref": "#/$defs/identifier" },
+        "state": { "enum": ["exact_option_visible", "custom_select_committed_menu_closed"] },
+        "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 600000 }
+      }
+    },
+    "normalizedReobserve": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "observationId", "fieldId", "controlReference"],
+      "properties": {
+        "action": { "const": "reobserve" },
+        "observationId": { "$ref": "#/$defs/identifier" },
+        "fieldId": { "$ref": "#/$defs/identifier" },
+        "controlReference": { "$ref": "#/$defs/identifier" }
+      }
+    },
     "normalizedAction": {
       "oneOf": [
         { "$ref": "#/$defs/normalizedFill" },
@@ -220,13 +244,15 @@
         { "$ref": "#/$defs/normalizedSelect" },
         { "$ref": "#/$defs/normalizedToggle" },
         { "$ref": "#/$defs/normalizedUpload" },
-        { "$ref": "#/$defs/normalizedClick" }
+        { "$ref": "#/$defs/normalizedClick" },
+        { "$ref": "#/$defs/normalizedWait" },
+        { "$ref": "#/$defs/normalizedReobserve" }
       ]
     },
     "step": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["sequence", "helper", "selector", "value", "option_value", "file_path", "option_text", "exact", "normalized_action"],
+      "required": ["sequence", "helper", "selector", "value", "option_value", "file_path", "option_text", "exact", "normalized_action", "wait_after", "reobserve_after"],
       "properties": {
         "sequence": { "type": "integer", "minimum": 1, "maximum": 3 },
         "helper": { "enum": ["fill", "select", "click", "uploadFile", "click_exact_option"] },
@@ -236,7 +262,19 @@
         "file_path": { "$ref": "#/$defs/nullableString" },
         "option_text": { "$ref": "#/$defs/nullableString" },
         "exact": { "oneOf": [{ "type": "boolean" }, { "type": "null" }] },
-        "normalized_action": { "$ref": "#/$defs/normalizedAction" }
+        "normalized_action": { "$ref": "#/$defs/normalizedAction" },
+        "wait_after": {
+          "oneOf": [
+            { "$ref": "#/$defs/normalizedWait" },
+            { "type": "null" }
+          ]
+        },
+        "reobserve_after": {
+          "oneOf": [
+            { "$ref": "#/$defs/normalizedReobserve" },
+            { "type": "null" }
+          ]
+        }
       }
     },
     "retention": {

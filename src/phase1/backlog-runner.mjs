@@ -151,6 +151,11 @@ const RUN_RESULT_KEYS = new Set([
   'application_url',
   'platform',
   'application_host',
+  'job_title',
+  'job_company',
+  'job_location',
+  'job_description',
+  'job_description_sha256',
   'eligibility_tier',
   'verification_reason',
   'source_posted_at',
@@ -188,6 +193,11 @@ const RUN_SELECT_COLUMNS = `
   j.source_job_id AS source_job_id,
   j.platform AS platform,
   j.application_host AS application_host,
+  j.job_title AS job_title,
+  j.job_company AS job_company,
+  j.job_location AS job_location,
+  j.job_description AS job_description,
+  j.job_description_sha256 AS job_description_sha256,
   j.application_url AS application_url,
   j.eligibility_tier AS eligibility_tier,
   j.verification_reason AS verification_reason,
@@ -618,6 +628,26 @@ function normalizeRunResultRow(row) {
     fail('E_RUN_RESULT');
   }
   if (row.application_host !== null && applicationHost === null) fail('E_RUN_RESULT');
+  const jobTitle = row.job_title === null
+    ? null
+    : requireString(row.job_title, 'E_RUN_RESULT', { max: 512 });
+  const jobCompany = row.job_company === null
+    ? null
+    : requireString(row.job_company, 'E_RUN_RESULT', { max: 512 });
+  const jobLocation = row.job_location === null
+    ? null
+    : requireString(row.job_location, 'E_RUN_RESULT', { max: 1024 });
+  const jobDescription = row.job_description === null
+    ? null
+    : requireString(row.job_description, 'E_RUN_RESULT', { max: 4 * 1024 * 1024, allowMultiline: true });
+  const jobDescriptionSha256 = row.job_description_sha256;
+  if (platform !== null
+      && (jobTitle === null || jobCompany === null || jobDescription === null
+        || typeof jobDescriptionSha256 !== 'string'
+        || !SHA256_HEX.test(jobDescriptionSha256)
+        || createHash('sha256').update(jobDescription).digest('hex') !== jobDescriptionSha256)) {
+    fail('E_RUN_RESULT');
+  }
   if (row.eligibility_tier !== null
     && (typeof row.eligibility_tier !== 'string' || !QUEUE_PRIORITY.includes(row.eligibility_tier))) {
     fail('E_RUN_RESULT');
@@ -669,6 +699,11 @@ function normalizeRunResultRow(row) {
     sourcePostedAt: row.source_posted_at,
     platform,
     applicationHost,
+    jobTitle,
+    jobCompany,
+    jobLocation,
+    jobDescription,
+    jobDescriptionSha256,
     sourceLastSeenAt: row.source_last_seen_at,
     jobStatus: row.job_status,
     jobClaimedAt: row.job_claimed_at,
@@ -1711,6 +1746,11 @@ function normalizeWorkspaceRun(run) {
     'evidencePath',
     'resumeArtifactPath',
     'resumeArtifactSha256',
+    'jobTitle',
+    'jobCompany',
+    'jobLocation',
+    'jobDescription',
+    'jobDescriptionSha256',
   ]);
   for (const key of required) {
     if (!Object.hasOwn(run, key)) fail('E_RUN');
@@ -1753,6 +1793,21 @@ function normalizeWorkspaceRun(run) {
     evidencePath,
     resumeArtifactPath,
     resumeArtifactSha256: run.resumeArtifactSha256,
+    jobTitle: requireString(run.jobTitle, 'E_JOB_TITLE', { max: 512 }),
+    jobCompany: requireString(run.jobCompany, 'E_JOB_COMPANY', { max: 512 }),
+    jobLocation: run.jobLocation === null
+      ? null
+      : requireString(run.jobLocation, 'E_JOB_LOCATION', { max: 1024 }),
+    jobDescription: requireString(
+      run.jobDescription,
+      'E_JOB_DESCRIPTION',
+      { max: 4 * 1024 * 1024, allowMultiline: true },
+    ),
+    jobDescriptionSha256: typeof run.jobDescriptionSha256 === 'string'
+      && SHA256_HEX.test(run.jobDescriptionSha256)
+      && createHash('sha256').update(run.jobDescription).digest('hex') === run.jobDescriptionSha256
+      ? run.jobDescriptionSha256
+      : fail('E_JOB_DESCRIPTION'),
     claimedAt: run.claimedAt === undefined || run.claimedAt === null
       ? undefined
       : normalizeTimestamp(run.claimedAt, 'E_RUN_TIMESTAMP'),
@@ -1838,6 +1893,11 @@ export async function createJobWorkspace(run, options) {
     platform: normalizedRun.platform,
     application_host: normalizedRun.applicationHost,
     eligibility_tier: normalizedRun.eligibilityTier,
+    job_title: normalizedRun.jobTitle,
+    job_company: normalizedRun.jobCompany,
+    job_location: normalizedRun.jobLocation,
+    job_description: normalizedRun.jobDescription,
+    job_description_sha256: normalizedRun.jobDescriptionSha256,
     source_table: normalizedRun.sourceTable,
     source_db: normalizedRun.sourceDb,
     source_rowid: normalizedRun.sourceRowid,

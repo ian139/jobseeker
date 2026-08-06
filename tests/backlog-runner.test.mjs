@@ -965,6 +965,12 @@ test('workspace keeps contract and evidence private and distinct', async () => {
     assert.equal(Object.hasOwn(contract, 'applicant_name'), false);
     assert.equal((await fsp.readFile(workspace.contractPath, 'utf8')).includes('fixture job description'), false);
     assert.equal((await fsp.readFile(workspace.contractPath, 'utf8')).includes('phase1-profile-v1'), false);
+    const snapshot = JSON.parse(await fsp.readFile(workspace.jobSnapshotPath, 'utf8'));
+    assert.equal(snapshot.job_title, run.jobTitle);
+    assert.equal(snapshot.job_company, run.jobCompany);
+    assert.equal(snapshot.job_location, run.jobLocation);
+    assert.equal(snapshot.job_description, run.jobDescription);
+    assert.equal(snapshot.job_description_sha256, run.jobDescriptionSha256);
   } finally {
     await removeFixture(value);
   }

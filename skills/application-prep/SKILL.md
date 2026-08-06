@@ -238,19 +238,17 @@ For any observer control with role `combobox` or `listbox` other than a native `
 
 ### File uploads
 
-The retention proof fields are {
-- `value_digest`
-- `action_id`
-- `file_name`
-}
+Use one procedure:
 
-Primary path: map the observer file field to exactly one actual `<input type=file>` in the same frame and field/form group, including its hidden native input when applicable; derive and uniquely verify its exact CSS selector; then run `await tab.uploadFile(exactFileInputCss, session.runMetadata.resume_upload_path)` through the OMP `browser` tool on the attached CMUX-TUI browser pane. Inline `aria-ref=eNN` is not supported by `tab.uploadFile`. Do not click or arm a chooser first. If the browser helper cannot operate the exact input, use the ordered pinned-CLI or computer fallback.
+1. From the latest accepted observation, select exactly one upload field by stable field ID, exact label, form section, and verified upload-container identity. Reject duplicate or ambiguous associations. Never use a page-wide `.file-upload` or `[role="group"]`.
+2. Map that field to its unique current `<input type=file>` and fresh action ref. Run `await tab.uploadFile(exactFileInputCss, session.runMetadata.resume_upload_path)`. Do not arm a chooser first or run page scripts.
+3. Fresh-observe even when the helper reports failure. React may remove or replace the native input after committing the file.
+4. Accept commitment only when the exact logical field shows either one native `FileList` entry with the expected basename, or its exact semantic container shows the expected basename plus a remove/delete or provider committed-state marker. Generic text, neighboring controls, search text, and another upload container never count.
+5. Record the action and the generated semantic receipt: `field_id`, `value_digest`, `action_id`, `file_name`, `source_sha256`, fresh `observation_id`, exact `container_identity`, and `committed_method` (`native_file_list` or `rendered_container`). Persist it through the existing retention/evidence path.
+6. Continue only after `verifyRetention` accepts that receipt for the current observation. Preserve it across unrelated field updates. If the filename disappears, changes, becomes ambiguous, or binds elsewhere, invalidate retention.
+7. On uncertainty, keep the run active: fresh-observe, relocate the same semantic field, and either accept exact committed state or replan one retry from the fresh ref. Stop at the existing retry bound. Never terminalize, close the posting, or retry from stale evidence merely because the native node disappeared.
 
-After the physical upload returns, build `uploadAttempt` against the pre-upload observer field/ref/observation with semantic action `upload` and its real success or failure. Publish it with `const uploaded = await recordAction(session, uploadAttempt); ledger = uploaded.ledger;`, then obtain a fresh observation and publish `const accepted = await acceptObservation(session, observation); ledger = accepted.ledger;`. Record a failed attempt and retry through the ordered mechanics before remapping; never claim success when the upload failed.
-
-Bind `uploadActionId` to the successful, non-stale upload attempt's exact `action_id` for the current field/ref. Confirm file count and basename from the fresh file control. `verifyRetention` receives the field-ID keyed map `{ [field_id]: { value_digest, action_id, file_name } }`, using that same `uploadActionId` as proof `action_id`.
-
-The proof `value_digest` must equal the field resolution `value_digest`, not the file or resume-upload SHA-256 identity digest. Keep the proof map for every later retention check and final observation; an upload disappearing on a later page is a blocker.
+The helper result is not authoritative: a helper success without exact committed state fails, while a helper failure followed by exact fresh committed state succeeds. Pinned CLI remains control-specific fallback; computer input remains last.
 
 ### Checkbox groups
 

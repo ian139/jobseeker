@@ -500,6 +500,65 @@ test('canonical upload resolution binds the configured resume identity to a pers
   );
 });
 
+test('fresh committed upload result records a succeeded ledger proof after helper recovery', async (t) => {
+  const harness = createHarness(t);
+  const { run, runPath } = harness.runFor('upload-helper-recovery');
+  const session = await startRun(runPath, { startedAt: '2026-07-25T08:00:00.000Z' });
+  await acceptObservation(session, observation(run.application_url, 1, [uploadControl('resume')]));
+  const resolution = await resolveCanonicalUpload(session, {
+    field_id: 'resume',
+    alias: 'canonical_resume_upload',
+  });
+  const plan = createBrowserActionPlan({
+    observation: session.observation,
+    ledger: session.ledger,
+    decisions: [{
+      ...plannedFillDecision(session.observation, 'resume', resolution.actionValue),
+      answerSource: 'resume',
+      evidenceReferences: [`resume-upload:${session.runMetadata.resume_upload_sha256}`],
+      proposedAction: 'upload_file',
+    }],
+    answerAliases: {},
+    optionMatches: {},
+    resumeUpload: {
+      path: session.runMetadata.resume_upload_path,
+      sha256: session.runMetadata.resume_upload_sha256,
+    },
+    driver: 'omp_browser',
+    createdAt: '2026-07-25T08:00:10.000Z',
+    ats: 'greenhouse',
+  });
+  assert.equal(resolution.answer.source, 'resume');
+  await recordActionPlan(session, plan);
+  const committed = {
+    ...uploadControl('resume'),
+    ref: 'control-resume-replaced',
+    file: {
+      accept: '.pdf',
+      count: 1,
+      names: ['resume.pdf'],
+      committed_method: 'rendered_container',
+    },
+  };
+  const postObservation = observation(run.application_url, 2, [committed]);
+  const completed = await recordPlannedActionResult(session, plan, {
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: plan.plan_id,
+    post_observation_id: postObservation.observation_id,
+    outcomes: [{
+      action_id: plan.actions[0].action_id,
+      outcome: 'succeeded',
+      error_code: null,
+      driver: 'omp_browser',
+      selected_option_text: null,
+    }],
+  }, postObservation);
+
+  assert.equal(completed.actionRetention.ok, true);
+  assert.equal(completed.retention.ok, true);
+  assert.equal(completed.retention.ledger.action_attempts.at(-1).outcome, 'succeeded');
+});
+
 test('routine contact aliases resolve canonical private profile values', async (t) => {
   const harness = createHarness(t, {
     profile: {

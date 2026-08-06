@@ -19,3 +19,4 @@ omp-session-*.html
 scraper/
 rpc/
 .cli-focused/
+.todos/

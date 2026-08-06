@@ -6,6 +6,20 @@ This repository implements Phase 1 application execution, the completed Phase 2 
 
 `TODO.md` is the scope and safety authority. `PROJECT_HANDOFF.md` is historical evidence only; verify its paths and claims against the active tree.
 
+## Durable task state
+
+Use `td` for project task state and session handoffs:
+
+```sh
+td usage --new-session -q
+td start <issue-id>
+td log "durable progress or decision"
+td handoff <issue-id> --done "..." --remaining "..."
+td review <issue-id>
+```
+
+Do not duplicate `td` status or handoff history in repository documentation. Keep `TODO.md` as the product/safety authority; use `td` for execution state.
+
 ## Architecture & Data Flow
 
 ```text

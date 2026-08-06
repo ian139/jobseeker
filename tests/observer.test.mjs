@@ -513,6 +513,45 @@ test('does not commit rendered filename text without an attachment marker', () =
   assert.equal(result.controls.some((control) => control.type === 'file'), false);
 });
 
+test('isolates two committed upload containers displaying the same basename', () => {
+  const document = new Document();
+  const html = document.createElement('html');
+  html._connected = true;
+  const body = document.createElement('body');
+  const form = document.createElement('form');
+  for (const [identity, labelText] of [['resume', 'Resume'], ['cover-letter', 'Cover Letter']]) {
+    const container = document.createElement('div', document, '', {
+      class: 'file-upload',
+      'aria-labelledby': `upload-label-${identity}`,
+      'data-upload-state': 'committed',
+    });
+    container.append(
+      document.createElement('label', document, labelText, { id: `upload-label-${identity}` }),
+      document.createElement('span', document, 'attachment.pdf', { class: 'file-upload__filename' }),
+    );
+    form.append(container);
+  }
+  form.append(document.createElement('button', document, 'Submit Application', { type: 'submit' }));
+  body.append(form);
+  html.append(body);
+  document.documentElement = html;
+  const markConnected = (element) => {
+    element._connected = true;
+    for (const child of element.children) markConnected(child);
+  };
+  markConnected(html);
+
+  const result = observe(document);
+  validateObservation(result);
+  const uploads = result.controls.filter((control) => control.type === 'file');
+  assert.equal(uploads.length, 2);
+  assert.equal(new Set(uploads.map((control) => control.stable_id)).size, 2);
+  assert.equal(
+    JSON.stringify(uploads.map((control) => control.file.names)),
+    JSON.stringify([['attachment.pdf'], ['attachment.pdf']]),
+  );
+});
+
  
 function frameObservation({ src, title = '', frameId = '', captcha = false, response = null }) {
   const document = new Document();

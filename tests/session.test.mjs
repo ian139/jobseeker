@@ -500,6 +500,31 @@ test('canonical upload resolution binds the configured resume identity to a pers
   );
 });
 
+test('routine contact aliases resolve canonical private profile values', async (t) => {
+  const harness = createHarness(t, {
+    profile: {
+      schema: 'phase1-profile-v1',
+      contact: {
+        email: 'fixture@example.test',
+        phone: '555-0100',
+      },
+    },
+  });
+  const { run, runPath } = harness.runFor('contact-aliases');
+  const session = await startRun(runPath, { startedAt: '2026-07-25T08:00:00.000Z' });
+  await acceptObservation(session, observation(run.application_url, 1, [
+    fieldControl('email'),
+    fieldControl('mobile'),
+  ]));
+
+  const email = await resolveField(session, { field_id: 'email', alias: 'E-mail' });
+  const mobile = await resolveField(session, { field_id: 'mobile', alias: 'Mobile' });
+  assert.equal(email.answer.source, 'profile');
+  assert.equal(email.answer.value, 'fixture@example.test');
+  assert.equal(mobile.answer.source, 'profile');
+  assert.equal(mobile.answer.value, '555-0100');
+});
+
 test('coordinator uses the sensitive structured country resolution contract', async (t) => {
   const harness = createHarness(t, {
     profile: {

@@ -779,6 +779,26 @@ test('v2 upload success requires the planned basename committed in post-observat
   });
 });
 
+test('semantic upload receipt records rendered-container commitment', () => {
+  const plan = uploadPlan();
+  const post = committedUploadPost({
+    accept: null,
+    count: 1,
+    names: ['resume.pdf'],
+    committed_method: 'rendered_container',
+  });
+  const result = resultFor(plan, [{
+    action_id: plan.actions[0].action_id,
+    outcome: 'succeeded',
+    error_code: null,
+    driver: 'omp_browser',
+    selected_option_text: null,
+  }], post);
+  assert.equal(result.upload_proofs.resume.committed_method, 'rendered_container');
+  assert.equal(result.upload_proofs.resume.observation_id, 'obs-2');
+  assert.equal(result.upload_proofs.resume.container_identity, 'resume');
+});
+
 test('v2 upload success fails closed on missing, wrong, or ambiguous committed file state', () => {
   const plan = uploadPlan();
   const success = {

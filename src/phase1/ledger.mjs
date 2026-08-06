@@ -336,7 +336,7 @@ function validateValidity(value, path) {
 function validateFile(value, path) {
   if (value === null) return;
   assertRecord(value, path);
-  assertExactKeys(value, new Set(['accept', 'count', 'names']), path);
+  assertExactKeys(value, new Set(['accept', 'count', 'names', 'committed_method']), path);
   assertRequiredKeys(value, ['accept', 'count', 'names'], path);
   if (value.accept !== null && typeof value.accept !== 'string' &&
       !(Array.isArray(value.accept) && value.accept.every((item) => typeof item === 'string'))) {
@@ -345,6 +345,11 @@ function validateFile(value, path) {
   assertInteger(value.count, `${path}.count`);
   assertArray(value.names, `${path}.names`);
   value.names.forEach((item, index) => assertBasename(item, `${path}.names[${index}]`));
+  if (Object.hasOwn(value, 'committed_method')
+      && value.committed_method !== null
+      && !['native_file_list', 'rendered_container'].includes(value.committed_method)) {
+    fail(`${path}.committed_method`, 'invalid committed method');
+  }
 }
 
 function validateCandidate(value, path) {
@@ -1669,6 +1674,9 @@ function retentionResultFor(field, control, proof, ledger, pendingMutation) {
                  !control.file.names.includes(proof.file_name) ||
                  proof.value_digest !== field.value_digest ||
                  proof.observation_id !== ledger.latest_observation_id ||
+                 (control.file.committed_method !== undefined
+                   && control.file.committed_method !== null
+                   && proof.committed_method !== control.file.committed_method) ||
                  !uploadActionProvesCurrentField(ledger, field, proof)) {
         errors.push('invalid-proof');
       } else {

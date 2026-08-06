@@ -480,6 +480,7 @@ test('preserves a file field stable ID across uploaded-container replacement', (
   assert.ok(secondFile);
   assert.equal(second.controls.filter((control) => control.type === 'file').length, 1);
   assert.equal(secondFile.file.names.length, 1);
+  assert.equal(secondFile.file.committed_method, 'rendered_container');
   assert.equal(secondFile.file.names[0], 'resume.pdf');
   assert.equal(secondFile.stable_id, firstFile.stable_id);
   assert.notEqual(secondFile.ref, firstFile.ref);

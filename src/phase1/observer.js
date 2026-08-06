@@ -762,6 +762,7 @@
     const accept = (attr(element, "accept") || "").split(",").map((part) => text(part, MAX_LOCATOR_CHARS)).filter(Boolean);
     const names = [];
     let count = 0;
+    let committedMethod = null;
     try {
       count = Number(element.files && element.files.length) || 0;
       if (count > MAX_FILE_NAMES) throw new Error("observer_file_limit_exceeded");
@@ -769,6 +770,7 @@
         const name = text(file && file.name, MAX_FILE_NAME_CHARS);
         if (name) names.push(name.split(/[\\/]/).pop());
       }
+      if (count > 0) committedMethod = "native_file_list";
     } catch (error) {
       if (error && String(error.message).includes("file_limit")) throw error;
       count = 0;
@@ -779,9 +781,10 @@
       if (rendered && rendered.count > 0) {
         count = rendered.count;
         names.push(...rendered.names);
+        committedMethod = "rendered_container";
       }
     }
-    return { accept, count, names };
+    return { accept, count, names, committed_method: committedMethod };
   }
 
   const BINARY_CHOICE_LABELS = new Set(["yes", "no"]);
@@ -1162,7 +1165,12 @@
       : null;
     const filename = text(elementText(filenameElement), MAX_FILE_NAME_CHARS);
     const name = filename ? filename.split(/[\\/]/).pop() : null;
-    return { accept: [], count: name ? 1 : 0, names: name ? [name] : [] };
+    return {
+      accept: [],
+      count: name ? 1 : 0,
+      names: name ? [name] : [],
+      committed_method: name ? "rendered_container" : null,
+    };
   }
 
   function uploadControlFor(container, frameId, elements, ids, index, observationId) {

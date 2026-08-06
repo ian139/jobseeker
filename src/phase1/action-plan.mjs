@@ -1389,7 +1389,8 @@ export function validateBrowserActionResult(result, plan, postObservation, conte
         source_sha256: action.retention.artifact_sha256,
         observation_id: postObservation.observation_id,
         container_identity: control?.stable_id ?? action.field_id,
-        committed_method: control?.tag === 'input' ? 'native_file_list' : 'rendered_container',
+        committed_method: control?.file?.committed_method
+          ?? (control?.tag === 'input' ? 'native_file_list' : 'rendered_container'),
       };
     }
   });

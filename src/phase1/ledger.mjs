@@ -161,6 +161,7 @@ const ACTION_KEYS = new Set([
   'retry_of',
   'error_code',
   'stale_ref',
+  'source_sha256',
 ]);
 const UNKNOWN_KEYS = new Set(['stable_id', 'ref', 'observation_id', 'reason']);
 const CANDIDATE_REF_KEYS = new Set(['stable_id', 'ref', 'observation_id', 'class']);
@@ -975,6 +976,7 @@ function validateAction(action, path) {
   }
   if (action.retry_of !== null) assertInteger(action.retry_of, `${path}.retry_of`, { minimum: 0 });
   assertString(action.error_code, `${path}.error_code`, { identifier: true, nullable: true });
+  validateDigest(action.source_sha256, `${path}.source_sha256`);
   assertBoolean(action.stale_ref, `${path}.stale_ref`);
   validateActionBindingShape(action, path);
 }
@@ -1308,6 +1310,7 @@ function normalizeActionAttempt(attempt, sequence) {
     'outcome',
     'retry_of',
     'error_code',
+    'source_sha256',
   ]), 'action');
   assertRequiredKeys(attempt, ['action', 'observation_id'], 'action');
   const actionId = attempt.action_id ?? `action-${sequence}`;
@@ -1329,6 +1332,8 @@ function normalizeActionAttempt(attempt, sequence) {
   if (retryOf !== null) assertInteger(retryOf, 'action.retry_of', { minimum: 0 });
   const errorCode = attempt.error_code ?? null;
   assertString(errorCode, 'action.error_code', { identifier: true, nullable: true });
+  const sourceSha256 = attempt.source_sha256 ?? null;
+  validateDigest(sourceSha256, 'action.source_sha256');
   const normalized = {
     action_id: actionId,
     action: attempt.action,
@@ -1338,6 +1343,7 @@ function normalizeActionAttempt(attempt, sequence) {
     outcome,
     retry_of: retryOf,
     error_code: errorCode,
+    source_sha256: sourceSha256,
   };
   validateActionBindingShape(normalized, 'action');
   return normalized;
@@ -1650,7 +1656,8 @@ function blankStateIsSupported(field, control) {
 function uploadActionProvesCurrentField(ledger, field, proof) {
   const action = ledger.action_attempts.find((item) => item.action_id === proof.action_id);
   if (!action || action.action !== 'upload' || action.outcome !== 'succeeded' ||
-      action.stale_ref || action.field_id !== field.field_id || action.ref === null) {
+      action.stale_ref || action.field_id !== field.field_id || action.ref === null ||
+      action.source_sha256 !== proof.source_sha256) {
     return false;
   }
   return field.ref_history.some((item) =>
@@ -1676,7 +1683,7 @@ function retentionResultFor(field, control, proof, ledger, pendingMutation) {
       } else if (!control.file || control.file.count <= 0 ||
                  !control.file.names.includes(proof.file_name) ||
                  proof.value_digest !== field.value_digest ||
-                 !ledger.observation_ids.includes(proof.observation_id) ||
+                 proof.observation_id !== ledger.latest_observation_id ||
                  (control.file.committed_method !== undefined
                    && control.file.committed_method !== null
                    && proof.committed_method !== control.file.committed_method) ||

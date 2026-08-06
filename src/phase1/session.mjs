@@ -612,6 +612,25 @@ function mergeProofObjects(left, right) {
   }
   return frozenClone(merged);
 }
+
+function refreshCommittedUploadProofs(proofs, observation) {
+  const refreshed = {};
+  const controls = new Map(observation.controls.map((control) => [control.stable_id, control]));
+  for (const [fieldId, proof] of Object.entries(proofs)) {
+    const control = controls.get(fieldId);
+    const exactCommittedState = control?.type === 'file'
+      && control.file?.count === 1
+      && control.file.names.length === 1
+      && control.file.names[0] === proof.file_name
+      && (control.file.committed_method === undefined
+        || control.file.committed_method === null
+        || control.file.committed_method === proof.committed_method);
+    refreshed[fieldId] = exactCommittedState
+      ? { ...proof, observation_id: observation.observation_id }
+      : proof;
+  }
+  return frozenClone(refreshed);
+}
 function actionRetentionSummary(validation, retention, observation) {
   const attempts = validation.attempts;
   const fieldIds = [...new Set(
@@ -1287,7 +1306,10 @@ export async function recordPlannedActionResult(session, plan, result, postObser
     }
     const accepted = await acceptObservationInState(state, postObservation, markPublished);
     const generated = generatedProofObject(normalizedPlan, validation);
-    const proofs = mergeProofObjects(state.retentionProofs, generated);
+    const proofs = refreshCommittedUploadProofs(
+      mergeProofObjects(state.retentionProofs, generated),
+      postObservation,
+    );
     await state.evidence.recordRetentionProofs(postObservation.observation_id, proofs);
     const retention = verifyLedgerRetention(state.ledger, postObservation, proofs);
     const retentionLedgerRef = await state.evidence.recordLedger(retention.ledger);

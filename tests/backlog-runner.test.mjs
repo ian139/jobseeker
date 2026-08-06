@@ -1054,21 +1054,23 @@ test('recoverable browser failure cannot terminalize or replace the active run',
   try {
     const run = await claimNextQueuedJob(value.database, claimOptions(value));
     const workspace = await createWorkspace(value, run);
-    await assert.rejects(
-      persistTerminalOutcome(value.database, {
-        runId: run.runId,
-        ownerId: run.ownerId,
-        browserSessionId: run.browserSessionId,
-        jobId: run.jobId,
-        status: 'failed',
-        reasonCode: 'browser_input_unavailable',
-        finishedAt: '2026-07-26T00:01:00.000Z',
-        finalUrl: 'https://example.test/jobs/101',
-        evidencePath: workspace.evidencePath,
-        actionSummary: [{ action: 'fill', outcome: 'failed' }],
-      }),
-      (error) => error?.code === 'E_RECOVERABLE_OUTCOME',
-    );
+    for (const status of ['failed', 'closed', 'skipped']) {
+      await assert.rejects(
+        persistTerminalOutcome(value.database, {
+          runId: run.runId,
+          ownerId: run.ownerId,
+          browserSessionId: run.browserSessionId,
+          jobId: run.jobId,
+          status,
+          reasonCode: 'browser_input_unavailable',
+          finishedAt: '2026-07-26T00:01:00.000Z',
+          finalUrl: 'https://example.test/jobs/101',
+          evidencePath: workspace.evidencePath,
+          actionSummary: [{ action: 'fill', outcome: 'failed' }],
+        }),
+        (error) => error?.code === 'E_RECOVERABLE_OUTCOME',
+      );
+    }
     assert.deepEqual(await readRows(
       value.database,
       'SELECT id, status, active FROM application_runs',

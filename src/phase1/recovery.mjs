@@ -242,7 +242,7 @@ const CLASS_FAMILY_TOKENS = Object.freeze({
   transient: ['transient', 'network', 'timeout', 'disconnect', 'rate_limit', 'temporary'],
 });
 
-function canonicalClass(value) {
+export function canonicalClass(value) {
   const token = normalizedToken(value);
   if (!token) return null;
   if (CLASS_ALIASES.has(token)) return CLASS_ALIASES.get(token);

@@ -13,7 +13,7 @@ import {
   validateRunContractLocal,
 } from './contract.mjs';
 import { validateCompletionEvidence } from './evidence.mjs';
-import { classifyFailure } from './recovery.mjs';
+import { classifyFailure, TERMINAL_FAILURE_CLASSES } from './recovery.mjs';
 import { canonicalizeApplicationUrl, classifyApplicationUrl } from './platforms.mjs';
 
 const SQLITE_BINARY = 'sqlite3';
@@ -41,6 +41,20 @@ export const TERMINAL_OUTCOMES = Object.freeze([
   'failed',
   'skipped',
 ]);
+
+const RECOVERABLE_TERMINAL_REASON_CODES = new Set([
+  'action',
+  'browser_input_unavailable',
+  'captcha',
+  'navigation',
+  'network_error',
+  'observation',
+  'stale_observation',
+  'submission_uncertain',
+  'transient',
+  'validation',
+]);
+
 
 const ACTIVE_STATUSES = new Set(['applying', 'needs_user']);
 const RUN_STATUSES = new Set([
@@ -2034,8 +2048,11 @@ async function normalizeTerminalOutcome(outcome, row) {
   if (row.active !== 1 || row.status !== 'applying') fail('E_RUN_NOT_ACTIVE');
   if (!TERMINAL_OUTCOMES.includes(outcome.status)) fail('E_OUTCOME_STATUS');
   const reasonCode = normalizeReasonCode(outcome.reasonCode);
-  if ((outcome.status === 'blocked' || outcome.status === 'failed')
-      && classifyFailure({ reasonCode }).recoverable) {
+  const recoverableTerminalFailure = RECOVERABLE_TERMINAL_REASON_CODES.has(reasonCode);
+  if (((outcome.status === 'blocked' || outcome.status === 'failed')
+      && classifyFailure({ reasonCode }).recoverable)
+      || ((outcome.status === 'closed' || outcome.status === 'skipped')
+        && recoverableTerminalFailure)) {
     fail('E_RECOVERABLE_OUTCOME');
   }
   const finishedAt = normalizeTimestamp(outcome.finishedAt, 'E_FINISHED_AT');

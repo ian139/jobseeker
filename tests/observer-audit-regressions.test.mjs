@@ -12,6 +12,7 @@ import {
 import { auditCompletion } from '../src/phase1/audit.mjs';
 
 const SNAPSHOT = 'a'.repeat(64);
+const UPLOAD_DIGEST = 'b'.repeat(64);
 
 function frame() {
   return {
@@ -432,6 +433,7 @@ test('blocks an answered file field when the later page omits its control', () =
     observation_id: 'obs-1',
     ref: 'ref-resume-file',
     outcome: 'succeeded',
+    source_sha256: 'a'.repeat(64),
   });
   const uploaded = observation('obs-2', [control('resume-file', {
     ref: 'ref-resume-file-uploaded',

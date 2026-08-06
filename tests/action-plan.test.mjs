@@ -560,6 +560,7 @@ test('result validation returns ordered ledger-ready attempts and immutable rece
     outcome: 'succeeded',
     retry_of: null,
     error_code: null,
+    source_sha256: null,
   }]);
   assert.deepEqual(result.formatted_values, [{ field_id: 'name', answer_alias: 'full_name', value: 'Ada Lovelace' }]);
   assert.deepEqual(result.upload_proofs, {});
@@ -755,6 +756,7 @@ test('v2 upload success requires the planned basename committed in post-observat
     outcome: 'succeeded',
     retry_of: null,
     error_code: null,
+    source_sha256: 'b'.repeat(64),
   }]);
 
   const historical = legacyPlan(uploadPlan());
@@ -777,6 +779,15 @@ test('v2 upload success requires the planned basename committed in post-observat
       committed_method: 'rendered_container',
     },
   });
+
+  const nativePost = committedUploadPost({ accept: null, count: 1, names: ['resume.pdf'] });
+  const nativeReceipt = validateBrowserActionResult(
+    resultInput(historical, [{ ...success, action_id: historical.actions[0].action_id }], nativePost),
+    historical,
+    nativePost,
+    { historical: true },
+  );
+  assert.equal(nativeReceipt.upload_proofs.resume.committed_method, 'native_file_list');
 });
 
 test('semantic upload receipt records rendered-container commitment', () => {

@@ -17,6 +17,7 @@ import {
 import { auditCompletion } from '../src/phase1/audit.mjs';
 
 const SNAPSHOT = 'a'.repeat(64);
+const UPLOAD_DIGEST = 'b'.repeat(64);
 
 function frame() {
   return {
@@ -368,6 +369,7 @@ test('requires typed upload proof and rejects injection, ordinary overrides, and
     observation_id: 'obs-1',
     outcome: 'succeeded',
     action_id: 'upload-1',
+    source_sha256: UPLOAD_DIGEST,
   });
   ledger = answer(ledger, 'resume-file', 'obs-1', 'ref-resume-file', 'resolved-resume', { source: 'resume' });
   ledger = answer(ledger, 'ordinary', 'obs-1', 'ref-ordinary', 'value-ordinary');
@@ -383,7 +385,7 @@ test('requires typed upload proof and rejects injection, ordinary overrides, and
     value_digest: fileDigest,
     action_id: 'upload-1',
     file_name: 'resume.pdf',
-    source_sha256: 'a'.repeat(64),
+    source_sha256: UPLOAD_DIGEST,
     observation_id: 'obs-2',
     container_identity: 'resume-file',
     committed_method: 'native_file_list',
@@ -403,9 +405,16 @@ test('requires typed upload proof and rejects injection, ordinary overrides, and
     finalCandidate(),
   ], 'obs-2');
   const unrelatedLedger = mergeObservation(ledger, unrelated);
-  const survived = verifyRetention(unrelatedLedger, unrelated, { 'resume-file': validProof });
-  assert.equal(survived.errors.some((item) => item.field_id === 'resume-file'), false);
-  assert.equal(fieldById(survived.ledger, 'resume-file').retained, true);
+  const replayed = verifyRetention(unrelatedLedger, unrelated, { 'resume-file': validProof });
+  assert.equal(replayed.ok, false);
+  assert.ok(replayed.errors.some((item) => item.field_id === 'resume-file' && item.code === 'INVALID_PROOF'));
+  assert.equal(fieldById(replayed.ledger, 'resume-file').retained, false);
+  const refreshed = verifyRetention(unrelatedLedger, unrelated, {
+    'resume-file': { ...validProof, observation_id: 'obs-3' },
+  });
+  assert.equal(refreshed.ok, false);
+  assert.ok(refreshed.errors.some((item) => item.field_id === 'ordinary' && item.code === 'VALUE_NOT_RETAINED'));
+  assert.equal(fieldById(refreshed.ledger, 'resume-file').retained, true);
 
   assert.throws(() => verifyRetention(ledger, second, {
     'resume-file': { value_digest: fileDigest },
@@ -419,6 +428,11 @@ test('requires typed upload proof and rejects injection, ordinary overrides, and
     'resume-file': { ...validProof, action_id: 'ordinary-action' },
   });
   assert.equal(result.ok, false);
+  result = verifyRetention(ledger, second, {
+    'resume-file': { ...validProof, source_sha256: SNAPSHOT },
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((item) => item.code === 'INVALID_PROOF'));
   result = verifyRetention(ledger, second, {
     'resume-file': { ...validProof, file_name: 'other.pdf' },
   });

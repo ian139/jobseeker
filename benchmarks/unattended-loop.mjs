@@ -37,11 +37,28 @@ function summary(name) {
   return Number.parseInt(match[1], 10);
 }
 
+if (child.status !== 0) {
+  let detail = `status ${child.status}`;
+  try {
+    const checks = summary('tests');
+    const failures = summary('fail');
+    const passed = summary('pass');
+    detail += ` (checks=${checks}, passed=${passed}, failures=${failures})`;
+  } catch {
+    // Summary omitted or unparseable
+  }
+  throw new Error(`node test runner failed with exit ${detail}`);
+}
+
 const checks = summary('tests');
 const failures = summary('fail');
 const passed = summary('pass');
 if (checks !== passed + failures + summary('cancelled') + summary('skipped') + summary('todo')) {
   throw new Error('node test runner emitted an inconsistent summary');
+}
+
+if (failures > 0) {
+  throw new Error(`node test runner reported ${failures} failure(s) (checks=${checks}, passed=${passed})`);
 }
 
 console.log(`METRIC unattended_loop_failures=${failures}`);

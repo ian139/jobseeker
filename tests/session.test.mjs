@@ -337,6 +337,7 @@ test('planned receipts recover without browser replay and support retained retri
       retry_of: planned.retry_of,
       error_code: outcome.error_code,
       stale_ref: false,
+      source_sha256: null,
     });
   }
   crashStore.close();
@@ -501,7 +502,7 @@ test('canonical upload resolution binds the configured resume identity to a pers
 });
 
 test('fresh committed upload result records a succeeded ledger proof after helper recovery', async (t) => {
-  const harness = createHarness(t);
+  const harness = createHarness(t, { answers: { first: 'Ada' } });
   const { run, runPath } = harness.runFor('upload-helper-recovery');
   const session = await startRun(runPath, { startedAt: '2026-07-25T08:00:00.000Z' });
   await acceptObservation(session, observation(run.application_url, 1, [uploadControl('resume')]));
@@ -557,6 +558,36 @@ test('fresh committed upload result records a succeeded ledger proof after helpe
   assert.equal(completed.actionRetention.ok, true);
   assert.equal(completed.retention.ok, true);
   assert.equal(completed.retention.ledger.action_attempts.at(-1).outcome, 'succeeded');
+
+  const unrelatedStart = observation(run.application_url, 3, [
+    { ...committed, ref: 'control-resume-after-unrelated-start' },
+    fieldControl('first'),
+  ]);
+  await acceptObservation(session, unrelatedStart);
+  await resolveField(session, { field_id: 'first', alias: 'first' });
+  const fillPlan = createFillPlan(session, [{ fieldId: 'first', value: 'Ada' }]);
+  await recordActionPlan(session, fillPlan);
+  const afterUnrelatedFill = observation(run.application_url, 4, [
+    { ...committed, ref: 'control-resume-after-unrelated-fill' },
+    fieldControl('first', 'Ada', true),
+  ]);
+  const afterFill = await recordPlannedActionResult(session, fillPlan, {
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: fillPlan.plan_id,
+    post_observation_id: afterUnrelatedFill.observation_id,
+    outcomes: [{
+      action_id: fillPlan.actions[0].action_id,
+      outcome: 'succeeded',
+      error_code: null,
+      driver: 'omp_browser',
+      selected_option_text: null,
+    }],
+  }, afterUnrelatedFill);
+  assert.equal(afterFill.retention.ok, true);
+  assert.equal(
+    afterFill.retention.ledger.fields.find((field) => field.field_id === 'resume').retained,
+    true,
+  );
 });
 
 test('routine contact aliases resolve canonical private profile values', async (t) => {

@@ -19,6 +19,7 @@ import {
 import { auditCompletion } from '../src/phase1/audit.mjs';
 
 const SNAPSHOT = 'a'.repeat(64);
+const UPLOAD_DIGEST = 'b'.repeat(64);
 
 function frame() {
   return {
@@ -610,6 +611,7 @@ test('retains an uploaded file only after a fresh observation proves it remains'
     observation_id: 'obs-1',
     ref: 'ref-resume-file-empty',
     outcome: 'succeeded',
+    source_sha256: UPLOAD_DIGEST,
   });
 
   const uploaded = observation('obs-2', [control('resume-file', {
@@ -636,7 +638,7 @@ test('retains an uploaded file only after a fresh observation proves it remains'
       value_digest: proofDigest,
       action_id: 'upload-resume',
       file_name: 'synthetic.pdf',
-      source_sha256: 'a'.repeat(64),
+      source_sha256: UPLOAD_DIGEST,
       observation_id: 'obs-2',
       container_identity: 'resume-file',
       committed_method: 'native_file_list',
@@ -663,7 +665,7 @@ test('retains an uploaded file only after a fresh observation proves it remains'
       value_digest: proofDigest,
       action_id: 'upload-resume',
       file_name: 'synthetic.pdf',
-      source_sha256: 'a'.repeat(64),
+      source_sha256: UPLOAD_DIGEST,
       observation_id: 'obs-3',
       container_identity: 'resume-file',
       committed_method: 'native_file_list',
@@ -673,6 +675,149 @@ test('retains an uploaded file only after a fresh observation proves it remains'
   assert.equal(auditCompletion(result.ledger, gone).passed, false);
   assert.ok(result.errors.some((error) => error.code === 'INVALID_PROOF'));
   assert.equal(fieldById(result.ledger, 'resume-file').retained, false);
+});
+
+test('rejects an upload receipt whose source digest differs from the planned artifact', () => {
+  const empty = control('resume-file', {
+    ref: 'ref-resume-file-empty',
+    kind: 'input',
+    tag: 'input',
+    type: 'file',
+    role: 'textbox',
+    value: null,
+    value_present: false,
+    file: { accept: ['application/pdf'], count: 0, names: [] },
+  });
+  const first = observation('obs-1', [empty, finalCandidate()]);
+  const proofDigest = digestPrivateValue('synthetic-upload-proof');
+  let ledger = createLedger(first);
+  ledger = recordActionAttempt(ledger, {
+    action_id: 'upload-resume',
+    action: 'upload',
+    field_id: 'resume-file',
+    observation_id: 'obs-1',
+    ref: 'ref-resume-file-empty',
+    outcome: 'succeeded',
+    source_sha256: UPLOAD_DIGEST,
+  });
+  const uploaded = observation('obs-2', [control('resume-file', {
+    ref: 'ref-resume-file-uploaded',
+    kind: 'input',
+    tag: 'input',
+    type: 'file',
+    role: 'textbox',
+    value: null,
+    value_present: true,
+    file: { accept: ['application/pdf'], count: 1, names: ['synthetic.pdf'] },
+  }), finalCandidate()], 'obs-1');
+  ledger = mergeObservation(ledger, uploaded);
+  ledger = recordResolution(ledger, {
+    field_id: 'resume-file',
+    observation_id: 'obs-2',
+    ref: 'ref-resume-file-uploaded',
+    source: 'resume',
+    value_digest: proofDigest,
+  });
+  const exactReceipt = {
+    field_id: 'resume-file',
+    value_digest: proofDigest,
+    action_id: 'upload-resume',
+    file_name: 'synthetic.pdf',
+    source_sha256: UPLOAD_DIGEST,
+    observation_id: 'obs-2',
+    container_identity: 'resume-file',
+    committed_method: 'native_file_list',
+  };
+  const exact = verifyRetention(ledger, uploaded, { 'resume-file': exactReceipt });
+  assert.equal(exact.ok, true);
+  assert.equal(fieldById(exact.ledger, 'resume-file').retained, true);
+
+  for (const forged of [SNAPSHOT, 'c'.repeat(64), 'd'.repeat(64)]) {
+    const result = verifyRetention(ledger, uploaded, {
+      'resume-file': { ...exactReceipt, source_sha256: forged },
+    });
+    assert.equal(result.ok, false);
+    assert.ok(result.errors.some((error) => error.field_id === 'resume-file' && error.code === 'INVALID_PROOF'));
+    assert.equal(fieldById(result.ledger, 'resume-file').retained, false);
+  }
+});
+
+test('rejects an upload receipt replayed against a later current observation', () => {
+  const empty = control('resume-file', {
+    ref: 'ref-resume-file-empty',
+    kind: 'input',
+    tag: 'input',
+    type: 'file',
+    role: 'textbox',
+    value: null,
+    value_present: false,
+    file: { accept: ['application/pdf'], count: 0, names: [] },
+  });
+  const first = observation('obs-1', [empty, finalCandidate()]);
+  const proofDigest = digestPrivateValue('synthetic-upload-proof');
+  let ledger = createLedger(first);
+  ledger = recordActionAttempt(ledger, {
+    action_id: 'upload-resume',
+    action: 'upload',
+    field_id: 'resume-file',
+    observation_id: 'obs-1',
+    ref: 'ref-resume-file-empty',
+    outcome: 'succeeded',
+    source_sha256: UPLOAD_DIGEST,
+  });
+  const uploaded = observation('obs-2', [control('resume-file', {
+    ref: 'ref-resume-file-uploaded',
+    kind: 'input',
+    tag: 'input',
+    type: 'file',
+    role: 'textbox',
+    value: null,
+    value_present: true,
+    file: { accept: ['application/pdf'], count: 1, names: ['synthetic.pdf'] },
+  }), finalCandidate()], 'obs-1');
+  ledger = mergeObservation(ledger, uploaded);
+  ledger = recordResolution(ledger, {
+    field_id: 'resume-file',
+    observation_id: 'obs-2',
+    ref: 'ref-resume-file-uploaded',
+    source: 'resume',
+    value_digest: proofDigest,
+  });
+  const currentReceipt = {
+    field_id: 'resume-file',
+    value_digest: proofDigest,
+    action_id: 'upload-resume',
+    file_name: 'synthetic.pdf',
+    source_sha256: UPLOAD_DIGEST,
+    observation_id: 'obs-2',
+    container_identity: 'resume-file',
+    committed_method: 'native_file_list',
+  };
+  const exact = verifyRetention(ledger, uploaded, { 'resume-file': currentReceipt });
+  assert.equal(exact.ok, true);
+  assert.equal(fieldById(exact.ledger, 'resume-file').retained, true);
+
+  const later = observation('obs-3', [control('resume-file', {
+    ref: 'ref-resume-file-still-committed',
+    kind: 'input',
+    tag: 'input',
+    type: 'file',
+    role: 'textbox',
+    value: null,
+    value_present: true,
+    file: { accept: ['application/pdf'], count: 1, names: ['synthetic.pdf'] },
+  }), finalCandidate()], 'obs-2');
+  const laterLedger = mergeObservation(exact.ledger, later);
+  const replayed = verifyRetention(laterLedger, later, { 'resume-file': currentReceipt });
+  assert.equal(replayed.ok, false);
+  assert.ok(replayed.errors.some((error) => error.field_id === 'resume-file' && error.code === 'INVALID_PROOF'));
+  assert.equal(fieldById(replayed.ledger, 'resume-file').retained, false);
+
+  const refreshed = verifyRetention(laterLedger, later, {
+    'resume-file': { ...currentReceipt, observation_id: 'obs-3' },
+  });
+  assert.equal(refreshed.ok, true);
+  assert.equal(fieldById(refreshed.ledger, 'resume-file').retained, true);
 });
 
 test('reports failed validation then passes after a corrected observation', () => {

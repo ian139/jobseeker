@@ -1371,6 +1371,7 @@ export function validateBrowserActionResult(result, plan, postObservation, conte
       outcome: outcome.outcome,
       retry_of: action.retry_of,
       error_code: outcome.error_code,
+      source_sha256: action.retention.artifact_sha256,
     });
     if (outcome.outcome === 'succeeded' && action.semantic_action !== 'upload_file') {
       formattedValues.push({
@@ -1380,7 +1381,8 @@ export function validateBrowserActionResult(result, plan, postObservation, conte
       });
     }
     if (outcome.outcome === 'succeeded' && action.semantic_action === 'upload_file') {
-      const control = committedUploads.get(action.field_id);
+      const control = committedUploads.get(action.field_id)
+        ?? postObservation.controls.find((candidate) => candidate.stable_id === action.field_id);
       uploadProofs[action.field_id] = {
         field_id: action.field_id,
         action_id: action.action_id,

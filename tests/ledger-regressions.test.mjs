@@ -144,7 +144,12 @@ function fileControl(id = 'resume-file', overrides = {}) {
     role: 'button',
     value: null,
     value_present: true,
-    file: { accept: ['application/pdf'], count: 1, names: ['resume.pdf'] },
+    file: {
+      accept: ['application/pdf'],
+      count: 1,
+      names: ['resume.pdf'],
+      committed_method: 'native_file_list',
+    },
     ...overrides,
   });
 }
@@ -404,6 +409,11 @@ test('requires typed upload proof and rejects injection, ordinary overrides, and
     'resume-file': { ...validProof, file_name: 'other.pdf' },
   });
   assert.equal(result.ok, false);
+  result = verifyRetention(ledger, second, {
+    'resume-file': { ...validProof, committed_method: 'rendered_container' },
+  });
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((item) => item.code === 'INVALID_PROOF'));
 
   result = verifyRetention(ledger, second, {
     ordinary: { ...validProof, field_id: 'ordinary', container_identity: 'ordinary' },

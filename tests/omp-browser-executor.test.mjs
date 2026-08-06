@@ -876,6 +876,63 @@ test('fresh exact upload commitment overrides a helper failure', async () => {
 });
 
 
+test('helper failure cannot borrow the expected basename from another upload field', async () => {
+  const post = postObservation('obs-1', [
+    control('resume', {
+      kind: 'file',
+      type: 'file',
+      role: 'input',
+      value: null,
+      value_present: false,
+      file: { accept: null, count: 0, names: [] },
+    }),
+    control('cover-letter', {
+      kind: 'file',
+      type: 'file',
+      role: 'input',
+      value: null,
+      value_present: false,
+      file: { accept: null, count: 1, names: ['resume.pdf'] },
+    }),
+  ]);
+  const transport = baseTransport({
+    uploadFile: async () => {
+      throw new Error('synthetic helper failure');
+    },
+  }, post);
+  const { result } = await executeOmpBrowserActionPlan(uploadPlan(), transport);
+  assert.equal(result.outcomes[0].outcome, 'failed');
+  assert.equal(result.outcomes[0].error_code, 'E_OMP_BROWSER_HELPER_FAILED');
+});
+
+test('same basename in another upload field does not make exact commitment ambiguous', async () => {
+  const post = postObservation('obs-1', [
+    control('resume', {
+      kind: 'file',
+      type: 'file',
+      role: 'input',
+      value: null,
+      value_present: false,
+      file: { accept: null, count: 1, names: ['resume.pdf'] },
+    }),
+    control('cover-letter', {
+      kind: 'file',
+      type: 'file',
+      role: 'input',
+      value: null,
+      value_present: false,
+      file: { accept: null, count: 1, names: ['resume.pdf'] },
+    }),
+  ]);
+  const transport = baseTransport({
+    uploadFile: async () => {
+      throw new Error('synthetic helper failure');
+    },
+  }, post);
+  const { result } = await executeOmpBrowserActionPlan(uploadPlan(), transport);
+  assert.equal(result.outcomes[0].outcome, 'succeeded');
+});
+
 test('exposes the stable executor error code vocabulary', () => {
   assert.deepEqual(OMP_BROWSER_EXECUTOR_ERROR_CODES, [
     'E_OMP_BROWSER_TRANSPORT_INVALID',

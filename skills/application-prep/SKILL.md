@@ -314,7 +314,7 @@ After finalization or when a run cannot proceed, persist exactly one terminal ou
 - **`closed`** — Only explicit live evidence that the posting is unavailable: HTTP 404/410, a page-level "job not found" or "position filled/closed" message, or a redirect away from the application. Never use for form validation failures, retention errors, or rejected submissions.
 - **`failed`** — A bounded infrastructure or evidence-integrity failure that cannot be recovered by retry (e.g., evidence store corruption, unrecoverable I/O error). Routine form completion debt, validation errors, and non-accepted final actions are never `failed`.
 
-Only persist a terminal outcome when the run genuinely cannot continue or has completed submission.
+`persistTerminalOutcome` rejects recoverable `blocked`/`failed` reasons with `E_RECOVERABLE_OUTCOME`; on that result, keep the same run active and return to fresh observation and bounded repair. Persist a terminal outcome only when the run genuinely cannot continue or has completed submission.
 
 ## Authoritative persistent supervised loop
 

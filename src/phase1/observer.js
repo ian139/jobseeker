@@ -1420,9 +1420,17 @@
       const label = accessibleName(container, elements, ids);
       const name = text(attr(container, "name"), MAX_LOCATOR_CHARS);
       const stableId = stableIdFor(container, info, frameId, label, name, container);
-      if (fileWidgetIds.has(stableId)) continue;
+      if (fileWidgetIds.has(stableId)) {
+        const prior = controls.find((control) => control.stable_id === stableId);
+        const priorElement = prior && prior.__element;
+        const sameContainer = priorElement === container
+          || Boolean(priorElement && typeof container.contains === "function" && container.contains(priorElement));
+        if (sameContainer) continue;
+        throw new Error("observer_upload_identity_ambiguous");
+      }
       if (controls.length >= MAX_CONTROLS) throw new Error("observer_control_limit_exceeded");
       const control = uploadControlFor(container, frameId, elements, ids, controls.length, observationId);
+      control.__element = container;
       fileWidgetIds.add(control.stable_id);
       controls.push(control);
     }

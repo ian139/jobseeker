@@ -557,6 +557,36 @@ test('isolates two committed upload containers displaying the same basename', ()
   );
 });
 
+
+test('fails closed when distinct committed containers claim one upload identity', () => {
+  const document = new Document();
+  const html = document.createElement('html');
+  html._connected = true;
+  const body = document.createElement('body');
+  const form = document.createElement('form');
+  for (let index = 0; index < 2; index += 1) {
+    const container = document.createElement('div', document, '', {
+      class: 'file-upload',
+      'aria-labelledby': 'upload-label-resume',
+      'data-upload-state': 'committed',
+    });
+    container.append(
+      document.createElement('label', document, `Resume ${index + 1}`, { id: 'upload-label-resume' }),
+      document.createElement('span', document, 'resume.pdf', { class: 'file-upload__filename' }),
+    );
+    form.append(container);
+  }
+  body.append(form);
+  html.append(body);
+  document.documentElement = html;
+  const markConnected = (element) => {
+    element._connected = true;
+    for (const child of element.children) markConnected(child);
+  };
+  markConnected(html);
+
+  assert.throws(() => observe(document), /observer_upload_identity_ambiguous/u);
+});
 test('removing the committed marker clears rendered upload state on re-observation', () => {
   const document = new Document();
   const html = document.createElement('html');

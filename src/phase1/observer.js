@@ -1140,8 +1140,18 @@
     };
   }
   function uploadedFileForContainer(container) {
-    const filenameElement = descendantWithClass(container, "file-upload__filename")
-      || (container.querySelector && container.querySelector('[title="Delete file"]')?.parentElement?.querySelector("span"));
+    const deleteControl = container.querySelector
+      ? (container.querySelector('[title="Delete file"]')
+        || container.querySelector('[aria-label="Remove file"]'))
+      : null;
+    const replaceControl = container.querySelector ? container.querySelector("button") : null;
+    const committed = Boolean(deleteControl
+      || (replaceControl && text(replaceControl.textContent) === "Replace")
+      || attr(container, "data-upload-state") === "committed");
+    const filenameElement = committed
+      ? (descendantWithClass(container, "file-upload__filename")
+        || deleteControl?.parentElement?.querySelector("span"))
+      : null;
     const filename = text(elementText(filenameElement), MAX_FILE_NAME_CHARS);
     const name = filename ? filename.split(/[\\/]/).pop() : null;
     return { accept: [], count: name ? 1 : 0, names: name ? [name] : [] };

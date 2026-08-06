@@ -461,10 +461,12 @@ test('preserves a file field stable ID across uploaded-container replacement', (
   const uploadedContainer = document.createElement('div', document, '', {
     class: 'file-upload',
     'aria-labelledby': 'upload-label-resume',
+    'data-upload-state': 'committed',
   });
   const uploadedLabel = document.createElement('label', document, 'Resume', { id: 'upload-label-resume' });
   const filename = document.createElement('span', document, 'resume.pdf', { class: 'file-upload__filename' });
-  uploadedContainer.append(uploadedLabel, filename);
+  const remove = document.createElement('button', document, '', { title: 'Delete file' });
+  uploadedContainer.append(uploadedLabel, filename, remove);
   form.append(uploadedContainer);
   markConnected(uploadedContainer);
 
@@ -480,6 +482,35 @@ test('preserves a file field stable ID across uploaded-container replacement', (
 
   const ledger = mergeObservation(createLedger(first), second);
   assert.equal(ledger.fields.filter((field) => field.field_id === firstFile.stable_id).length, 1);
+});
+
+test('does not commit rendered filename text without an attachment marker', () => {
+  const document = new Document();
+  const html = document.createElement('html');
+  html._connected = true;
+  const body = document.createElement('body');
+  const form = document.createElement('form');
+  const container = document.createElement('div', document, '', {
+    class: 'file-upload',
+    'aria-labelledby': 'upload-label-resume',
+  });
+  container.append(
+    document.createElement('label', document, 'Resume', { id: 'upload-label-resume' }),
+    document.createElement('span', document, 'resume.pdf', { class: 'file-upload__filename' }),
+  );
+  form.append(container, document.createElement('button', document, 'Submit Application', { type: 'submit' }));
+  body.append(form);
+  html.append(body);
+  document.documentElement = html;
+  const markConnected = (element) => {
+    element._connected = true;
+    for (const child of element.children) markConnected(child);
+  };
+  markConnected(html);
+
+  const result = observe(document);
+  validateObservation(result);
+  assert.equal(result.controls.some((control) => control.type === 'file'), false);
 });
 
  

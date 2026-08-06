@@ -1047,8 +1047,16 @@
   }
 
   function stableIdFor(element, info, frameId, label, name, identityElement = null, identityLabel = null) {
+    const semanticUploadContainer = info.type === "file"
+      ? (identityElement || uploadContainerFor(element))
+      : null;
+    const semanticUploadId = semanticUploadContainer
+      ? fileControlIdFromLabelledBy(text(attr(semanticUploadContainer, "aria-labelledby"), MAX_LOCATOR_CHARS))
+      : "";
     const source = info.type === "file"
-      ? (fileIdentityElement(element, identityElement) || identityElement || uploadContainerFor(element) || element)
+      ? (semanticUploadId
+        ? semanticUploadContainer
+        : (fileIdentityElement(element, identityElement) || identityElement || semanticUploadContainer || element))
       : (identityElement || element);
     const testId = testIdFor(source);
     const labelledBy = info.type === "file"

@@ -466,7 +466,11 @@ test('preserves a file field stable ID across uploaded-container replacement', (
   const uploadedLabel = document.createElement('label', document, 'Resume', { id: 'upload-label-resume' });
   const filename = document.createElement('span', document, 'resume.pdf', { class: 'file-upload__filename' });
   const remove = document.createElement('button', document, '', { title: 'Delete file' });
-  uploadedContainer.append(uploadedLabel, filename, remove);
+  const replacementInput = document.createElement('input', document, '', {
+    type: 'file',
+    id: 'react-generated-resume-input',
+  });
+  uploadedContainer.append(uploadedLabel, filename, remove, replacementInput);
   form.append(uploadedContainer);
   markConnected(uploadedContainer);
 

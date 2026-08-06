@@ -2590,6 +2590,28 @@ def _expansion_candidates(
     return tuple(candidates)
 
 
+def _prefill_supported_content(
+    plan: ResumePlan,
+    profile: ResumeProfile,
+    job: ResumeJob,
+) -> ResumePlan:
+    """Add deterministic non-skill candidates before the first page measurement."""
+    current = plan
+    for _attempt in range(_MAX_EXPANSION_ATTEMPTS):
+        candidate = next(
+            (
+                value
+                for value in _expansion_candidates(current, profile, job)
+                if value.compressed_skills == current.compressed_skills
+            ),
+            None,
+        )
+        if candidate is None:
+            return current
+        current = candidate
+    return current
+
+
 def _expand_plan(
     plan: ResumePlan,
     profile: ResumeProfile,
@@ -3215,6 +3237,7 @@ def generate_resume(
         tex_path = stage / "resume.tex"
         pdf_path = stage / "resume.pdf"
         expected_job = job.description.encode("utf-8")
+        plan = _prefill_supported_content(plan, profile, job)
         pages, text = _compile_plan(
             plan, job, template_text, stage, resolved_compiler, compiler_signature
         )

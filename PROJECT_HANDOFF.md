@@ -8,6 +8,19 @@ It is intentionally more conceptual than implementation-oriented. File names are
 
 > **Current execution note:** This document is historical context, not the active application/browser mechanics. Before any live application action, use `TODO.md` Phase 1 and reread `skills/application-prep/SKILL.md` section **Handoff-safe OMP browser quick start**. The active order is the OMP `browser` tool on the visible CMUX browser surface, then a control-specific pinned-CLI fallback, then the OMP `computer` tool only for a remaining native browser/OS interaction. Text is `tab.fill(selector, exactText)` with no `--value` prefix. Resume upload is `tab.uploadFile(exactFileInputCss, session.runMetadata.resume_upload_path)` after uniquely verifying the real file input's exact CSS selector. Historical Puppeteer, human-review-only, targetless typing, and pre-audit submission descriptions below are not current operating instructions.
 
+### Active-tree correction — 2026-07-28
+
+The historical status table below does not describe the current implementation. `TODO.md` remains authoritative. The active Phase 3 tree now has:
+
+- a fail-closed Greenhouse/Ashby registry and normalized payload extractor in `src/phase1/platforms.mjs`;
+- migration `005-platform-job-snapshots.sql`, which refuses active-run rebuilds, preserves terminal history, and quarantines every pre-migration nonterminal row pending supported re-ingestion;
+- supported ingestion, canonical URL/source deduplication, bound queue reads, and unsupported-row quarantine in `src/phase1/job-source.mjs`;
+- atomic claims fenced by the complete normalized snapshot, including the source-posted timestamp, in `src/phase1/backlog-runner.mjs`;
+- recovery-first exact description → offline canonical resume → manifest/PDF validation → exact claim → private workspace composition in `src/phase1/preparation.mjs`, with description-digest-keyed staging and persisted answer-memory recovery fencing;
+- frozen Greenhouse/Ashby action plans for exact fills, uploads, native choices, staged custom-combobox opening/exact selection, and checkbox transitions, with final submission still excluded until audit authorization.
+
+Deterministic code owns source classification, description extraction, queue eligibility/binding, resume generation, control mechanics, retention, and audit. OMP/model reasoning is limited to oversight/diagnosis and allowed evidence-backed unresolved response content. Contract-level evidence is in `tests/platforms.test.mjs` and `tests/job-source-preparation.test.mjs`; the unchecked live gates in `TODO.md` are still not complete.
+
 ## Contents
 
 - [Status statement](#status-statement-use-this-instead-of-the-repositorys-older-claims)

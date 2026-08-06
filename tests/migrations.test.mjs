@@ -252,6 +252,98 @@ FROM application_runs ORDER BY id;
       blocker_alias: null,
     },
   ]);
+  await sqlite(database, await migration('005-'));
+  assert.deepEqual(await sqlite(database, `
+SELECT id, status, status_reason, claimed_at, completed_at
+FROM application_jobs ORDER BY id;
+`), [
+    {
+      id: 1,
+      status: 'skipped',
+      status_reason: 'platform_reingest_required',
+      claimed_at: null,
+      completed_at: null,
+    },
+    {
+      id: 2,
+      status: 'closed',
+      status_reason: 'posting_closed',
+      claimed_at: '2026-07-25T00:00:00.000Z',
+      completed_at: '2026-07-25T00:10:00.000Z',
+    },
+    {
+      id: 3,
+      status: 'failed',
+      status_reason: 'legacy_failure',
+      claimed_at: null,
+      completed_at: null,
+    },
+  ]);
+  assert.deepEqual(await sqlite(database, `
+SELECT id, job_id, status FROM application_runs ORDER BY id;
+`), [
+    { id: 10, job_id: 1, status: 'failed' },
+    { id: 11, job_id: 2, status: 'closed' },
+    { id: 12, job_id: 3, status: 'failed' },
+  ]);
+  assert.deepEqual(await sqlite(database, 'PRAGMA foreign_key_check;'), []);
+  await sqlite(database, await migration('006-'));
+  await sqlite(database, `
+INSERT INTO application_jobs (
+  source_table, source_db, source_rowid, source_job_id, application_url,
+  eligibility_tier, verification_reason, source_last_seen_at, status,
+  platform, job_title, job_company, job_location, job_description, job_description_sha256
+) VALUES
+  ('legacy_jobs', '/private/legacy.sqlite', 4, 'legacy:employer-queued',
+   'https://careers.example.test/jobs/apply/4', 'active_verified', 'legacy employer',
+   '2026-07-28T00:00:00.000Z', 'queued', 'employer_hosted', 'Engineer',
+   'Example', 'Remote', 'Build systems.', '${'a'.repeat(64)}'),
+  ('legacy_jobs', '/private/legacy.sqlite', 5, 'legacy:employer-closed',
+   'https://careers.example.test/careers/5', 'backfill_only', 'legacy employer terminal',
+   '2026-07-28T00:00:00.000Z', 'closed', 'employer_hosted', 'Engineer',
+   'Example', 'Remote', 'Build systems.', '${'a'.repeat(64)}');
+`);
+  await sqlite(database, await migration('007-'));
+  assert.deepEqual(await sqlite(database, `
+SELECT id, platform, application_host, status, status_reason
+FROM application_jobs WHERE id IN (4, 5) ORDER BY id;
+`), [
+    {
+      id: 4,
+      platform: 'employer_hosted',
+      application_host: null,
+      status: 'skipped',
+      status_reason: 'employer_host_reingest_required',
+    },
+    {
+      id: 5,
+      platform: 'employer_hosted',
+      application_host: null,
+      status: 'closed',
+      status_reason: null,
+    },
+  ]);
+  await sqlite(database, `
+INSERT INTO application_jobs (
+  source_table, source_db, source_rowid, source_job_id, application_url,
+  eligibility_tier, source_last_seen_at, status, platform, application_host, job_title,
+  job_company, job_location, job_description, job_description_sha256
+) VALUES (
+  'jobs', '/private/source.sqlite', 100, 'jobs:100',
+  'https://job-boards.greenhouse.io/example/jobs/100', 'active_verified',
+  '2026-07-28T00:00:00.000Z', 'queued', 'greenhouse', 'job-boards.greenhouse.io', 'Engineer',
+  'Example', 'Remote', 'Build systems.', '${'a'.repeat(64)}'
+);
+`);
+  assert.deepEqual(await sqlite(database, `
+SELECT source_table, platform, application_host, status
+FROM application_jobs WHERE source_job_id = 'jobs:100';
+`), [{
+    source_table: 'jobs',
+    platform: 'greenhouse',
+    application_host: 'job-boards.greenhouse.io',
+    status: 'queued',
+  }]);
 });
 
 test('migration 004 creates active uniqueness for the same job and globally across different jobs', async (t) => {
@@ -278,4 +370,28 @@ test('migration 004 creates active uniqueness for the same job and globally acro
       { job_id: 10, owner_id: 'owner-a' },
     ]);
   });
+});
+
+test('migration 005 refuses to rebuild while a durable run is active', async (t) => {
+  const value = await createPost004Database([{ id: 1 }]);
+  t.after(() => fsp.rm(value.root, { recursive: true, force: true }));
+  await sqlite(value.database, activeRunInsert({
+    id: 1,
+    jobId: 1,
+    ownerId: 'owner-active',
+    browserSessionId: 'browser-active',
+  }));
+
+  await assert.rejects(
+    sqlite(value.database, await migration('005-')),
+    /CHECK constraint failed|constraint failed/u,
+  );
+  assert.deepEqual(
+    await sqlite(value.database, 'SELECT id, active, status FROM application_runs;'),
+    [{ id: 1, active: 1, status: 'applying' }],
+  );
+  assert.deepEqual(
+    await sqlite(value.database, 'SELECT id, status FROM application_jobs;'),
+    [{ id: 1, status: 'queued' }],
+  );
 });

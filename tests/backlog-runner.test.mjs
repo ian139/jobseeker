@@ -72,6 +72,7 @@ async function migration008() {
 async function createPost003Database(database, rows) {
   await sqlite(database, `
 PRAGMA foreign_keys = ON;
+CREATE TABLE IF NOT EXISTS jobs (id INTEGER PRIMARY KEY);
 CREATE TABLE application_jobs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   source_table TEXT NOT NULL CHECK (source_table IN ('legacy_jobs','assistant_jobs')),
@@ -113,18 +114,34 @@ ${rows.map((row) => `INSERT INTO application_jobs (
 ) VALUES (
   ${sql(row.id)}, ${sql(row.sourceTable ?? 'legacy_jobs')}, ${sql(row.sourceDb ?? 'fixture.sqlite')},
   ${sql(row.sourceRowid ?? row.id)}, ${sql(row.sourceJobId ?? `fixture:${row.id}`)},
-  ${sql(row.applicationUrl ?? `https://example.test/jobs/${row.id}`)},
+  ${sql(row.applicationUrl ?? `https://job-boards.greenhouse.io/fixture/jobs/${row.id}`)},
   ${sql(row.tier ?? 'active_verified')}, ${sql(row.verificationReason ?? 'fixture_reason')},
   ${sql(row.postedAt ?? '2026-06-01T00:00:00.000Z')},
   ${sql(row.lastSeen ?? '2026-07-01T00:00:00.000Z')},
   ${sql(row.status ?? 'queued')}, ${sql(row.statusReason)}, ${sql(row.claimedAt)}, ${sql(row.completedAt)}
 );`).join('\n')}
 `);
-  await sqlite(database, await migration004());
   await sqlite(database, `
-CREATE TABLE jobs (id INTEGER PRIMARY KEY);
 ${rows.map((row) => `INSERT INTO jobs (id) VALUES (${sql(row.id)});`).join('\n')}
-${await migration008()}
+`);
+  await sqlite(database, await migration004());
+  await sqlite(database, await migration008());
+  await sqlite(database, `
+ALTER TABLE application_jobs ADD COLUMN platform TEXT;
+ALTER TABLE application_jobs ADD COLUMN application_host TEXT;
+ALTER TABLE application_jobs ADD COLUMN job_title TEXT;
+ALTER TABLE application_jobs ADD COLUMN job_company TEXT;
+ALTER TABLE application_jobs ADD COLUMN job_location TEXT;
+ALTER TABLE application_jobs ADD COLUMN job_description TEXT;
+ALTER TABLE application_jobs ADD COLUMN job_description_sha256 TEXT;
+UPDATE application_jobs
+SET platform = 'greenhouse',
+    application_host = 'job-boards.greenhouse.io',
+    job_title = 'Fixture Engineer',
+    job_company = 'Fixture Company',
+    job_location = 'Remote',
+    job_description = 'Fixture job description.',
+    job_description_sha256 = '${sha256Bytes('Fixture job description.')}';
 `);
 }
 
@@ -478,7 +495,7 @@ test('claims jobs in deterministic order only after terminally releasing each ac
         status: 'closed',
         reasonCode: 'fixture_closed',
         finishedAt: `2026-07-26T00:00:1${index}.000Z`,
-        finalUrl: `https://example.test/jobs/${run.jobId}`,
+        finalUrl: `https://job-boards.greenhouse.io/fixture/jobs/${run.jobId}`,
         evidencePath: workspace.evidencePath,
         actionSummary: [{ action: 'review', outcome: 'succeeded' }],
         submitActionCount: 0,
@@ -511,6 +528,40 @@ test('concurrent claims enforce one global active job', async () => {
     assert.deepEqual(await readRows(value.database, 'SELECT count(*) AS count FROM application_jobs WHERE status = \'queued\''), [{ count: 1 }]);
   } finally {
     await removeFixture(value);
+  }
+});
+
+test('minimumJobId filters new claims without bypassing active recovery', async () => {
+  const recoveryFixture = await fixture([{ id: 1 }, { id: 2 }]);
+  try {
+    const active = await claimNextQueuedJob(recoveryFixture.database, claimOptions(recoveryFixture));
+    const recovered = await recoverOrClaimBacklogRun(
+      recoveryFixture.database,
+      claimOptions(recoveryFixture, { minimumJobId: 2 }),
+    );
+    assert.equal(active.jobId, 1);
+    assert.equal(recovered.kind, 'recovered');
+    assert.equal(recovered.run.jobId, 1);
+  } finally {
+    await removeFixture(recoveryFixture);
+  }
+
+  const claimFixture = await fixture([{ id: 1 }, { id: 2 }]);
+  try {
+    const claimed = await claimNextQueuedJob(
+      claimFixture.database,
+      claimOptions(claimFixture, { minimumJobId: 2 }),
+    );
+    assert.equal(claimed.jobId, 2);
+    assert.deepEqual(await readRows(
+      claimFixture.database,
+      'SELECT id, status FROM application_jobs ORDER BY id',
+    ), [
+      { id: 1, status: 'queued' },
+      { id: 2, status: 'claimed' },
+    ]);
+  } finally {
+    await removeFixture(claimFixture);
   }
 });
 
@@ -640,7 +691,7 @@ test('stale-session mutations are fenced after recovery rotates ownership', asyn
       status: 'closed',
       reasonCode: 'stale_terminal',
       finishedAt: '2026-07-26T00:01:10.000Z',
-      finalUrl: 'https://example.test/jobs/45',
+      finalUrl: 'https://job-boards.greenhouse.io/fixture/jobs/45',
       evidencePath: recovered.evidencePath,
       submitActionCount: 0,
     }));
@@ -909,7 +960,7 @@ test('workspace keeps contract and evidence private and distinct', async () => {
     assert.equal((await fsp.stat(workspace.evidencePath)).mode & 0o777, 0o700);
     const contract = JSON.parse(await fsp.readFile(workspace.contractPath, 'utf8'));
     assert.equal(contract.run_artifact_dir, workspace.evidencePath);
-    assert.equal(contract.application_url, 'https://example.test/jobs/90');
+    assert.equal(contract.application_url, 'https://job-boards.greenhouse.io/fixture/jobs/90');
     assert.equal(Object.hasOwn(contract, 'description'), false);
     assert.equal(Object.hasOwn(contract, 'applicant_name'), false);
     assert.equal((await fsp.readFile(workspace.contractPath, 'utf8')).includes('fixture job description'), false);
@@ -940,7 +991,7 @@ test('workspace creation recovers partial crashes idempotently without overwriti
 
     const mismatch = JSON.stringify({
       ...JSON.parse(expectedContract.toString('utf8')),
-      application_url: 'https://example.test/jobs/mismatch',
+      application_url: 'https://job-boards.greenhouse.io/fixture/jobs/mismatch',
     }) + '\n';
     await fsp.writeFile(recovered.contractPath, mismatch, { mode: 0o600 });
     await fsp.chmod(recovered.contractPath, 0o600);
@@ -974,7 +1025,7 @@ test('terminal persistence updates the active row without creating a duplicate',
       status: 'closed',
       reasonCode: 'posting_closed',
       finishedAt: '2026-07-26T00:01:00.000Z',
-      finalUrl: 'https://example.test/jobs/100',
+      finalUrl: 'https://job-boards.greenhouse.io/fixture/jobs/100',
       evidencePath: workspace.evidencePath,
       actionSummary: [{ action: 'review', outcome: 'succeeded' }],
       submitActionCount: 0,
@@ -1045,7 +1096,7 @@ test('canonical completion is evidence-derived and binds URL, evidence directory
       await publishCanonicalCompletion({
         root: value.root,
         evidencePath: workspace.evidencePath,
-        applicationUrl: 'https://example.test/jobs/110',
+        applicationUrl: 'https://job-boards.greenhouse.io/fixture/jobs/110',
         contractPath: workspace.contractPath,
         resumeUploadPath: value.preflight.resumeUploadPath,
       });
@@ -1057,7 +1108,7 @@ test('canonical completion is evidence-derived and binds URL, evidence directory
         status: 'completed',
         reasonCode: 'omp_submission_succeeded',
         finishedAt: '2026-07-26T00:01:00.000Z',
-        finalUrl: 'https://example.test/jobs/110',
+        finalUrl: 'https://job-boards.greenhouse.io/fixture/jobs/110',
         evidencePath: workspace.evidencePath,
       });
       assert.equal(outcome.status, 'completed');
@@ -1081,7 +1132,7 @@ test('canonical completion is evidence-derived and binds URL, evidence directory
       await publishCanonicalCompletion({
         root: value.root,
         evidencePath: workspace.evidencePath,
-        applicationUrl: 'https://example.test/jobs/111',
+        applicationUrl: 'https://job-boards.greenhouse.io/fixture/jobs/111',
         contractPath: workspace.contractPath,
         resumeUploadPath: value.preflight.resumeUploadPath,
         finalUrl: 'https://example.test/jobs/111/confirmation',
@@ -1094,11 +1145,11 @@ test('canonical completion is evidence-derived and binds URL, evidence directory
         status: 'completed',
         reasonCode: 'omp_submission_succeeded',
         finishedAt: '2026-07-26T00:01:00.000Z',
-        finalUrl: 'https://example.test/jobs/111/confirmation',
+        finalUrl: 'https://job-boards.greenhouse.io/fixture/jobs/111/confirmation',
         evidencePath: workspace.evidencePath,
       });
       assert.equal(outcome.status, 'completed');
-      assert.equal(outcome.finalUrl, 'https://example.test/jobs/111/confirmation');
+      assert.equal(outcome.finalUrl, 'https://job-boards.greenhouse.io/fixture/jobs/111/confirmation');
       assert.deepEqual(await readRows(value.database, 'SELECT status, active FROM application_runs'), [
         { status: 'completed', active: 0 },
       ]);
@@ -1115,7 +1166,7 @@ test('canonical completion is evidence-derived and binds URL, evidence directory
       await publishCanonicalCompletion({
         root: value.root,
         evidencePath: workspace.evidencePath,
-        applicationUrl: 'https://example.test/jobs/different-application',
+        applicationUrl: 'https://job-boards.greenhouse.io/fixture/jobs/different-application',
         contractPath: workspace.contractPath,
         resumeUploadPath: value.preflight.resumeUploadPath,
         finalUrl: 'https://example.test/jobs/114/confirmation',
@@ -1128,7 +1179,7 @@ test('canonical completion is evidence-derived and binds URL, evidence directory
         status: 'completed',
         reasonCode: 'omp_submission_succeeded',
         finishedAt: '2026-07-26T00:01:00.000Z',
-        finalUrl: 'https://example.test/jobs/114/confirmation',
+        finalUrl: 'https://job-boards.greenhouse.io/fixture/jobs/114/confirmation',
         evidencePath: workspace.evidencePath,
       }));
       assert.deepEqual(await readRows(value.database, 'SELECT status, active FROM application_runs'), [
@@ -1147,7 +1198,7 @@ test('canonical completion is evidence-derived and binds URL, evidence directory
       await publishCanonicalCompletion({
         root: value.root,
         evidencePath: workspace.evidencePath,
-        applicationUrl: 'https://example.test/jobs/115',
+        applicationUrl: 'https://job-boards.greenhouse.io/fixture/jobs/115',
         contractPath: workspace.contractPath,
         contractSha256: 'f'.repeat(64),
         resumeUploadPath: value.preflight.resumeUploadPath,
@@ -1160,7 +1211,7 @@ test('canonical completion is evidence-derived and binds URL, evidence directory
         status: 'completed',
         reasonCode: 'omp_submission_succeeded',
         finishedAt: '2026-07-26T00:01:00.000Z',
-        finalUrl: 'https://example.test/jobs/115',
+        finalUrl: 'https://job-boards.greenhouse.io/fixture/jobs/115',
         evidencePath: workspace.evidencePath,
       }));
       assert.deepEqual(await readRows(value.database, 'SELECT status, active FROM application_runs'), [
@@ -1186,7 +1237,7 @@ test('canonical completion is evidence-derived and binds URL, evidence directory
         status: 'completed',
         reasonCode: 'omp_submission_succeeded',
         finishedAt: '2026-07-26T00:01:00.000Z',
-        finalUrl: 'https://example.test/jobs/112',
+        finalUrl: 'https://job-boards.greenhouse.io/fixture/jobs/112',
         evidencePath: wrongEvidencePath,
       }));
       assert.deepEqual(await readRows(value.database, 'SELECT status, active FROM application_runs'), [
@@ -1208,7 +1259,7 @@ test('canonical completion is evidence-derived and binds URL, evidence directory
       await publishCanonicalCompletion({
         root: value.root,
         evidencePath: workspace.evidencePath,
-        applicationUrl: 'https://example.test/jobs/113',
+        applicationUrl: 'https://job-boards.greenhouse.io/fixture/jobs/113',
         contractPath: workspace.contractPath,
         resumeUploadPath: wrongResumePath,
       });
@@ -1220,7 +1271,7 @@ test('canonical completion is evidence-derived and binds URL, evidence directory
         status: 'completed',
         reasonCode: 'omp_submission_succeeded',
         finishedAt: '2026-07-26T00:01:00.000Z',
-        finalUrl: 'https://example.test/jobs/113',
+        finalUrl: 'https://job-boards.greenhouse.io/fixture/jobs/113',
         evidencePath: workspace.evidencePath,
       }));
       assert.deepEqual(await readRows(value.database, 'SELECT status, active FROM application_runs'), [

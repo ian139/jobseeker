@@ -983,6 +983,10 @@ const PROFILE_CANONICAL_PATHS = Object.freeze({
     'profile.address.country': Object.freeze(['address', 'country']),
     'profile.location_preferences.onsite': Object.freeze(['location_preferences', 'onsite']),
     'profile.relocation.willing': Object.freeze(['relocation', 'willing']),
+    'profile.address.street': Object.freeze(['address', 'street']),
+    'profile.address.street2': Object.freeze(['address', 'street2']),
+    'profile.location_preferences.current_location': Object.freeze(['location_preferences', 'current_location']),
+    'profile.compensation.target': Object.freeze(['compensation', 'target']),
     'Full Name': Object.freeze(['contact', 'name']),
     Name: Object.freeze(['contact', 'name']),
     'Preferred First Name': Object.freeze(['contact', 'preferred_name']),
@@ -990,6 +994,14 @@ const PROFILE_CANONICAL_PATHS = Object.freeze({
     'Last Name': Object.freeze(['contact', 'last_name']),
     Email: Object.freeze(['contact', 'email']),
     Phone: Object.freeze(['contact', 'phone']),
+});
+const PROFILE_CANONICAL_LINK_KINDS = Object.freeze({
+    'profile.links.linkedin': 'linkedin',
+    'profile.links.portfolio': 'portfolio',
+});
+const PROFILE_CANONICAL_EMPLOYMENT_KEYS = Object.freeze({
+    'profile.employment.current.employer': 'employer',
+    'profile.employment.current.title': 'title',
 });
 
 function ownPathValue(candidate, segments) {
@@ -1002,10 +1014,53 @@ function ownPathValue(candidate, segments) {
     }
     return { found: true, value };
 }
+function canonicalRelocationValue(profile, alias) {
+    if (alias !== 'profile.relocation.willing') return { found: false };
+    const relocation = ownPathValue(profile, ['relocation', 'willing']);
+    const preference = ownPathValue(profile, ['location_preferences', 'willing_to_relocate']);
+    if (relocation.found && preference.found && relocation.value !== preference.value) {
+        return { found: false };
+    }
+    return relocation.found ? relocation : preference;
+}
+
 
 function normalizedQuestion(value) {
     return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
+function canonicalLinkValue(profile, alias) {
+    const kind = PROFILE_CANONICAL_LINK_KINDS[alias];
+    if (kind === undefined || !isPlainObject(profile) || !Array.isArray(profile.links)) {
+        return { found: false };
+    }
+    let match;
+    for (const link of profile.links) {
+        if (!isPlainObject(link) || typeof link.url !== 'string') continue;
+        const matched = [link.kind, link.label].some((value) =>
+            typeof value === 'string' && normalizedQuestion(value) === kind);
+        if (!matched) continue;
+        if (match !== undefined) return { found: false };
+        match = link.url;
+    }
+    return match === undefined ? { found: false } : { found: true, value: match };
+}
+function canonicalEmploymentValue(profile, alias) {
+    const key = PROFILE_CANONICAL_EMPLOYMENT_KEYS[alias];
+    if (key === undefined || !isPlainObject(profile) || !Array.isArray(profile.employment)) {
+        return { found: false };
+    }
+    let match;
+    for (const employment of profile.employment) {
+        if (!isPlainObject(employment)
+            || employment.current !== true
+            || !Object.hasOwn(employment, key)) continue;
+        if (match !== undefined) return { found: false };
+        match = employment[key];
+    }
+    return match === undefined ? { found: false } : { found: true, value: match };
+}
+
+
 
 function authorizationCountryIsSupported(question, countries) {
     const match = question.match(/\b(?:work|employment)\s+(?:in|for)\s+(?:the\s+)?(.+)$/);
@@ -1177,13 +1232,25 @@ function profileValue(profile, alias) {
             return canonical;
         }
     }
+    const relocation = canonicalRelocationValue(profile, alias);
+    if (relocation.found) {
+        return relocation;
+    }
+    const link = canonicalLinkValue(profile, alias);
+    if (link.found) {
+        return link;
+    }
+    const employment = canonicalEmploymentValue(profile, alias);
+    if (employment.found) {
+        return employment;
+    }
     const exact = candidateValue(profile, alias);
     if (exact.found) {
         return exact;
     }
-    const link = semanticLinkValue(profile, alias);
-    if (link.found) {
-        return link;
+    const semantic = semanticLinkValue(profile, alias);
+    if (semantic.found) {
+        return semantic;
     }
     const education = semanticEducationValue(profile, alias);
     return education.found ? education : semanticStatusValue(profile, alias);
@@ -1272,6 +1339,7 @@ function inferenceValue(candidate, alias) {
 
 export function resolveAnswer({
     alias,
+    profileAlias = alias,
     memory = [],
     profile = undefined,
     resume = undefined,
@@ -1280,9 +1348,10 @@ export function resolveAnswer({
     user = undefined,
 } = {}) {
     requireAlias(alias, 'alias');
+    requireAlias(profileAlias, 'profileAlias');
     const candidates = [
         { source: 'memory', candidate: memoryValue(memory, alias) },
-        { source: 'profile', candidate: profileValue(profile, alias) },
+        { source: 'profile', candidate: profileValue(profile, profileAlias) },
         { source: 'resume', candidate: candidateValue(resume, alias) },
     ];
     for (const { source, candidate } of candidates) {

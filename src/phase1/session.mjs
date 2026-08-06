@@ -171,6 +171,23 @@ const INFERENCE_SENSITIVE_PATTERNS = Object.freeze([
 ]);
 const IDENTITY_PROSE_PATTERN = /\b(?:identity|full\s*name|first\s*name|last\s*name|preferred\s*name|given\s*name|family\s*name|email(?:\s*address)?|phone(?:\s*number)?|mobile(?:\s*number)?|mailing\s*address|home\s*address|street\s*address|zip\s*code|postal\s*code|contact\s*information)\b/;
 const EXACT_IDENTITY_PROSE = new Set(['name', 'address', 'city', 'state', 'country']);
+const STANDARD_PROFILE_ALIASES = Object.freeze({
+  'full name': 'Full Name',
+  'your full name': 'Full Name',
+  'first name': 'First Name',
+  'last name': 'Last Name',
+  'email address': 'Email',
+  'phone number': 'Phone',
+  'street address': 'profile.address.street',
+  'address line 2': 'profile.address.street2',
+  'linkedin profile url': 'profile.links.linkedin',
+  'portfolio url': 'profile.links.portfolio',
+  'current employer': 'profile.employment.current.employer',
+  'current job title': 'profile.employment.current.title',
+  'current location': 'profile.location_preferences.current_location',
+  'are you willing to relocate': 'profile.relocation.willing',
+  'what salary do you require': 'profile.compensation.target',
+});
 
 function normalizeClassificationText(text) {
   if (typeof text !== 'string') return '';
@@ -957,8 +974,10 @@ export async function resolveField(session, options) {
         throw new TypeError('options.approved_at must be an exact ISO date string');
       }
     }
+    const standardAlias = STANDARD_PROFILE_ALIASES[normalizeClassificationText(input.alias)];
     const answer = resolveAnswer({
       alias: input.alias,
+      profileAlias: standardAlias ?? input.alias,
       memory: state.memory,
       profile: state.profile ?? undefined,
       resume: sensitive ? undefined : state.resume,

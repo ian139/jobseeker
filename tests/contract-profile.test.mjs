@@ -525,6 +525,39 @@ test('resolveAnswer reads exact standard contact aliases from the profile', () =
     assert.equal(resolveAnswer({ alias: 'full name', profile }).missing, true);
 });
 
+test('profile aliases never redirect non-profile answer sources', () => {
+    const alias = 'Portfolio URL';
+    const profileAlias = 'profile.links.portfolio';
+    const profile = {
+        schema: PROFILE_SCHEMA,
+        links: [{ kind: 'portfolio', url: 'https://example.test/portfolio' }],
+    };
+    assert.deepEqual(resolveAnswer({ alias, profileAlias, profile }), {
+        alias,
+        source: 'profile',
+        value: 'https://example.test/portfolio',
+        missing: false,
+    });
+    assert.deepEqual(resolveAnswer({
+        alias,
+        profileAlias,
+        resume: { answers: { [alias]: 'observed-alias', [profileAlias]: 'synthetic-alias' } },
+    }), {
+        alias,
+        source: 'resume',
+        value: 'observed-alias',
+        missing: false,
+    });
+    assert.equal(resolveAnswer({
+        alias,
+        profileAlias,
+        memory: [testAnswerRecord(profileAlias, 'synthetic-alias', '2026-01-01T00:00:00.000Z')],
+        resume: { answers: { [profileAlias]: 'synthetic-alias' } },
+        user: { [profileAlias]: 'synthetic-alias' },
+    }).missing, true);
+});
+
+
 test('resolveAnswer maps novel status questions to canonical user-backed profile facts', () => {
     const profile = {
         schema: PROFILE_SCHEMA,

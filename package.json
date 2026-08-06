@@ -8,8 +8,11 @@
   },
   "exports": {
     ".": "./src/phase1/contract.mjs",
-    "./contract": "./src/phase1/contract.mjs",
-    "./profile": "./src/phase1/profile.mjs"
+    "./profile": "./src/phase1/profile.mjs",
+    "./backlog-runner": "./src/phase1/backlog-runner.mjs",
+    "./job-source": "./src/phase1/job-source.mjs",
+    "./platforms": "./src/phase1/platforms.mjs",
+    "./preparation": "./src/phase1/preparation.mjs"
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs"

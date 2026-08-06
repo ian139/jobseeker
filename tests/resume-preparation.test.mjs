@@ -118,21 +118,38 @@ async function fixture(options = {}) {
   await privateFile(answerMemory, '');
   const descriptionSha256 = sha256(Buffer.from(DESCRIPTION));
   db.prepare('INSERT INTO dedupe_groups (id,identity_kind,identity_key,review_required,created_at,updated_at) VALUES (1,?,?,?,?,?)')
-    .run('application_url', 'https://example.test/apply/1', 0, NOW, NOW);
+    .run('application_url', 'https://job-boards.greenhouse.io/example/jobs/1', 0, NOW, NOW);
   db.prepare(`INSERT INTO jobs (
     id,source,source_job_id,canonical_listing_url,canonical_application_url,ats_kind,ats_identifier,
     title,company,location,workplace_type,employment_types_json,description,description_sha256,
     source_posted_at,source_updated_at,discovered_at,first_seen_at,last_seen_at,availability_state,
     freshness_state,eligibility_state,eligibility_reason_codes_json,priority,dedupe_group_id,
     raw_payload_path,raw_payload_sha256
-  ) VALUES (1,'fixture','job-1','https://example.test/jobs/1','https://example.test/apply/1','custom',NULL,
+  ) VALUES (1,'fixture','job-1','https://job-boards.greenhouse.io/example/jobs/1','https://job-boards.greenhouse.io/example/jobs/1','greenhouse',NULL,
     'Engineer','Example','Remote','remote','[]',?,?,?,NULL,?,?,?,'open','current','eligible','[]',100,1,?,?)`)
     .run(DESCRIPTION, descriptionSha256, NOW, NOW, NOW, NOW, path.join(root, 'raw.json'), 'b'.repeat(64));
   db.prepare(`INSERT INTO application_jobs (
     id,source_table,source_db,source_rowid,source_job_id,application_url,eligibility_tier,
     verification_reason,source_posted_at,source_last_seen_at,status,dedupe_group_id
-  ) VALUES (1,'ingestion',?,1,'job-1','https://example.test/apply/1','active_verified','fixture',?,?,'queued',1)`)
+  ) VALUES (1,'ingestion',?,1,'job-1','https://job-boards.greenhouse.io/example/jobs/1','active_verified','fixture',?,?,'queued',1)`)
     .run(database, NOW, NOW);
+  db.exec(`
+    ALTER TABLE application_jobs ADD COLUMN platform TEXT;
+    ALTER TABLE application_jobs ADD COLUMN application_host TEXT;
+    ALTER TABLE application_jobs ADD COLUMN job_title TEXT;
+    ALTER TABLE application_jobs ADD COLUMN job_company TEXT;
+    ALTER TABLE application_jobs ADD COLUMN job_location TEXT;
+    ALTER TABLE application_jobs ADD COLUMN job_description TEXT;
+    ALTER TABLE application_jobs ADD COLUMN job_description_sha256 TEXT;
+  `);
+  db.prepare(`UPDATE application_jobs SET
+    platform = 'greenhouse',
+    application_host = 'job-boards.greenhouse.io',
+    job_title = 'Engineer',
+    job_company = 'Example',
+    job_location = 'Remote',
+    job_description = ?,
+    job_description_sha256 = ?`).run(DESCRIPTION, descriptionSha256);
   db.close();
   return {
     root,
@@ -207,22 +224,32 @@ test('orchestrator targets one queued application job without changing queue ord
   t.after(() => fsp.rm(value.root, { recursive: true, force: true }));
   const description = 'Build a second deterministic application workflow.';
   const db = new DatabaseSync(value.database);
+  const description2Sha256 = sha256(Buffer.from(description));
   db.prepare('INSERT INTO dedupe_groups (id,identity_kind,identity_key,review_required,created_at,updated_at) VALUES (2,?,?,?,?,?)')
-    .run('application_url', 'https://example.test/apply/2', 0, NOW, NOW);
+    .run('application_url', 'https://job-boards.greenhouse.io/example/jobs/2', 0, NOW, NOW);
   db.prepare(`INSERT INTO jobs (
     id,source,source_job_id,canonical_listing_url,canonical_application_url,ats_kind,ats_identifier,
     title,company,location,workplace_type,employment_types_json,description,description_sha256,
     source_posted_at,source_updated_at,discovered_at,first_seen_at,last_seen_at,availability_state,
     freshness_state,eligibility_state,eligibility_reason_codes_json,priority,dedupe_group_id,
     raw_payload_path,raw_payload_sha256
-  ) VALUES (2,'fixture','job-2','https://example.test/jobs/2','https://example.test/apply/2','greenhouse',NULL,
+  ) VALUES (2,'fixture','job-2','https://job-boards.greenhouse.io/example/jobs/2','https://job-boards.greenhouse.io/example/jobs/2','greenhouse',NULL,
     'Second Engineer','Example','Remote','remote','[]',?,?,?,NULL,?,?,?,'open','current','eligible','[]',100,2,?,?)`)
-    .run(description, sha256(Buffer.from(description)), NOW, NOW, NOW, NOW, path.join(value.root, 'raw-2.json'), 'c'.repeat(64));
+    .run(description, description2Sha256, NOW, NOW, NOW, NOW, path.join(value.root, 'raw-2.json'), 'c'.repeat(64));
   db.prepare(`INSERT INTO application_jobs (
     id,source_table,source_db,source_rowid,source_job_id,application_url,eligibility_tier,
     verification_reason,source_posted_at,source_last_seen_at,status,dedupe_group_id
-  ) VALUES (2,'ingestion',?,2,'job-2','https://example.test/apply/2','active_verified','fixture',?,?,'queued',2)`)
+  ) VALUES (2,'ingestion',?,2,'job-2','https://job-boards.greenhouse.io/example/jobs/2','active_verified','fixture',?,?,'queued',2)`)
     .run(value.database, NOW, NOW);
+  db.prepare(`UPDATE application_jobs SET
+    platform = 'greenhouse',
+    application_host = 'job-boards.greenhouse.io',
+    job_title = 'Second Engineer',
+    job_company = 'Example',
+    job_location = 'Remote',
+    job_description = ?,
+    job_description_sha256 = ?
+    WHERE id = 2`).run(description, description2Sha256);
   db.close();
 
   const result = await recoverPrepareOrClaimBacklogRun(value.database, {

@@ -13,6 +13,7 @@ import {
   validateRunContractLocal,
 } from './contract.mjs';
 import { validateCompletionEvidence } from './evidence.mjs';
+import { classifyFailure } from './recovery.mjs';
 import { canonicalizeApplicationUrl, classifyApplicationUrl } from './platforms.mjs';
 
 const SQLITE_BINARY = 'sqlite3';
@@ -2033,6 +2034,10 @@ async function normalizeTerminalOutcome(outcome, row) {
   if (row.active !== 1 || row.status !== 'applying') fail('E_RUN_NOT_ACTIVE');
   if (!TERMINAL_OUTCOMES.includes(outcome.status)) fail('E_OUTCOME_STATUS');
   const reasonCode = normalizeReasonCode(outcome.reasonCode);
+  if ((outcome.status === 'blocked' || outcome.status === 'failed')
+      && classifyFailure({ reasonCode }).recoverable) {
+    fail('E_RECOVERABLE_OUTCOME');
+  }
   const finishedAt = normalizeTimestamp(outcome.finishedAt, 'E_FINISHED_AT');
   if (Date.parse(finishedAt) < Date.parse(row.started_at)) fail('E_OUTCOME_TIME');
   const evidencePath = requireStoredPath(outcome.evidencePath, 'E_EVIDENCE_PATH');

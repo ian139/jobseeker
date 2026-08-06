@@ -1049,45 +1049,34 @@ test('terminal persistence updates the active row without creating a duplicate',
   }
 });
 
-test('diagnosed failed job requeues without rewriting terminal run history', async () => {
+test('recoverable browser failure cannot terminalize or replace the active run', async () => {
   const value = await fixture([{ id: 101 }]);
   try {
-    const first = await claimNextQueuedJob(value.database, claimOptions(value));
-    const workspace = await createWorkspace(value, first);
-    await persistTerminalOutcome(value.database, {
-      runId: first.runId,
-      ownerId: first.ownerId,
-      browserSessionId: first.browserSessionId,
-      jobId: first.jobId,
-      status: 'failed',
-      reasonCode: 'browser_input_unavailable',
-      finishedAt: '2026-07-26T00:01:00.000Z',
-      finalUrl: 'https://example.test/jobs/101',
-      evidencePath: workspace.evidencePath,
-      actionSummary: [{ action: 'fill', outcome: 'failed' }],
-    });
-
-    const requeued = await requeueTerminalJob(value.database, first.jobId, {
-      reason: 'browser_input_restored',
-    });
-    assert.deepEqual(requeued, {
-      jobId: first.jobId,
-      status: 'queued',
-      reasonCode: 'browser_input_restored',
-    });
-
-    const second = await claimNextQueuedJob(value.database, claimOptions(value, {
-      now: '2026-07-26T00:02:00.000Z',
-    }));
-    assert.equal(second.jobId, first.jobId);
-    assert.notEqual(second.runId, first.runId);
+    const run = await claimNextQueuedJob(value.database, claimOptions(value));
+    const workspace = await createWorkspace(value, run);
+    await assert.rejects(
+      persistTerminalOutcome(value.database, {
+        runId: run.runId,
+        ownerId: run.ownerId,
+        browserSessionId: run.browserSessionId,
+        jobId: run.jobId,
+        status: 'failed',
+        reasonCode: 'browser_input_unavailable',
+        finishedAt: '2026-07-26T00:01:00.000Z',
+        finalUrl: 'https://example.test/jobs/101',
+        evidencePath: workspace.evidencePath,
+        actionSummary: [{ action: 'fill', outcome: 'failed' }],
+      }),
+      (error) => error?.code === 'E_RECOVERABLE_OUTCOME',
+    );
     assert.deepEqual(await readRows(
       value.database,
-      'SELECT id, status, active FROM application_runs ORDER BY id',
-    ), [
-      { id: first.runId, status: 'failed', active: 0 },
-      { id: second.runId, status: 'applying', active: 1 },
-    ]);
+      'SELECT id, status, active FROM application_runs',
+    ), [{ id: run.runId, status: 'applying', active: 1 }]);
+    assert.deepEqual(await readRows(
+      value.database,
+      'SELECT id, status FROM application_jobs WHERE id = 101',
+    ), [{ id: run.jobId, status: 'claimed' }]);
   } finally {
     await removeFixture(value);
   }

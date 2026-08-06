@@ -692,6 +692,9 @@ function diffFieldSnapshots(beforeFields, afterFields, fromObservationId, toObse
       added.push({ field_id: field.field_id, ref: field.latest_ref, kind: field.kind });
     } else {
       const changes = fieldChangeList(prior, field);
+      if (prior.latest_ref !== field.latest_ref) {
+        changes.unshift({ property: 'ref', from: prior.latest_ref, to: field.latest_ref });
+      }
       if (changes.length > 0) changed.push({ field_id: field.field_id, changes });
     }
   }

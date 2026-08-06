@@ -487,6 +487,10 @@ test('preserves a file field stable ID across uploaded-container replacement', (
 
   const ledger = mergeObservation(createLedger(first), second);
   assert.equal(ledger.fields.filter((field) => field.field_id === firstFile.stable_id).length, 1);
+  const replacementDiff = ledger.diffs.at(-1).changed.find(
+    (change) => change.field_id === firstFile.stable_id,
+  );
+  assert.ok(replacementDiff.changes.some((change) => change.property === 'ref'));
 });
 
 test('does not commit rendered filename text without an attachment marker', () => {

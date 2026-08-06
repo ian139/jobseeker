@@ -552,6 +552,46 @@ test('isolates two committed upload containers displaying the same basename', ()
   );
 });
 
+test('removing the committed marker clears rendered upload state on re-observation', () => {
+  const document = new Document();
+  const html = document.createElement('html');
+  html._connected = true;
+  const body = document.createElement('body');
+  const form = document.createElement('form');
+  const container = document.createElement('div', document, '', {
+    class: 'file-upload',
+    'aria-labelledby': 'upload-label-resume',
+    'data-upload-state': 'committed',
+  });
+  container.append(
+    document.createElement('label', document, 'Resume', { id: 'upload-label-resume' }),
+    document.createElement('span', document, 'resume.pdf', { class: 'file-upload__filename' }),
+  );
+  form.append(container, document.createElement('button', document, 'Submit Application', { type: 'submit' }));
+  body.append(form);
+  html.append(body);
+  document.documentElement = html;
+  const markConnected = (element) => {
+    element._connected = true;
+    for (const child of element.children) markConnected(child);
+  };
+  markConnected(html);
+
+  const committed = observe(document);
+  validateObservation(committed);
+  const committedFile = committed.controls.find((control) => control.type === 'file');
+  assert.ok(committedFile);
+  container.attributes.delete('data-upload-state');
+
+  const cleared = observe(document, committed.observation_id);
+  validateObservation(cleared);
+  assert.equal(cleared.controls.some((control) => control.type === 'file'), false);
+  const ledger = mergeObservation(createLedger(committed), cleared);
+  const field = ledger.fields.find((item) => item.field_id === committedFile.stable_id);
+  assert.equal(field.present_in_latest_observation, false);
+  assert.equal(field.retained, false);
+});
+
  
 function frameObservation({ src, title = '', frameId = '', captcha = false, response = null }) {
   const document = new Document();

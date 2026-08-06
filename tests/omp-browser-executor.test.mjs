@@ -864,6 +864,18 @@ test('upload uses the planned file path', async () => {
   assert.equal(result.outcomes[0].selected_option_text, null);
 });
 
+test('fresh exact upload commitment overrides a helper failure', async () => {
+  const transport = baseTransport({
+    uploadFile: async () => {
+      throw new Error('synthetic helper failure');
+    },
+  }, committedUploadPost());
+  const { result } = await executeOmpBrowserActionPlan(uploadPlan(), transport);
+  assert.equal(result.outcomes[0].outcome, 'succeeded');
+  assert.equal(result.outcomes[0].error_code, null);
+});
+
+
 test('exposes the stable executor error code vocabulary', () => {
   assert.deepEqual(OMP_BROWSER_EXECUTOR_ERROR_CODES, [
     'E_OMP_BROWSER_TRANSPORT_INVALID',

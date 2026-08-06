@@ -271,6 +271,19 @@ async function observePostAction(plan, transport, timeoutMs) {
   return postObservation;
 }
 
+/** Treat an upload helper error as recoverable when fresh exact DOM state proves commitment. */
+function reconcileCommittedUpload(action, outcome, postObservation) {
+  if (action.semantic_action !== 'upload_file' || outcome.outcome === 'succeeded') return outcome;
+  const controls = postObservation.controls.filter((control) => control.stable_id === action.field_id);
+  if (controls.length !== 1) return outcome;
+  const file = controls[0].file;
+  if (file === null || file.count !== 1 || !Array.isArray(file.names)
+      || file.names.length !== 1 || file.names[0] !== action.retention.file_name) {
+    return outcome;
+  }
+  return succeededOutcome(action);
+}
+
 function normalizeOptions(options) {
   if (!isObject(options)) return { callbackTimeoutMs: CALLBACK_TIMEOUT_MS };
   const callbackTimeoutMs = Number.isSafeInteger(options.callbackTimeoutMs)
@@ -313,11 +326,14 @@ export async function executeOmpBrowserActionPlan(plan, transport, options = {})
   }
 
   const postObservation = await observePostAction(normalizedPlan, transport, callbackTimeoutMs);
+  const reconciledOutcomes = outcomes.map((outcome, index) => (
+    reconcileCommittedUpload(normalizedPlan.actions[index], outcome, postObservation)
+  ));
   const result = freezeDeep({
     schema: ACTION_RESULT_SCHEMA,
     plan_id: normalizedPlan.plan_id,
     post_observation_id: postObservation.observation_id,
-    outcomes,
+    outcomes: reconciledOutcomes,
   });
   const receipt = freezeDeep({ result, postObservation });
   try {

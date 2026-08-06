@@ -1276,6 +1276,18 @@ function validateCommittedSelection(action, postObservation, location) {
     fail('OPTION_SELECTION_MISMATCH', location);
   }
 }
+function validateCommittedUpload(action, postObservation, location) {
+  const controls = postObservation.controls.filter((control) => control.stable_id === action.field_id);
+  if (controls.length !== 1) fail('POST_CONTROL_BINDING', location);
+  const control = controls[0];
+  const file = control.file;
+  const expected = action.retention.file_name;
+  if (!isObject(file) || file.count !== 1 || !Array.isArray(file.names)
+      || file.names.length !== 1 || file.names[0] !== expected) {
+    fail('UPLOAD_FILE_NOT_COMMITTED', location);
+  }
+}
+
 
 
 export function validateBrowserActionResult(result, plan, postObservation, context = {}) {
@@ -1339,6 +1351,11 @@ export function validateBrowserActionResult(result, plan, postObservation, conte
         && action.semantic_action === 'select_option'
         && normalizedPlan.schema !== LEGACY_ACTION_PLAN_SCHEMA) {
       validateCommittedSelection(action, postObservation, `result.outcomes[${index}]`);
+    }
+    if (outcome.outcome === 'succeeded'
+        && action.semantic_action === 'upload_file'
+        && normalizedPlan.schema !== LEGACY_ACTION_PLAN_SCHEMA) {
+      validateCommittedUpload(action, postObservation, `result.outcomes[${index}]`);
     }
     attempts.push({
       action_id: action.action_id,

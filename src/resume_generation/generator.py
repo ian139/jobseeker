@@ -1039,19 +1039,26 @@ def _ats_text_forms(value: str) -> tuple[str, str]:
 def _ats_term_forms(term: str) -> tuple[str, str]:
     return _ats_text_forms(term)
 
+def _ats_term_pattern(term: str) -> str | None:
+    spaced_term, _compact_term = _ats_term_forms(term)
+    if not spaced_term:
+        return None
+    raw = term.strip()
+    if re.fullmatch(r"[A-Z0-9]{2,6}", raw) and re.search(r"[A-Z]", raw):
+        return r"(?<!\w)" + r"\s*".join(re.escape(character.casefold()) for character in raw) + r"(?!\w)"
+    return r"(?<!\w)" + re.escape(spaced_term) + r"(?!\w)"
+
 
 def _ats_contains(text: str, term: str) -> bool:
     spaced_text, _compact_text = _ats_text_forms(text)
-    spaced_term, _compact_term = _ats_term_forms(term)
-    return bool(spaced_term and re.search(r"(?<!\w)" + re.escape(spaced_term) + r"(?!\w)", spaced_text))
+    pattern = _ats_term_pattern(term)
+    return bool(pattern and re.search(pattern, spaced_text))
 
 
 def _ats_occurrences(text: str, term: str) -> int:
     spaced_text, _compact_text = _ats_text_forms(text)
-    spaced_term, _compact_term = _ats_term_forms(term)
-    if not spaced_term:
-        return 0
-    return len(re.findall(r"(?<!\w)" + re.escape(spaced_term) + r"(?!\w)", spaced_text))
+    pattern = _ats_term_pattern(term)
+    return 0 if pattern is None else len(re.findall(pattern, spaced_text))
 
 
 def _requirement_terms(title: str, description: str) -> tuple[str, ...]:
@@ -1179,6 +1186,47 @@ def _profile_evidence(profile: ResumeProfile) -> tuple[str, ...]:
     for ext in (profile.career, profile.working_style, profile.professional_narratives, profile.interests, profile.tools_and_workflows):
         if ext:
             add_val(ext)
+    return tuple(sorted({value for value in values if value}, key=lambda value: (value.casefold(), value)))
+
+def _renderable_profile_evidence(profile: ResumeProfile, plan: ResumePlan) -> tuple[str, ...]:
+    values: list[str] = []
+    contact = profile.others.contact
+    links = profile.others.links
+    values.extend((contact.full_name, contact.phone, contact.email))
+    for label, url in (("linkedin", links.linkedin), ("github", links.github), ("website", links.website)):
+        if url:
+            values.append(label)
+    if profile.education:
+        values.append("Education")
+    if profile.experience:
+        values.append("Experience")
+    if profile.leadership:
+        values.append("Leadership")
+    if profile.projects:
+        values.append("Projects")
+    if profile.skills:
+        values.append("Technical Skills")
+    for entries in profile.skills.values():
+        values.extend(entry.name for entry in entries)
+    for entries in (profile.experience, profile.leadership):
+        for entry in entries:
+            values.extend((entry.title, entry.organization, entry.location, entry.dates.display))
+            values.extend(bullet.text for bullet in entry.bullets)
+    for entry in profile.education:
+        values.extend((
+            entry.institution,
+            entry.location,
+            entry.degree,
+            entry.dates.display,
+            plan.graduation_date,
+        ))
+        if entry.coursework:
+            values.extend(entry.coursework)
+    for entry in profile.projects:
+        if not entry.enabled:
+            continue
+        values.extend((entry.name, entry.dates.display, *entry.technologies))
+        values.extend(bullet.text for bullet in entry.bullets)
     return tuple(sorted({value for value in values if value}, key=lambda value: (value.casefold(), value)))
 
 
@@ -1428,7 +1476,7 @@ def _audit_rendered_resume(
     rendered_text: str,
 ) -> dict[str, Any]:
     terms = tuple(plan.requirement_terms)
-    profile_evidence = " ".join(_profile_evidence(profile))
+    profile_evidence = " ".join(_renderable_profile_evidence(profile, plan))
     term_weights = _job_term_weights(job.title, job.description, plan.field)
     rendered_matches = tuple(term for term in terms if _ats_contains(rendered_text, term))
     rendered_missing = tuple(term for term in terms if term not in rendered_matches)

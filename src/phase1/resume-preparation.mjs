@@ -16,6 +16,7 @@ const OPTION_KEYS = new Set([
   'resumeCompiler',
   'now',
   'timeoutMs',
+  'applicationJobId',
 ]);
 const REQUIRED_OPTION_KEYS = Object.freeze([
   'pythonExecutable',
@@ -103,6 +104,11 @@ function normalizeOptions(options) {
       : absolutePath(options.resumeCompiler, 'invalid_resume_compiler'),
     now: normalizeNow(options.now),
     timeoutMs: options.timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : options.timeoutMs,
+    applicationJobId: options.applicationJobId === undefined
+      ? null
+      : (Number.isInteger(options.applicationJobId) && options.applicationJobId > 0
+        ? options.applicationJobId
+        : fail('invalid_application_job_id')),
   };
   if (!Number.isInteger(normalized.timeoutMs) || normalized.timeoutMs < 1000 || normalized.timeoutMs > 30 * 60 * 1000) {
     fail('invalid_preparation_timeout');
@@ -400,7 +406,7 @@ export async function prepareNextQueuedResume(database, options = {}) {
   let candidate;
   const db = openIngestionDatabase(database);
   try {
-    candidate = readCandidate(db);
+    candidate = readCandidate(db, normalized.applicationJobId);
   } finally {
     db.close();
   }

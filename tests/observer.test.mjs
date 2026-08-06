@@ -168,9 +168,10 @@ function buildDocument() {
   const no = document.createElement('button', document, 'No', { type: 'button', 'aria-pressed': 'false' });
   const unrelatedYes = document.createElement('button', document, 'Yes', { type: 'button' });
   const submit = document.createElement('button', document, 'Submit Application', { id: 'submit-app', type: 'submit' });
+  const locate = document.createElement('button', document, 'Locate me', { type: 'button' });
   yesNo.append(yes, no);
   question.append(prompt, yesNo);
-  form.append(question, unrelatedYes, submit);
+  form.append(question, unrelatedYes, locate, submit);
   body.append(form);
   html.append(body);
   const markConnected = (element) => {
@@ -178,7 +179,7 @@ function buildDocument() {
     for (const child of element.children) markConnected(child);
   };
   markConnected(html);
-  return { document, yes, no, submit, unrelatedYes };
+  return { document, body, yes, no, locate, submit, unrelatedYes };
 }
 
 function observe(document, previousObservationId = null) {
@@ -206,6 +207,7 @@ test('normalizes paired Yes/No buttons into a stable radio field group', () => {
   assert.ok(choices.every((control) => control.candidate.class === 'field'));
   assert.ok(choices.every((control) => control.locator.strategy === 'role'));
   assert.ok(first.controls.some((control) => control.label === 'Yes' && control.candidate.class === 'unknown'));
+  assert.equal(first.controls.find((control) => control.label === 'Locate me').candidate.class, 'non_final_navigation');
   assert.equal(first.controls.find((control) => control.label === 'Submit Application').candidate.class, 'final_candidate');
 
   const firstByValue = new Map(choices.map((control) => [control.value, control]));
@@ -235,6 +237,78 @@ test('normalizes paired Yes/No buttons into a stable radio field group', () => {
   ledger = mergeObservation(ledger, second);
   assert.equal(ledger.fields.filter((field) => field.group_id === choices[0].group_id).length, 2);
   assert.ok(ledger.fields.every((field) => field.label !== 'Yes' || field.group_id === null));
+});
+
+test('ignores oversized hidden custom-select option catalogs while retaining a hidden selection', () => {
+  const fixture = buildDocument();
+  const combobox = fixture.document.createElement('div', fixture.document, '', {
+    role: 'combobox',
+    'aria-controls': 'country-options',
+    'aria-owns': 'country-options',
+  });
+  const listbox = fixture.document.createElement('ul', fixture.document, '', {
+    id: 'country-options',
+    role: 'listbox',
+  });
+  for (let index = 0; index < 246; index += 1) {
+    const option = fixture.document.createElement('li', fixture.document, `Country ${index}`, {
+      role: 'option',
+      'data-value': `country-${index}`,
+      'aria-selected': index === 245 ? 'true' : 'false',
+    });
+    option.getBoundingClientRect = () => ({ width: 0, height: 0 });
+    option.getClientRects = () => [];
+    listbox.append(option);
+  }
+  fixture.body.append(combobox, listbox);
+  const markConnected = (element) => {
+    element._connected = true;
+    for (const child of element.children) markConnected(child);
+  };
+  markConnected(combobox);
+  markConnected(listbox);
+
+  const observation = observe(fixture.document);
+  validateObservation(observation);
+  const control = observation.controls.find((candidate) => candidate.role === 'combobox');
+  assert.ok(control);
+  assert.equal(control.options.length, 1);
+  assert.equal(control.options[0].selected, true);
+  assert.equal(control.options[0].value, 'country-245');
+});
+
+test('observes a bounded 246-option visible custom-select catalog', () => {
+  const fixture = buildDocument();
+  const combobox = fixture.document.createElement('div', fixture.document, '', {
+    role: 'combobox',
+    'aria-controls': 'country-options',
+  });
+  const listbox = fixture.document.createElement('ul', fixture.document, '', {
+    id: 'country-options',
+    role: 'listbox',
+  });
+  for (let index = 0; index < 246; index += 1) {
+    listbox.append(fixture.document.createElement('li', fixture.document, `Country ${index}`, {
+      role: 'option',
+      ...(index === 0 ? {} : { 'data-value': `country-${index}` }),
+      'aria-selected': index === 0 ? 'true' : 'false',
+    }));
+  }
+  fixture.body.append(combobox, listbox);
+  const markConnected = (element) => {
+    element._connected = true;
+    for (const child of element.children) markConnected(child);
+  };
+  markConnected(combobox);
+  markConnected(listbox);
+
+  const observation = observe(fixture.document);
+  validateObservation(observation);
+  const control = observation.controls.find((candidate) => candidate.role === 'combobox');
+  assert.ok(control);
+  assert.equal(control.options.length, 246);
+  assert.equal(control.options[0].value, 'Country 0');
+  assert.equal(control.options[0].selected, true);
 });
 
 test('observes opacity-zero native checkboxes and radios with visible labels', () => {

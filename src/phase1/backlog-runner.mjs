@@ -951,7 +951,19 @@ JOIN _backlog_resume_result AS p ON p.run_id = r.id;
 COMMIT;
 `;
 }
-async function verifyPersistedQuestionAnswer(database, runId, ownerId, browserSessionId) {
+
+const NON_ANSWER_RESUMABLE_REASONS = new Set([
+  'third_party_access_control_required',
+  'third_party_authentication_required',
+]);
+
+async function verifyPersistedQuestionAnswer(
+  database,
+  runId,
+  ownerId,
+  browserSessionId,
+  accessControlResolved,
+) {
   const row = await readRunRow(database, runId);
   if (row.active !== 1
     || row.status !== 'needs_user'
@@ -962,6 +974,12 @@ async function verifyPersistedQuestionAnswer(database, runId, ownerId, browserSe
     || typeof row.workspace_path !== 'string'
     || typeof row.answer_memory_path !== 'string') {
     fail('E_RUN_NOT_NEEDS_USER');
+  }
+  if (accessControlResolved) {
+    if (!NON_ANSWER_RESUMABLE_REASONS.has(row.reason_code)) {
+      fail('E_ACCESS_CONTROL_RESOLUTION');
+    }
+    return;
   }
   const workspacePath = requireStoredPath(row.workspace_path, 'E_WORKSPACE_PATH');
   const memoryPath = requireStoredPath(row.answer_memory_path, 'E_ANSWER_MEMORY');
@@ -1011,7 +1029,14 @@ async function verifyPersistedQuestionAnswer(database, runId, ownerId, browserSe
 
 /** Resume a paused run in place; never creates a second run row. */
 export async function resumeNeedsUserRun(database, runId, options = {}) {
-  const allowed = new Set(['ownerId', 'browserSessionId', 'now', 'leaseSeconds', 'reason']);
+  const allowed = new Set([
+    'ownerId',
+    'browserSessionId',
+    'now',
+    'leaseSeconds',
+    'reason',
+    'accessControlResolved',
+  ]);
   assertExactKeys(options, allowed, 'E_RESUME_OPTIONS');
   const id = requirePositiveInteger(runId, 'E_RUN_ID');
   const ownerId = normalizeOwner(options.ownerId, 'E_OWNER_ID');
@@ -1019,9 +1044,17 @@ export async function resumeNeedsUserRun(database, runId, options = {}) {
   const now = normalizeTimestamp(options.now, 'E_RESUME_TIMESTAMP');
   const leaseSeconds = normalizeLeaseSeconds(options.leaseSeconds);
   const reason = normalizeReasonCode(options.reason, 'resumed_by_user');
+  const accessControlResolved = options.accessControlResolved ?? false;
+  if (typeof accessControlResolved !== 'boolean') fail('E_ACCESS_CONTROL_RESOLUTION');
   const expiresAt = leaseExpiry(now, leaseSeconds);
   const db = databasePath(database);
-  await verifyPersistedQuestionAnswer(db, id, ownerId, browserSessionId);
+  await verifyPersistedQuestionAnswer(
+    db,
+    id,
+    ownerId,
+    browserSessionId,
+    accessControlResolved,
+  );
   const rows = parseRows(
     await runSqlite(
       db,

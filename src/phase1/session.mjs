@@ -36,6 +36,7 @@ import {
   validateBrowserActionPlan,
   validateBrowserActionResult,
 } from './action-plan.mjs';
+import { normalizeGreenhouseObservation } from './greenhouse-observation.mjs';
 
 const SESSION_STATES = new WeakMap();
 const DELIBERATE_BLANK_SOURCES = new Set(['memory', 'profile', 'agent_inference', 'user']);
@@ -353,7 +354,7 @@ function pendingActionPlanRecords(state) {
     if (!plan || !actionPlanMatches(plan, receipt.plan)) {
       throw new TypeError('action result does not match its action plan');
     }
-    const validation = validatedReceipt(receipt);
+    const validation = validatedReceipt(receipt, { historical: true });
     receiptsByPlan.set(receipt.plan.plan_id, { receipt, validation });
   }
 
@@ -849,7 +850,8 @@ async function acceptObservationInState(state, observation, markPublished) {
 export async function acceptObservation(session, observation) {
   return transact(session, async (state, markPublished) => {
     requireNoPendingPlan(state, 'acceptObservation');
-    return acceptObservationInState(state, observation, markPublished);
+    const normalized = normalizeGreenhouseObservation(observation, state.ledger, []);
+    return acceptObservationInState(state, normalized, markPublished);
   });
 }
 
@@ -1249,9 +1251,10 @@ export async function recordPlannedActionResult(session, plan, result, postObser
     if (validation.attempts.some((attempt) => ledgerActionIds.has(attempt.action_id))) {
       throw new TypeError('planned action result reused an action identity');
     }
+    const postObservation = normalizeGreenhouseObservation(postInput, state.ledger, validation.attempts);
 
     markPublished();
-    const receiptRef = await state.evidence.recordActionResult(normalizedPlan, resultInput, postInput);
+    const receiptRef = await state.evidence.recordActionResult(normalizedPlan, resultInput, postObservation);
     let recorded;
     if (validation.attempts.length === 1) {
       recorded = await recordActionInState(state, validation.attempts[0], markPublished);
@@ -1260,16 +1263,16 @@ export async function recordPlannedActionResult(session, plan, result, postObser
     } else {
       throw new TypeError('planned action result must use a routine fill batch or one action');
     }
-    const accepted = await acceptObservationInState(state, postInput, markPublished);
+    const accepted = await acceptObservationInState(state, postObservation, markPublished);
     const generated = generatedProofObject(normalizedPlan, validation);
     const proofs = mergeProofObjects(state.retentionProofs, generated);
-    await state.evidence.recordRetentionProofs(postInput.observation_id, proofs);
-    const retention = verifyLedgerRetention(state.ledger, postInput, proofs);
+    await state.evidence.recordRetentionProofs(postObservation.observation_id, proofs);
+    const retention = verifyLedgerRetention(state.ledger, postObservation, proofs);
     const retentionLedgerRef = await state.evidence.recordLedger(retention.ledger);
     state.ledger = retention.ledger;
     state.retentionProofs = proofs;
     state.pendingPlan = null;
-    const actionRetention = actionRetentionSummary(validation, retention, postInput);
+    const actionRetention = actionRetentionSummary(validation, retention, postObservation);
     return frozenClone({
       receiptRef,
       validation,

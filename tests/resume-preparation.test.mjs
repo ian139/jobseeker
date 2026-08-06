@@ -201,6 +201,49 @@ test('description mismatch fails closed and leaves the queued job retryable', as
   assert.equal(db.prepare('SELECT count(*) AS count FROM application_runs').get().count, 0);
   db.close();
 });
+
+test('orchestrator targets one queued application job without changing queue order', async (t) => {
+  const value = await fixture();
+  t.after(() => fsp.rm(value.root, { recursive: true, force: true }));
+  const description = 'Build a second deterministic application workflow.';
+  const db = new DatabaseSync(value.database);
+  db.prepare('INSERT INTO dedupe_groups (id,identity_kind,identity_key,review_required,created_at,updated_at) VALUES (2,?,?,?,?,?)')
+    .run('application_url', 'https://example.test/apply/2', 0, NOW, NOW);
+  db.prepare(`INSERT INTO jobs (
+    id,source,source_job_id,canonical_listing_url,canonical_application_url,ats_kind,ats_identifier,
+    title,company,location,workplace_type,employment_types_json,description,description_sha256,
+    source_posted_at,source_updated_at,discovered_at,first_seen_at,last_seen_at,availability_state,
+    freshness_state,eligibility_state,eligibility_reason_codes_json,priority,dedupe_group_id,
+    raw_payload_path,raw_payload_sha256
+  ) VALUES (2,'fixture','job-2','https://example.test/jobs/2','https://example.test/apply/2','greenhouse',NULL,
+    'Second Engineer','Example','Remote','remote','[]',?,?,?,NULL,?,?,?,'open','current','eligible','[]',100,2,?,?)`)
+    .run(description, sha256(Buffer.from(description)), NOW, NOW, NOW, NOW, path.join(value.root, 'raw-2.json'), 'c'.repeat(64));
+  db.prepare(`INSERT INTO application_jobs (
+    id,source_table,source_db,source_rowid,source_job_id,application_url,eligibility_tier,
+    verification_reason,source_posted_at,source_last_seen_at,status,dedupe_group_id
+  ) VALUES (2,'ingestion',?,2,'job-2','https://example.test/apply/2','active_verified','fixture',?,?,'queued',2)`)
+    .run(value.database, NOW, NOW);
+  db.close();
+
+  const result = await recoverPrepareOrClaimBacklogRun(value.database, {
+    ...value.applicationOptions,
+    applicationJobId: 2,
+    resumePreparation: value.options,
+  });
+
+  assert.equal(result.kind, 'claimed');
+  assert.equal(result.run.jobId, 2);
+  const persisted = new DatabaseSync(value.database);
+  assert.deepEqual({ ...persisted.prepare('SELECT status,resume_preparation_state FROM application_jobs WHERE id=1').get() }, {
+    status: 'queued',
+    resume_preparation_state: 'pending',
+  });
+  assert.deepEqual({ ...persisted.prepare('SELECT status,resume_preparation_state FROM application_jobs WHERE id=2').get() }, {
+    status: 'claimed',
+    resume_preparation_state: 'ready',
+  });
+  persisted.close();
+});
 test('orchestrator claims only the exact persisted resume binding', async (t) => {
   const value = await fixture();
   t.after(() => fsp.rm(value.root, { recursive: true, force: true }));

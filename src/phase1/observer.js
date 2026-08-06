@@ -4,7 +4,7 @@
   const MAX_CONTROLS = 512;
   const MAX_FRAMES = 64;
   const MAX_NODES = 50000;
-  const MAX_OPTIONS = 128;
+  const MAX_OPTIONS = 256;
   const MAX_BLOCKERS = 32;
   const MAX_VALUE_CHARS = 4096;
   const MAX_TEXT_CHARS = 512;
@@ -635,10 +635,13 @@
     const seen = new Set();
     const add = (candidate) => {
       if (!candidate || seen.has(candidate)) return;
-      if (candidate !== element && (attr(candidate, "role") || "").toLowerCase().split(/\s+/)[0] === "option") {
-        seen.add(candidate);
-        candidates.push(candidate);
+      if (candidate === element
+          || (attr(candidate, "role") || "").toLowerCase().split(/\s+/)[0] !== "option") {
+        return;
       }
+      if (!isVisible(candidate) && !boolAttr(candidate, "aria-selected")) return;
+      seen.add(candidate);
+      candidates.push(candidate);
     };
     for (const candidate of elements) {
       if (ancestor(candidate, (parent) => parent === element)) add(candidate);
@@ -657,7 +660,7 @@
     return candidates.map((option) => {
       const selected = boolAttr(option, "aria-selected");
       const record = optionRecord({
-        value: attr(option, "data-value") || attr(option, "value") || "",
+        value: attr(option, "data-value") || attr(option, "value") || elementText(option) || "",
         label: elementText(option) || "",
         disabled: boolAttr(option, "aria-disabled"),
         selected,
@@ -973,7 +976,7 @@
     const normalized = (label || attr(element, "title") || "").toLowerCase().replace(/\s+/g, " ").trim();
     const finalPattern = /\b(submit|send application|complete application|finish application|finali[sz]e|confirm and apply|submit application)\b/i;
     const navigationPattern = /\b(apply|start application|begin application|continue|next|proceed|review|go to application|begin|get started)\b/i;
-    const helperPattern = /^(?:toggle flyout|attach|dropbox|google drive|enter manually|add another|remove file|clear selections|remove file|upload file|delete file|replace)$/i;
+    const helperPattern = /^(?:toggle flyout|attach|dropbox|google drive|enter manually|add another|remove file|clear selections|remove file|upload file|delete file|replace|locate me)$/i;
     const submitType = info.type === "submit" || info.type === "image";
     if (info.type === "file"
         && ancestor(element, (candidate) => hasClassToken(candidate, "ashby-application-form-autofill-input-root"))) {

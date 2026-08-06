@@ -1223,3 +1223,281 @@ test('approved user answers persist for same-run and fresh-run private reuse', a
   );
   await finalizeRetained(fresh, harness.screenshotPath);
 });
+
+const GREENHOUSE_URL = 'https://job-boards.greenhouse.io/acme/jobs/12345';
+const STALE_REQUIRED = { valid: false, aria_invalid: true, message: 'This field is required.' };
+
+function comboboxControl(fieldId, options = {}) {
+  const value = options.value ?? null;
+  return {
+    ...fieldControl(fieldId, value, options.valuePresent ?? false),
+    kind: options.kind ?? 'input',
+    tag: options.tag ?? 'input',
+    type: 'text',
+    role: 'combobox',
+    label: options.label ?? fieldId,
+    locator: { strategy: 'id', value: fieldId, role: 'combobox', name: fieldId },
+    selected: options.selected ?? null,
+    options: options.options ?? [],
+    validity: options.validity ?? { valid: true, aria_invalid: null, message: null },
+    candidate: { class: 'field', reason: 'synthetic custom combobox' },
+  };
+}
+
+function plannedSelectDecision(current, fieldId, value) {
+  return {
+    observationId: current.observation_id,
+    fieldId,
+    controlReference: `control-${fieldId}`,
+    fieldPolicy: 'qualification',
+    proposedAnswer: value,
+    answerSource: 'profile',
+    evidenceReferences: [`profile:${fieldId}`],
+    inferenceRationaleDigest: null,
+    inferenceEvidenceDigests: null,
+    proposedAction: 'select_option',
+    expectedRetainedState: value,
+    modelTier: 'standard',
+    confidence: 1,
+    reasonCode: 'profile_exact',
+    reobservationRequired: true,
+    automaticSubmissionEligible: false,
+  };
+}
+
+function createSelectPlan(session, fieldId, value) {
+  return createBrowserActionPlan({
+    observation: session.observation,
+    ledger: session.ledger,
+    decisions: [plannedSelectDecision(session.observation, fieldId, value)],
+    answerAliases: { [fieldId]: { alias: fieldId, value } },
+    optionMatches: { [fieldId]: { option_text: value, option_value: value } },
+    driver: 'omp_browser',
+    createdAt: '2026-08-05T08:00:10.000Z',
+    ats: 'greenhouse',
+  });
+}
+
+function committedCombobox(fieldId, options = {}) {
+  return comboboxControl(fieldId, {
+    value: options.value ?? 'Engineering',
+    valuePresent: true,
+    selected: [options.value ?? 'Engineering'],
+    validity: STALE_REQUIRED,
+    ...options,
+  });
+}
+
+test('planned Greenhouse select normalizes, persists, and retains a stale required post observation', async (t) => {
+  const harness = createHarness(t, { answers: { department: 'Engineering' } });
+  const { run, runPath } = harness.runFor('greenhouse-select-normalize');
+  const session = await startRun(runPath, { startedAt: '2026-08-05T08:00:00.000Z' });
+  await acceptObservation(session, observation(GREENHOUSE_URL, 1, [comboboxControl('department')]));
+  await resolveField(session, { field_id: 'department', alias: 'department' });
+  const plan = createSelectPlan(session, 'department', 'Engineering');
+  await recordActionPlan(session, plan);
+
+  const postObservation = observation(GREENHOUSE_URL, 2, [
+    committedCombobox('department'),
+  ]);
+  const completed = await recordPlannedActionResult(session, plan, {
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: plan.plan_id,
+    post_observation_id: postObservation.observation_id,
+    outcomes: [{
+      action_id: plan.actions[0].action_id,
+      outcome: 'succeeded',
+      error_code: null,
+      driver: 'omp_browser',
+      selected_option_text: 'Engineering',
+    }],
+  }, postObservation);
+
+  assert.equal(completed.retention.ok, true, JSON.stringify(completed.retention.errors));
+  assert.equal(completed.actionRetention.ok, true);
+  assert.equal(completed.actionRetention.retryRequired, false);
+
+  const acceptedControl = session.observation.controls.find((control) => control.stable_id === 'department');
+  assert.deepEqual(acceptedControl.validity, { valid: true, aria_invalid: false, message: null });
+  assert.equal(session.observation.observation_id, postObservation.observation_id);
+  assert.equal(session.observation.previous_observation_id, 'obs-1');
+  assert.notEqual(session.observation.snapshot_sha256, postObservation.snapshot_sha256);
+  assert.equal(
+    completed.accepted.observation.controls.find((control) => control.stable_id === 'department').validity.valid,
+    true,
+  );
+
+  const field = session.ledger.fields.find((item) => item.field_id === 'department');
+  assert.equal(field.answer_state, 'answered');
+  assert.equal(field.retained, true);
+  assert.equal(field.valid, true);
+
+  const store = new EvidenceStore(run.run_artifact_dir);
+  try {
+    const receipts = store.listActionResults();
+    assert.equal(receipts.length, 1);
+    const receipt = store.readActionResult(receipts[0]);
+    assert.equal(receipt.post_observation.observation_id, postObservation.observation_id);
+    assert.deepEqual(
+      receipt.post_observation.controls.find((control) => control.stable_id === 'department').validity,
+      { valid: true, aria_invalid: false, message: null },
+    );
+    assert.equal(
+      receipt.post_observation.snapshot_sha256,
+      session.observation.snapshot_sha256,
+    );
+  } finally {
+    store.close();
+  }
+});
+
+test('carries normalization forward to later direct observations from ledger select proof', async (t) => {
+  const harness = createHarness(t, { answers: { department: 'Engineering' } });
+  const { runPath } = harness.runFor('greenhouse-select-carry-forward');
+  const session = await startRun(runPath, { startedAt: '2026-08-05T08:00:00.000Z' });
+  await acceptObservation(session, observation(GREENHOUSE_URL, 1, [comboboxControl('department')]));
+  await resolveField(session, { field_id: 'department', alias: 'department' });
+  const plan = createSelectPlan(session, 'department', 'Engineering');
+  await recordActionPlan(session, plan);
+  const completed = await recordPlannedActionResult(session, plan, {
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: plan.plan_id,
+    post_observation_id: 'obs-2',
+    outcomes: [{
+      action_id: plan.actions[0].action_id,
+      outcome: 'succeeded',
+      error_code: null,
+      driver: 'omp_browser',
+      selected_option_text: 'Engineering',
+    }],
+  }, observation(GREENHOUSE_URL, 2, [committedCombobox('department')]));
+  assert.equal(completed.retention.ok, true);
+
+  const carried = observation(GREENHOUSE_URL, 3, [
+    comboboxControl('department', {
+      value: 'Engineering',
+      valuePresent: true,
+      selected: ['Engineering'],
+      validity: STALE_REQUIRED,
+    }),
+  ]);
+  await acceptObservation(session, carried);
+  assert.equal(session.observation.observation_id, 'obs-3');
+  assert.deepEqual(
+    session.observation.controls.find((control) => control.stable_id === 'department').validity,
+    { valid: true, aria_invalid: false, message: null },
+  );
+  const retention = await verifyRetention(session);
+  assert.equal(retention.ok, true, JSON.stringify(retention.errors));
+});
+
+test('historical normalized Greenhouse receipts recover unchanged', async (t) => {
+  const harness = createHarness(t, { answers: { department: 'Engineering' } });
+  const { runPath } = harness.runFor('greenhouse-select-recovery');
+  const session = await startRun(runPath, { startedAt: '2026-08-05T08:00:00.000Z' });
+  await acceptObservation(session, observation(GREENHOUSE_URL, 1, [comboboxControl('department')]));
+  await resolveField(session, { field_id: 'department', alias: 'department' });
+  const plan = createSelectPlan(session, 'department', 'Engineering');
+  await recordActionPlan(session, plan);
+  const completed = await recordPlannedActionResult(session, plan, {
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: plan.plan_id,
+    post_observation_id: 'obs-2',
+    outcomes: [{
+      action_id: plan.actions[0].action_id,
+      outcome: 'succeeded',
+      error_code: null,
+      driver: 'omp_browser',
+      selected_option_text: 'Engineering',
+    }],
+  }, observation(GREENHOUSE_URL, 2, [committedCombobox('department')]));
+  assert.equal(completed.retention.ok, true);
+
+  const restarted = await startRun(runPath, { resumeExisting: true });
+  assert.deepEqual(await getPendingActionPlans(restarted), []);
+  assert.equal(restarted.observation.observation_id, 'obs-2');
+  assert.deepEqual(
+    restarted.observation.controls.find((control) => control.stable_id === 'department').validity,
+    { valid: true, aria_invalid: false, message: null },
+  );
+  assert.equal(
+    restarted.ledger.fields.find((field) => field.field_id === 'department').retained,
+    true,
+  );
+  assert.equal(restarted.ledger.action_attempts.length, 1);
+});
+
+test('genuine custom select errors stay fail-closed and are never normalized', async (t) => {
+  const harness = createHarness(t, { answers: { department: 'Engineering' } });
+  const { runPath } = harness.runFor('greenhouse-select-genuine-error');
+  const session = await startRun(runPath, { startedAt: '2026-08-05T08:00:00.000Z' });
+  await acceptObservation(session, observation(GREENHOUSE_URL, 1, [comboboxControl('department')]));
+  await resolveField(session, { field_id: 'department', alias: 'department' });
+  const plan = createSelectPlan(session, 'department', 'Engineering');
+  await recordActionPlan(session, plan);
+
+  const postObservation = observation(GREENHOUSE_URL, 2, [
+    comboboxControl('department', {
+      value: 'Engineering',
+      valuePresent: true,
+      selected: ['Engineering'],
+      validity: { valid: false, aria_invalid: true, message: 'Please select a valid option.' },
+    }),
+  ]);
+  const completed = await recordPlannedActionResult(session, plan, {
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: plan.plan_id,
+    post_observation_id: postObservation.observation_id,
+    outcomes: [{
+      action_id: plan.actions[0].action_id,
+      outcome: 'succeeded',
+      error_code: null,
+      driver: 'omp_browser',
+      selected_option_text: 'Engineering',
+    }],
+  }, postObservation);
+
+  assert.equal(completed.retention.ok, false);
+  assert.equal(completed.actionRetention.ok, false);
+  assert.equal(completed.actionRetention.retryRequired, true);
+  assert.equal(
+    session.observation.controls.find((control) => control.stable_id === 'department').validity.valid,
+    false,
+  );
+  assert.equal(
+    session.ledger.fields.find((field) => field.field_id === 'department').valid,
+    false,
+  );
+});
+
+test('stale required errors outside Greenhouse hosts stay fail-closed', async (t) => {
+  const harness = createHarness(t, { answers: { department: 'Engineering' } });
+  const { run, runPath } = harness.runFor('non-greenhouse-select-stale');
+  const session = await startRun(runPath, { startedAt: '2026-08-05T08:00:00.000Z' });
+  await acceptObservation(session, observation(run.application_url, 1, [comboboxControl('department')]));
+  await resolveField(session, { field_id: 'department', alias: 'department' });
+  const plan = createSelectPlan(session, 'department', 'Engineering');
+  await recordActionPlan(session, plan);
+
+  const postObservation = observation(run.application_url, 2, [committedCombobox('department')]);
+  const completed = await recordPlannedActionResult(session, plan, {
+    schema: ACTION_RESULT_SCHEMA,
+    plan_id: plan.plan_id,
+    post_observation_id: postObservation.observation_id,
+    outcomes: [{
+      action_id: plan.actions[0].action_id,
+      outcome: 'succeeded',
+      error_code: null,
+      driver: 'omp_browser',
+      selected_option_text: 'Engineering',
+    }],
+  }, postObservation);
+
+  assert.equal(completed.retention.ok, false);
+  assert.equal(completed.actionRetention.ok, false);
+  assert.equal(completed.actionRetention.retryRequired, true);
+  assert.equal(
+    session.observation.controls.find((control) => control.stable_id === 'department').validity.valid,
+    false,
+  );
+});

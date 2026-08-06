@@ -1,16 +1,21 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createGreenhouseAdapter } from '../src/ingestion/greenhouse.mjs';
 import { initializeIngestionDatabase, openIngestionDatabase } from '../src/ingestion/database.mjs';
 import {
+  consumeOmpWake,
   formatFormattedDate,
   hasSucceededRunToday,
   loadEnv,
+  MAX_WAKE_PAYLOAD_BYTES,
+  OmpWakeAbortedError,
+  OmpWakeInvalidError,
   runDailyScheduler,
+  waitForOmpWake,
   wakeOmpSession,
 } from '../src/scheduler/run-daily.mjs';
 
@@ -58,6 +63,121 @@ test('scheduler: wakeOmpSession writes timestamped sentinel file', async () => {
     const content = JSON.parse(readFileSync(flagPath, 'utf8'));
     assert.equal(content.reason, 'unit_test_complete');
     assert.ok(typeof content.timestamp === 'string');
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('scheduler: wake signals are owner-only and consumed once', async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), 'scheduler-test-consume-'));
+  const flagPath = join(tmpDir, 'wake-omp.flag');
+  try {
+    await wakeOmpSession({ reason: 'task_started', flagPath });
+    assert.equal(statSync(flagPath).mode & 0o777, 0o600);
+    const wake = await consumeOmpWake({ flagPath });
+    assert.deepEqual(wake, {
+      kind: 'wake',
+      timestamp: wake.timestamp,
+      reason: 'task_started',
+    });
+    assert.equal(Object.isFrozen(wake), true);
+    assert.equal(existsSync(flagPath), false);
+    assert.deepEqual(await consumeOmpWake({ flagPath }), { kind: 'idle' });
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('scheduler: publication after an atomic claim leaves the next wake intact', async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), 'scheduler-test-race-'));
+  const flagPath = join(tmpDir, 'wake-omp.flag');
+  try {
+    await wakeOmpSession({ reason: 'first_wake', flagPath });
+    const consuming = consumeOmpWake({ flagPath });
+    while (existsSync(flagPath)) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 0));
+    }
+    await wakeOmpSession({ reason: 'second_wake', flagPath });
+    assert.equal((await consuming).reason, 'first_wake');
+    assert.equal((await consumeOmpWake({ flagPath })).reason, 'second_wake');
+    assert.deepEqual(await consumeOmpWake({ flagPath }), { kind: 'idle' });
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('scheduler: invalid wake payloads fail closed after removing only the claim', async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), 'scheduler-test-invalid-'));
+  const flagPath = join(tmpDir, 'wake-omp.flag');
+  const outsidePath = join(tmpDir, 'outside.json');
+  const invalidPayloads = [
+    '{',
+    JSON.stringify({ timestamp: new Date().toISOString(), reason: 'test', unknown: true }),
+    JSON.stringify({ timestamp: 'yesterday', reason: 'test' }),
+    JSON.stringify({ timestamp: new Date().toISOString(), reason: 'not valid' }),
+    JSON.stringify({
+      timestamp: new Date().toISOString(),
+      reason: 'x'.repeat(MAX_WAKE_PAYLOAD_BYTES),
+    }),
+  ];
+  try {
+    await assert.rejects(
+      wakeOmpSession({ reason: ['task_started'], flagPath }),
+      (error) => error instanceof OmpWakeInvalidError && error.code === 'E_OMP_WAKE_INVALID',
+    );
+    assert.equal(existsSync(flagPath), false);
+    for (const payload of invalidPayloads) {
+      await writeFile(flagPath, payload, { mode: 0o600 });
+      await assert.rejects(
+        consumeOmpWake({ flagPath }),
+        (error) => error instanceof OmpWakeInvalidError && error.code === 'E_OMP_WAKE_INVALID',
+      );
+      assert.equal(existsSync(flagPath), false);
+    }
+    await writeFile(outsidePath, '{"private":"untouched"}', { mode: 0o600 });
+    await symlink(outsidePath, flagPath);
+    await assert.rejects(
+      consumeOmpWake({ flagPath }),
+      (error) => error instanceof OmpWakeInvalidError && error.code === 'E_OMP_WAKE_INVALID',
+    );
+    assert.equal(readFileSync(outsidePath, 'utf8'), '{"private":"untouched"}');
+    await mkdir(flagPath);
+    await assert.rejects(
+      consumeOmpWake({ flagPath }),
+      (error) => error instanceof OmpWakeInvalidError && error.code === 'E_OMP_WAKE_INVALID',
+    );
+    assert.equal(existsSync(flagPath), false);
+  } finally {
+    await rm(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test('scheduler: waitForOmpWake returns bounded wake, timeout, and abort results', async () => {
+  const tmpDir = await mkdtemp(join(tmpdir(), 'scheduler-test-wait-'));
+  const flagPath = join(tmpDir, 'wake-omp.flag');
+  try {
+    const delayedWake = waitForOmpWake({ flagPath, pollIntervalMs: 5, timeoutMs: 500 });
+    setTimeout(() => {
+      void wakeOmpSession({ reason: 'delayed_wake', flagPath });
+    }, 20);
+    assert.equal((await delayedWake).reason, 'delayed_wake');
+    assert.deepEqual(
+      await waitForOmpWake({ flagPath, pollIntervalMs: 5, timeoutMs: 10 }),
+      { kind: 'idle' },
+    );
+
+    const controller = new AbortController();
+    const waiting = waitForOmpWake({
+      flagPath,
+      pollIntervalMs: 100,
+      timeoutMs: 1_000,
+      signal: controller.signal,
+    });
+    controller.abort();
+    await assert.rejects(
+      waiting,
+      (error) => error instanceof OmpWakeAbortedError && error.code === 'E_OMP_WAKE_ABORTED',
+    );
   } finally {
     await rm(tmpDir, { recursive: true, force: true });
   }

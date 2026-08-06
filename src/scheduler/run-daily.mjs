@@ -1,5 +1,16 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import {
+  constants as fsConstants,
+  existsSync,
+  readFileSync,
+} from 'node:fs';
+import {
+  mkdir,
+  open,
+  rename,
+  rm,
+  rmdir,
+} from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { openIngestionDatabase } from '../ingestion/database.mjs';
 import { createAdapter as registryCreateAdapter } from '../ingestion/source-registry.mjs';
@@ -76,20 +87,204 @@ export function hasSucceededRunToday({ database, source, profile, dateStr, timeZ
   return false;
 }
 
+export const MAX_WAKE_PAYLOAD_BYTES = 64 * 1024;
+
+const WAKE_REASON_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
+const IDLE_WAKE = Object.freeze({ kind: 'idle' });
+
+export class OmpWakeInvalidError extends Error {
+  constructor() {
+    super('E_OMP_WAKE_INVALID');
+    this.name = 'OmpWakeInvalidError';
+    this.code = 'E_OMP_WAKE_INVALID';
+  }
+}
+
+export class OmpWakeAbortedError extends Error {
+  constructor() {
+    super('E_OMP_WAKE_ABORTED');
+    this.name = 'OmpWakeAbortedError';
+    this.code = 'E_OMP_WAKE_ABORTED';
+  }
+}
+
+function invalidWake() {
+  throw new OmpWakeInvalidError();
+}
+
+function normalizeWakePayload(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) invalidWake();
+  const keys = Object.keys(value);
+  if (keys.length !== 2 || !keys.includes('timestamp') || !keys.includes('reason')) invalidWake();
+  if (typeof value.timestamp !== 'string'
+    || Number.isNaN(Date.parse(value.timestamp))
+    || new Date(value.timestamp).toISOString() !== value.timestamp) invalidWake();
+  if (typeof value.reason !== 'string' || !WAKE_REASON_PATTERN.test(value.reason)) invalidWake();
+  return Object.freeze({
+    kind: 'wake',
+    timestamp: value.timestamp,
+    reason: value.reason,
+  });
+}
+
+function boundedInteger(value, fallback, minimum, maximum) {
+  const selected = value ?? fallback;
+  if (!Number.isSafeInteger(selected) || selected < minimum || selected > maximum) invalidWake();
+  return selected;
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw new OmpWakeAbortedError();
+}
+
+async function syncDirectory(path) {
+  const handle = await open(path, fsConstants.O_RDONLY);
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readBoundedWake(handle) {
+  const buffer = Buffer.allocUnsafe(MAX_WAKE_PAYLOAD_BYTES + 1);
+  let total = 0;
+  while (total < buffer.length) {
+    const { bytesRead } = await handle.read(
+      buffer,
+      total,
+      buffer.length - total,
+      total,
+    );
+    if (bytesRead === 0) break;
+    total += bytesRead;
+  }
+  if (total === 0 || total > MAX_WAKE_PAYLOAD_BYTES) invalidWake();
+  return buffer.subarray(0, total).toString('utf8');
+}
+
 /**
- * Writes a timestamped sentinel file signaling OMP session wake.
+ * Atomically publishes a timestamped advisory signal for the persistent OMP session.
  */
 export async function wakeOmpSession({ reason = 'daily_scheduler_complete', flagPath } = {}) {
+  if (typeof reason !== 'string' || !WAKE_REASON_PATTERN.test(reason)) invalidWake();
   const targetPath = flagPath ?? resolve(process.cwd(), 'scheduler/wake-omp.flag');
   const dir = dirname(targetPath);
-  await mkdir(dir, { recursive: true });
-  const payload = {
-    timestamp: new Date().toISOString(),
-    reason,
-  };
-  await writeFile(targetPath, JSON.stringify(payload, null, 2) + '\n', 'utf8');
-  console.log(`[scheduler] OMP session wake signal written to ${targetPath} (reason: ${reason})`);
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const tempPath = `${targetPath}.tmp-${process.pid}-${randomUUID()}`;
+  let handle;
+  try {
+    handle = await open(
+      tempPath,
+      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    await handle.writeFile(`${JSON.stringify({
+      timestamp: new Date().toISOString(),
+      reason,
+    })}\n`, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await rename(tempPath, targetPath);
+    await syncDirectory(dir);
+  } catch (error) {
+    if (handle !== undefined) await handle.close().catch(() => {});
+    await rm(tempPath, { force: true }).catch(() => {});
+    throw error;
+  }
+  console.log(`[scheduler] OMP session wake signal written to ${targetPath}`);
   return targetPath;
+}
+
+/**
+ * Atomically claims and consumes at most one advisory OMP wake signal.
+ */
+export async function consumeOmpWake({ flagPath } = {}) {
+  const targetPath = flagPath ?? resolve(process.cwd(), 'scheduler/wake-omp.flag');
+  const claimPath = `${targetPath}.claim-${process.pid}-${randomUUID()}`;
+  try {
+    await rename(targetPath, claimPath);
+  } catch (error) {
+    if (error?.code === 'ENOENT') return IDLE_WAKE;
+    throw error;
+  }
+
+  let handle;
+  let result;
+  let failure;
+  try {
+    handle = await open(
+      claimPath,
+      fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK,
+    );
+    const metadata = await handle.stat();
+    if (!metadata.isFile() || metadata.size === 0 || metadata.size > MAX_WAKE_PAYLOAD_BYTES) invalidWake();
+    const content = await readBoundedWake(handle);
+    let payload;
+    try {
+      payload = JSON.parse(content);
+    } catch {
+      invalidWake();
+    }
+    result = normalizeWakePayload(payload);
+  } catch (error) {
+    failure = error?.code === 'ELOOP' ? new OmpWakeInvalidError() : error;
+  } finally {
+    if (handle !== undefined) await handle.close().catch(() => {});
+    try {
+      await rm(claimPath, { force: true });
+    } catch (cleanupError) {
+      if (cleanupError?.code === 'ERR_FS_EISDIR' || cleanupError?.code === 'EISDIR') {
+        try {
+          await rmdir(claimPath);
+        } catch (directoryError) {
+          if (failure === undefined) failure = directoryError;
+        }
+      } else if (failure === undefined) {
+        failure = cleanupError;
+      }
+    }
+  }
+  if (failure !== undefined) throw failure;
+  return result;
+}
+
+function sleepWithSignal(milliseconds, signal) {
+  return new Promise((resolveSleep, rejectSleep) => {
+    throwIfAborted(signal);
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolveSleep();
+    }, milliseconds);
+    function onAbort() {
+      clearTimeout(timer);
+      rejectSleep(new OmpWakeAbortedError());
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+/**
+ * Polls for one advisory wake signal and returns idle after a bounded timeout.
+ */
+export async function waitForOmpWake({
+  flagPath,
+  pollIntervalMs = 100,
+  timeoutMs = 5_000,
+  signal,
+} = {}) {
+  const interval = boundedInteger(pollIntervalMs, 100, 1, 60_000);
+  const timeout = boundedInteger(timeoutMs, 5_000, 0, 86_400_000);
+  throwIfAborted(signal);
+  const deadline = performance.now() + timeout;
+  while (true) {
+    const result = await consumeOmpWake({ flagPath });
+    if (result.kind === 'wake') return result;
+    const remaining = deadline - performance.now();
+    if (remaining <= 0) return IDLE_WAKE;
+    await sleepWithSignal(Math.min(interval, Math.ceil(remaining)), signal);
+  }
 }
 
 /**

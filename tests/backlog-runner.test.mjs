@@ -787,6 +787,10 @@ test('resumeNeedsUserRun resumes the same row only after the persisted blocker a
       reason: 'user_provided_fact',
     };
     await assert.rejects(() => resumeNeedsUserRun(value.database, claimed.runId, resumeOptions));
+    await assert.rejects(() => resumeNeedsUserRun(value.database, claimed.runId, {
+      ...resumeOptions,
+      accessControlResolved: true,
+    }), { code: 'E_ACCESS_CONTROL_RESOLUTION' });
     assert.deepEqual(await readRows(value.database, 'SELECT status, active, blocker_alias FROM application_runs'), [
       { status: 'needs_user', active: 1, blocker_alias: blockerAlias },
     ]);
@@ -810,6 +814,38 @@ test('resumeNeedsUserRun resumes the same row only after the persisted blocker a
     ]);
     assert.deepEqual(await readRows(value.database, `SELECT blocker_alias FROM application_runs WHERE id = ${claimed.runId}`), [
       { blocker_alias: null },
+    ]);
+  } finally {
+    await removeFixture(value);
+  }
+});
+
+test('resumeNeedsUserRun resumes an observed restored access-control surface without an answer record', async () => {
+  const value = await fixture([{ id: 81 }]);
+  try {
+    const claimed = await claimNextQueuedJob(value.database, claimOptions(value));
+    await createWorkspace(value, claimed);
+    await pauseRunForUser(value.database, claimed.runId, {
+      ownerId: claimed.ownerId,
+      browserSessionId: claimed.browserSessionId,
+      now: '2026-07-26T00:00:10.000Z',
+      reason: 'third_party_access_control_required',
+      questionAlias: 'linkedin_jobs_access_control',
+    });
+
+    const resumed = await resumeNeedsUserRun(value.database, claimed.runId, {
+      ownerId: claimed.ownerId,
+      browserSessionId: claimed.browserSessionId,
+      now: '2026-07-26T00:00:20.000Z',
+      leaseSeconds: 120,
+      reason: 'third_party_access_restored',
+      accessControlResolved: true,
+    });
+    assertRunIdentity(resumed, claimed);
+    assert.equal(resumed.status, 'applying');
+    assert.equal((await readRows(value.database, 'SELECT count(*) AS count FROM application_runs'))[0].count, 1);
+    assert.deepEqual(await readRows(value.database, `SELECT reason_code, blocker_alias FROM application_runs WHERE id = ${claimed.runId}`), [
+      { reason_code: 'third_party_access_restored', blocker_alias: null },
     ]);
   } finally {
     await removeFixture(value);

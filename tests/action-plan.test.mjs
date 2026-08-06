@@ -158,6 +158,39 @@ function customSelectPlan() {
     driver: 'omp_browser',
   });
 }
+function uploadPlan(overrides = {}) {
+  const current = observation('obs-1', [control('resume', {
+    kind: 'file',
+    type: 'file',
+    role: 'input',
+    value: null,
+    value_present: false,
+    file: { accept: null, count: 0, names: [] },
+  })]);
+  const ledger = resolvedLedger(current, [{ field_id: 'resume', value: '/tmp/resume.pdf' }]);
+  return createBrowserActionPlan({
+    observation: current,
+    ledger,
+    decisions: [decision('resume', 'upload_file', '/tmp/resume.pdf')],
+    answerAliases: {},
+    optionMatches: {},
+    resumeUpload: { path: '/tmp/resume.pdf', sha256: FILE_DIGEST },
+    driver: 'omp_browser',
+    ...overrides,
+  });
+}
+
+function committedUploadPost(fileState, { fieldId = 'resume' } = {}) {
+  return observation('obs-2', [control(fieldId, {
+    kind: 'file',
+    type: 'file',
+    role: 'input',
+    value: null,
+    value_present: false,
+    file: fileState,
+  })], 'obs-1');
+}
+
 
 function legacyPlan(plan, { twoStep = false, filterFirst = false } = {}) {
   const historical = structuredClone(plan);
@@ -687,4 +720,98 @@ test('historical results skip only committed selection while v2 rejects uncommit
     ),
     (error) => error.code === 'SUCCESS_ERROR_CODE',
   );
+});
+
+test('v2 upload success requires the planned basename committed in post-observation file metadata', () => {
+  const plan = uploadPlan();
+  const success = {
+    action_id: plan.actions[0].action_id,
+    outcome: 'succeeded',
+    error_code: null,
+    driver: 'omp_browser',
+    selected_option_text: null,
+  };
+  const post = committedUploadPost({ accept: null, count: 1, names: ['resume.pdf'] });
+  const result = resultFor(plan, [success], post);
+  assert.deepEqual(result.upload_proofs, {
+    resume: {
+      action_id: plan.actions[0].action_id,
+      value_digest: plan.actions[0].retention.expected_value_digest,
+      file_name: 'resume.pdf',
+    },
+  });
+  assert.equal(result.formatted_values.length, 0);
+  assert.deepEqual(result.attempts, [{
+    action_id: plan.actions[0].action_id,
+    action: 'upload',
+    field_id: 'resume',
+    observation_id: 'obs-1',
+    ref: 'ref-resume',
+    outcome: 'succeeded',
+    retry_of: null,
+    error_code: null,
+  }]);
+
+  const historical = legacyPlan(uploadPlan());
+  const postWithoutFile = observation('obs-2', [], 'obs-1');
+  const receipt = validateBrowserActionResult(
+    resultInput(historical, [{ ...success, action_id: historical.actions[0].action_id }], postWithoutFile),
+    historical,
+    postWithoutFile,
+    { historical: true },
+  );
+  assert.deepEqual(receipt.upload_proofs, {
+    resume: {
+      action_id: historical.actions[0].action_id,
+      value_digest: historical.actions[0].retention.expected_value_digest,
+      file_name: 'resume.pdf',
+    },
+  });
+});
+
+test('v2 upload success fails closed on missing, wrong, or ambiguous committed file state', () => {
+  const plan = uploadPlan();
+  const success = {
+    action_id: plan.actions[0].action_id,
+    outcome: 'succeeded',
+    error_code: null,
+    driver: 'omp_browser',
+    selected_option_text: null,
+  };
+  assert.throws(
+    () => resultFor(plan, [success], observation('obs-2', [], 'obs-1')),
+    (error) => error.code === 'POST_CONTROL_BINDING',
+  );
+  assert.throws(
+    () => resultFor(plan, [success], observation('obs-2', [control('other')], 'obs-1')),
+    (error) => error.code === 'POST_CONTROL_BINDING',
+  );
+  const uncommitted = [
+    null,
+    { accept: null, count: 0, names: [] },
+    { accept: null, count: 1, names: ['cover.pdf'] },
+    { accept: null, count: 1, names: ['resume.pdf', 'cover.pdf'] },
+    { accept: null, count: 2, names: ['resume.pdf', 'resume.pdf'] },
+    { accept: null, count: 1, names: [] },
+    { accept: null, count: 0, names: ['resume.pdf'] },
+  ];
+  for (const fileState of uncommitted) {
+    assert.throws(
+      () => resultFor(plan, [success], committedUploadPost(fileState)),
+      (error) => error.code === 'UPLOAD_FILE_NOT_COMMITTED',
+    );
+  }
+});
+
+test('failed upload outcomes need no committed file and emit no proof', () => {
+  const plan = uploadPlan();
+  const result = resultFor(plan, [{
+    action_id: plan.actions[0].action_id,
+    outcome: 'failed',
+    error_code: 'upload_rejected',
+    driver: 'omp_browser',
+    selected_option_text: null,
+  }], observation('obs-2', [], 'obs-1'));
+  assert.equal(result.attempts[0].outcome, 'failed');
+  assert.deepEqual(result.upload_proofs, {});
 });

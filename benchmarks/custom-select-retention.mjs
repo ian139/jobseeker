@@ -9,6 +9,7 @@ import { evaluate as evaluatePlanResult } from './custom-select-cases/plan-resul
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const NARROW_TESTS = Object.freeze([
   'tests/action-plan.test.mjs',
+  'tests/custom-select-executor.test.mjs',
   'tests/application-cli.test.mjs',
   'tests/ledger-audit.test.mjs',
   'tests/observer-regressions.test.mjs',

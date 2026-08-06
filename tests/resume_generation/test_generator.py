@@ -452,6 +452,9 @@ def test_rendered_ats_audit_normalizes_terms_and_rejects_unsupported_insertion(t
     assert resume_module._ats_contains("C++ CI/CD .NET", "C++")
     assert resume_module._ats_contains("C++ CI/CD .NET", "CI/CD")
     assert resume_module._ats_contains("C++ CI/CD .NET", ".NET")
+    assert resume_module._ats_contains("A WS", "AWS")
+    assert resume_module._ats_occurrences("AWS and A WS", "AWS") == 2
+    assert not resume_module._ats_contains("D ata", "Data")
 
     profile = load_resume_profile(_write_profile(tmp_path / "ats-audit-profile.json"))
     job = _job(title="Software Engineer", description="Requirements:\n- Python")
@@ -474,6 +477,29 @@ def test_rendered_ats_audit_normalizes_terms_and_rejects_unsupported_insertion(t
     )
     assert "Kubernetes" in unsupported["unsupported_inserted_terms"]
     assert unsupported["passed"] is False
+
+
+def test_rendered_ats_audit_does_not_require_keyword_metadata_to_be_synthesized(
+    tmp_path: Path,
+) -> None:
+    payload = _base_profile()
+    payload["skills"]["Languages"][0]["keywords"].append("Kubernetes")
+    profile = load_resume_profile(_write_profile(tmp_path / "keyword-only-profile.json", payload))
+    job = _job(description="Requirements:\n- Python\n- Kubernetes")
+    plan = optimize_resume(profile, job)
+
+    audit = resume_module._audit_rendered_resume(
+        profile,
+        plan,
+        job,
+        "Software Engineer Python",
+    )
+
+    assert "Kubernetes" in audit["unsupported_terms"]
+    assert "Kubernetes" not in audit["supported_high_priority_missing_terms"]
+    assert audit["passed"] is True
+
+
 def test_requirement_terms_strip_edge_slashes_and_dashes_before_stop_words(tmp_path: Path) -> None:
     job = _job(
         title="Software Engineer",
@@ -1756,22 +1782,67 @@ def test_command_changed_description_changes_artifact_ref(
     assert Path(second["pdf_path"]).parent.joinpath("job_description.txt").read_text(encoding="utf-8") == second_job["description"]
 
 
+def _v2_profile_with_coursework() -> dict[str, Any]:
+    payload = _base_profile()
+    payload["schema_version"] = 2
+    payload["education"][0]["coursework"] = [
+        "Data Structures",
+        "Algorithms",
+        "Operating Systems",
+    ]
+    payload["research"] = [
+        {
+            "topic": "Example research topic",
+            "details": "Investigated deterministic resume generation",
+            "sources": [SOURCE_ID],
+        }
+    ]
+    payload["career"] = {
+        "goal": "Build reliable software systems",
+        "sources": [SOURCE_ID],
+    }
+    payload["skills"]["Languages"].extend(
+        [
+            {"name": "C++", "keywords": ["C++"], "sources": [SOURCE_ID]},
+            {"name": "Java", "keywords": ["Java"], "sources": [SOURCE_ID]},
+            {"name": "JavaScript", "keywords": ["JavaScript"], "sources": [SOURCE_ID]},
+            {"name": "TypeScript", "keywords": ["TypeScript"], "sources": [SOURCE_ID]},
+        ]
+    )
+    payload["skills"]["Frameworks"].extend(
+        [
+            {"name": "Django", "keywords": ["Django"], "sources": [SOURCE_ID]},
+            {"name": "React", "keywords": ["React"], "sources": [SOURCE_ID]},
+            {"name": "Node.js", "keywords": ["Node.js"], "sources": [SOURCE_ID]},
+        ]
+    )
+    payload["skills"]["Tools"] = [
+        {"name": "AWS", "keywords": ["AWS"], "sources": [SOURCE_ID]},
+        {"name": "Docker", "keywords": ["Docker"], "sources": [SOURCE_ID]},
+        {"name": "Kubernetes", "keywords": ["Kubernetes"], "sources": [SOURCE_ID]},
+        {"name": "PostgreSQL", "keywords": ["PostgreSQL"], "sources": [SOURCE_ID]},
+        {"name": "Redis", "keywords": ["Redis"], "sources": [SOURCE_ID]},
+        {"name": "Linux", "keywords": ["Linux"], "sources": [SOURCE_ID]},
+    ]
+    return payload
+
+
 def test_v2_profile_schema_parsing_line_filling(tmp_path: Path) -> None:
-    repository = Path(__file__).resolve().parents[2]
-    user_profile_path = repository / "private" / "resume" / "profile.json"
-    profile = load_resume_profile(user_profile_path)
+    profile_path = _write_profile(
+        tmp_path / "profile.json", _v2_profile_with_coursework()
+    )
+    profile = load_resume_profile(profile_path)
     assert profile.schema_version == 2
     assert len(profile.education) > 0
     assert len(profile.education[0].coursework) > 0
     assert "Data Structures" in profile.education[0].coursework
-    assert profile.research is not None
+    assert len(profile.research) > 0
     assert profile.career is not None
 
     job = _job(title="Software Engineer", description="Requirements:\n- Python\n- C++")
     plan = optimize_resume(profile, job)
     assert len(", ".join(plan.compressed_skills)) >= resume_module._MIN_SKILLS_LINE_CHARS
     assert "Education" in dict(plan.sections)
-
 
 def test_coursework_optional_expansion(tmp_path: Path) -> None:
     payload = _base_profile()

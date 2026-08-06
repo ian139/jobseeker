@@ -2,7 +2,7 @@
 
 This file remains authoritative for the established Phase 1–3 contracts and evidence gates. `.omp/work-context/20260803T232006Z-full-job-automation-roadmap.md` is the durable authority for the forward production expansion. `PROJECT_HANDOFF.md`, `ComputerUse.md`, and older work records are historical evidence only.
 
-**Current phase:** Expanded-roadmap Phase E deterministic ATS execution is active. Greenhouse run 23001/job 69 is the sole active headed proof, but successful mechanics must now be routed through a reusable repository-owned ATS action-plan, normalization, recovery, and evidence contract before submission. The keychain prompt is cleared and all application answers are owner-private. Ordinary OMP browser actions on the visible CMUX/CDP surface are primary; the repository-pinned Playwright CLI is an exact-control fallback only after the browser helper fails, and computer/coordinates are permitted only after both fail. Live evidence proved exact text fill/retention and exposed recurring React-select requirements: rendered-option clicks, retained-value normalization, bounded retries, and paginated education lookup. Per-job page scripts are diagnostic evidence only. No final-submit authorization or click has occurred. Phase A baseline reconciliation, Phase B unified TheirStack ingestion, and Phase D resume-before-claim integration are complete and verified. Phase C public-board/company discovery and scheduler/wake implementation are verified, while authenticated visible-browser LinkedIn proof and Ubuntu timer enablement/missed-run proof remain externally blocked. Migration 008 keeps `data/RealJobs.sqlite` as the resume-binding authority.
+**Current phase:** Expanded-roadmap Phase E ATS execution and Phase F persistent-loop proof are active. Greenhouse run 23003/job 110 is the latest canonical headed proof: the exact generated PDF was uploaded, every reachable field was deliberate and retained, `prepareSubmission` authorized the current final ref, one begun submit reached the confirmation page, canonical evidence finalized, SQLite persisted `completed/submission_confirmed` with one submit action, and OMP immediately returned to backlog inspection. Job 72 was verified unavailable and persisted closed. Job 73/run 23005 has a verified one-page resume and is the sole active run; after owner-restored LinkedIn access, its exact offsite Apply control reached the official Amazon.jobs candidate login, where the run is paused in place as `needs_user/third_party_authentication_required`.
 
 ## How an OMP agent must use this file
 
@@ -192,15 +192,10 @@ Phase 1 is complete only when one headed live run demonstrates all of these:
 - [x] The configured resume is uploaded and its identity is recorded.
 - [x] No completed field has an outstanding validation error.
 - [x] A final observation confirms values were retained.
-- [ ] A concrete final Submit control ref appears in the latest observation, `prepareSubmission(session, { finalRef })` authorizes that exact ref, and `beginFinalSubmit(session)` durably records the attempt before OMP clicks its returned ref.
-- [ ] `completeFinalSubmit` resolves every begun attempt; post-submit evidence records the screenshot and full paired submission-attempt journal with exactly one success.
+- [x] A concrete final Submit control ref appears in the latest observation, `prepareSubmission(session, { finalRef })` authorizes that exact ref, and `beginFinalSubmit(session)` durably records the attempt before OMP clicks its returned ref.
+- [x] `completeFinalSubmit` resolves every begun attempt; post-submit evidence records the screenshot and full paired submission-attempt journal with exactly one success.
 
-The 2026-07-24 private run predates the automated-submission contract. Its
-immutable report at
-`private/phase1/vast-4696685006/strict-live/evidence/completion.json` proves the
-33-field preparation audit only; it does not satisfy the current submission
-exit gate. The current Node suite is the contract-level evidence until a new
-headed live run captures post-submit evidence.
+The 2026-07-24 private run remains immutable historical preparation evidence only. The current automated-submission exit gate is satisfied by owner-private Greenhouse job 110/run 23003 evidence: its completion report binds the exact upload, final audit, screenshot, paired action journal, confirmation URL, and exactly one successful submit.
 
 ## OMP kickoff prompt
 
@@ -331,14 +326,14 @@ Operational failures remain active/retryable until diagnosed. A bounded, diagnos
 
 ## Step A — Source, backlog, and Phase 1 worker
 
-- [ ] Define one normalized job contract independent of the source adapter.
-- [ ] Select and implement the first real source adapter; retain manual/JSON seeding only for controlled diagnosis.
-- [ ] Create the minimal SQLite schema and migrations for jobs and application runs.
-- [ ] Normalize URLs and deduplicate repeated source records without losing the private raw payload.
-- [ ] Implement atomic claim/release/recovery semantics for one queued job at a time.
-- [ ] Feed the claimed job's application URL, description, available applicant evidence (profile JSON, source resume, or both), upload resume, and run directory into the unchanged Phase 1 contract.
-- [ ] Persist only enough progress for OMP to resume after interruption without marking incomplete fields as complete.
-- [ ] Mark `completed` only after OMP performs an authorized successful `final_submit` and publishes post-submit evidence.
+- [x] Define one normalized job contract independent of the source adapter.
+- [x] Select and implement the first real source adapter; retain manual/JSON seeding only for controlled diagnosis.
+- [x] Create the minimal SQLite schema and migrations for jobs and application runs.
+- [x] Normalize URLs and deduplicate repeated source records without losing the private raw payload.
+- [x] Implement atomic claim/release/recovery semantics for one queued job at a time.
+- [x] Feed the claimed job's application URL, description, available applicant evidence (profile JSON, source resume, or both), upload resume, and run directory into the unchanged Phase 1 contract.
+- [x] Persist only enough progress for OMP to resume after interruption without marking incomplete fields as complete.
+- [x] Mark `completed` only after OMP performs an authorized successful `final_submit` and publishes post-submit evidence.
 - [ ] Demonstrate the persistent OMP loop noticing and processing a newly queued real job.
 
 ## Step B — Insert the Phase 2 resume generator
@@ -380,7 +375,7 @@ recover-or-claim
 
 `recoverPrepareOrClaimBacklogRun` owns startup ordering: recover an existing active run first; only when none exists may it generate/reuse and validate the next queued job's exact resume, persist the binding, preflight those exact paths, and atomically claim that same prepared job. `claimNextQueuedJob` enforces the persisted artifact ID/path/hash/description-path binding in its transaction. `selectSafeApplicationBatch` may batch only conservative independent routine controls. Newly revealed/dependency controls, validation recovery, uploads, widgets, choices, navigation, and submission remain single-action units.
 
-If no work exists, the OMP session waits and checks again using a configured interval or an explicit wake signal. Scripts may provide deterministic source, database, resume, or observation operations to the agent; they do not own the loop.
+If no work exists, call the bounded `waitForOmpWake` helper and rerun authoritative startup after a wake or timeout. Wake files are advisory and atomically consumed; SQLite remains authoritative. While a run is active, heartbeat it at an interval strictly below half its lease duration. Scripts may provide deterministic source, database, resume, observation, or wake operations to the agent; they do not own the loop.
 
 ## Runtime parameters
 
@@ -412,17 +407,17 @@ If no work exists, the OMP session waits and checks again using a configured int
 
 Phase 3 is complete only when the persistent supervised system demonstrates all of these:
 
-- [ ] A real source inserts normalized, deduplicated jobs into SQLite.
+- [x] A real source inserts normalized, deduplicated jobs into SQLite.
 - [ ] A running OMP loop notices a newly queued job without being manually invoked as a one-shot CLI command.
 - [ ] The job is atomically claimed once and its durable state survives an intentional loop restart.
-- [ ] The canonical generator creates or reuses a verified one-page resume for that exact job description.
-- [ ] The application browser uploads the PDF whose hash matches the selected manifest.
-- [ ] The Phase 1 loop completes and verifies every reachable application field before submission.
-- [ ] `prepareSubmission(session, { finalRef })` authorizes the exact current final candidate ref, then `beginFinalSubmit(session)` durably records the attempt before the browser click.
-- [ ] OMP clicks the returned ref, `completeFinalSubmit` records the observed outcome, canonical evidence is validated against that job, and SQLite derives `completed` plus the actual attempt count.
-- [ ] The headed browser remains available in the supervised runtime long enough for OMP to capture the submission outcome.
-- [ ] OMP returns to backlog inspection after persistence succeeds.
+- [x] The canonical generator creates or reuses a verified one-page resume for that exact job description.
+- [x] The application browser uploads the PDF whose hash matches the selected manifest.
+- [x] The Phase 1 loop completes and verifies every reachable application field before submission.
+- [x] `prepareSubmission(session, { finalRef })` authorizes the exact current final candidate ref, then `beginFinalSubmit(session)` durably records the attempt before the browser click.
+- [x] OMP clicks the returned ref, `completeFinalSubmit` records the observed outcome, canonical evidence is validated against that job, and SQLite derives `completed` plus the actual attempt count.
+- [x] The headed browser remains available in the supervised runtime long enough for OMP to capture the submission outcome.
+- [x] OMP returns to backlog inspection after persistence succeeds.
 
 ## OMP kickoff prompt
 
-> Use `skills/application-prep/SKILL.md` as the canonical operational procedure and the active durable run record as current state. Call `recoverOrClaimBacklogRun` with `max_active_jobs = 1`, then follow its safe-batch observe/act/re-observe loop through audited submission and durable persistence. Do not reread historical handoffs or expand a per-job checklist unless a concrete blocker or defect requires diagnosis.
+> Use `skills/application-prep/SKILL.md` as the canonical operational procedure and the active durable run record as current state. Call `recoverPrepareOrClaimBacklogRun` with `max_active_jobs = 1`, heartbeat the sole active run below half its lease duration, and follow the safe-batch observe/act/re-observe loop through audited submission and durable persistence. Inspect the backlog again immediately after terminal persistence; call `waitForOmpWake` only when startup returns idle. Do not reread historical handoffs or expand a per-job checklist unless a concrete blocker or defect requires diagnosis.

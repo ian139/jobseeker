@@ -15,6 +15,7 @@ const OPTION_KEYS = new Set([
   'sourceResumePath',
   'answerMemoryPath',
   'resumePreparation',
+  'applicationJobId',
 ]);
 
 function invalid() {
@@ -31,6 +32,8 @@ function normalizeOptions(options) {
     if (!Object.hasOwn(options, key)) invalid();
   }
   if (options.maxActiveJobs !== undefined && options.maxActiveJobs !== 1) invalid();
+  if (options.applicationJobId !== undefined
+    && (!Number.isInteger(options.applicationJobId) || options.applicationJobId < 1)) invalid();
   return options;
 }
 
@@ -50,6 +53,7 @@ export async function recoverPrepareOrClaimBacklogRun(database, options = {}) {
   const preparation = await prepareNextQueuedResume(database, {
     ...normalized.resumePreparation,
     now: normalized.now,
+    applicationJobId: normalized.applicationJobId,
   });
   if (preparation === null) {
     return Object.freeze({ kind: 'idle', run: null, preparation: null });

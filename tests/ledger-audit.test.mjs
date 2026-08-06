@@ -644,6 +644,7 @@ test('retains an uploaded file only after a fresh observation proves it remains'
   });
   assert.equal(result.ok, true);
   assert.equal(fieldById(result.ledger, 'resume-file').retained, true);
+  assert.equal(auditCompletion(result.ledger, uploaded).passed, true);
 
   const gone = observation('obs-3', [control('resume-file', {
     ref: 'ref-resume-file-new',
@@ -669,6 +670,7 @@ test('retains an uploaded file only after a fresh observation proves it remains'
     },
   });
   assert.equal(result.ok, false);
+  assert.equal(auditCompletion(result.ledger, gone).passed, false);
   assert.ok(result.errors.some((error) => error.code === 'INVALID_PROOF'));
   assert.equal(fieldById(result.ledger, 'resume-file').retained, false);
 });

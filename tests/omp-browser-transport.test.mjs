@@ -446,6 +446,29 @@ test('missing upload selection fails closed after the bounded settle', async () 
   );
 });
 
+test('generic role group filename is never accepted as upload evidence', async () => {
+  const filename = element('SPAN', {}, { textContent: 'resume.pdf' });
+  const genericGroup = element('DIV', { role: 'group' }, {
+    querySelector() {
+      return filename;
+    },
+  });
+  const input = fileInput();
+  input.closest = (selector) => (selector.includes('[role="group"]') ? genericGroup : null);
+  const root = tree(element('DIV', {}, { children: [genericGroup, input] }));
+  const clock = fakeClock();
+  const { transport } = transportFor(root, { now: clock.now, sleep: clock.sleep }, {
+    async uploadFile(selector, filePath) {
+      this.calls.push(['uploadFile', selector, filePath]);
+    },
+  });
+  await assert.rejects(
+    transport.uploadFile('[id="resume"]', '/tmp/resume.pdf'),
+    (error) => error instanceof OmpBrowserTransportError
+      && error.code === 'E_OMP_BROWSER_UPLOAD_MISSING',
+  );
+});
+
 test('ambiguous upload selection fails closed without polling forever', async () => {
   const root = tree(element('DIV', {}, { children: [fileInput()] }));
   const clock = fakeClock();

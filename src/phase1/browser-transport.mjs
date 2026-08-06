@@ -158,17 +158,20 @@ function readFileState(selector) {
     }
   }
   let container = el && typeof el.closest === 'function'
-    ? el.closest('.file-upload, [role="group"]')
+    ? el.closest('.file-upload, .ashby-application-form-autofill-input-root')
     : null;
   if (container === null && typeof selector === 'string' && selector.startsWith('#')) {
     const label = document.querySelector(`label[for="${selector.slice(1)}"]`);
     container = label && typeof label.closest === 'function'
-      ? label.closest('.file-upload, [role="group"]')
+      ? label.closest('.file-upload, .ashby-application-form-autofill-input-root')
       : null;
   }
-  if (container !== null) {
-    const filenameEl = container.querySelector('.file-upload__filename, [aria-label="Remove file"], [title="Delete file"]');
-    if (filenameEl !== null) {
+  if (container !== null && typeof container.querySelector === 'function') {
+    const filenameEl = container.querySelector('.file-upload__filename');
+    const marker = container.querySelector(
+      '[aria-label="Remove file"], [title="Delete file"], [data-upload-state="committed"]',
+    );
+    if (filenameEl !== null && marker !== null) {
       const rawText = (filenameEl.textContent ?? '').trim();
       const basename = rawText.split(/[\\/]/).pop();
       if (basename.length > 0) {

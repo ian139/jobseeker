@@ -530,7 +530,10 @@ function validateRetentionAggregate(value, code = 'PAYLOAD_INVALID') {
       || typeof proof.file_name !== 'string'
       || !UPLOAD_BASENAME.test(proof.file_name)
       || !HEX_SHA256.test(proof.source_sha256)
-      || proof.observation_id !== value.observation_id
+      || typeof proof.observation_id !== 'string'
+      || proof.observation_id.length === 0
+      || proof.observation_id.includes('\0')
+      || Buffer.byteLength(proof.observation_id, 'utf8') > MAX_FINAL_AUDIT_OBSERVATION_ID_BYTES
       || proof.container_identity !== fieldId
       || !['native_file_list', 'rendered_container'].includes(proof.committed_method)) {
       fail(code);

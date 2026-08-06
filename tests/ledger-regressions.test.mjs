@@ -393,6 +393,20 @@ test('requires typed upload proof and rejects injection, ordinary overrides, and
   ledger = result.ledger;
   assert.equal(fieldById(ledger, 'resume-file').retained, true);
 
+  const unrelated = observation('obs-3', [
+    fileControl(),
+    control('ordinary', {
+      ref: 'ref-ordinary-updated',
+      value: 'unrelated-update',
+      value_present: true,
+    }),
+    finalCandidate(),
+  ], 'obs-2');
+  const unrelatedLedger = mergeObservation(ledger, unrelated);
+  const survived = verifyRetention(unrelatedLedger, unrelated, { 'resume-file': validProof });
+  assert.equal(survived.errors.some((item) => item.field_id === 'resume-file'), false);
+  assert.equal(fieldById(survived.ledger, 'resume-file').retained, true);
+
   assert.throws(() => verifyRetention(ledger, second, {
     'resume-file': { value_digest: fileDigest },
   }), /missing key|unknown key/i);

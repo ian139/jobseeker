@@ -1676,7 +1676,7 @@ function retentionResultFor(field, control, proof, ledger, pendingMutation) {
       } else if (!control.file || control.file.count <= 0 ||
                  !control.file.names.includes(proof.file_name) ||
                  proof.value_digest !== field.value_digest ||
-                 proof.observation_id !== ledger.latest_observation_id ||
+                 !ledger.observation_ids.includes(proof.observation_id) ||
                  (control.file.committed_method !== undefined
                    && control.file.committed_method !== null
                    && proof.committed_method !== control.file.committed_method) ||

@@ -144,16 +144,41 @@ function readFillState(selector) {
 /** Read-only native files and rendered upload filename state (browser context). */
 function readFileState(selector) {
   const el = document.querySelector(selector);
-  if (el === null) return { found: false, count: 0, names: [], rendered: null };
-  const files = el.files;
-  const length = files === null || files === undefined ? 0 : files.length;
-  const names = [];
-  for (let index = 0; index < length; index += 1) {
-    const name = files[index] && files[index].name;
-    if (typeof name === 'string') names.push(name);
+  if (el !== null) {
+    const files = el.files;
+    const length = files === null || files === undefined ? 0 : files.length;
+    const names = [];
+    for (let index = 0; index < length; index += 1) {
+      const name = files[index] && files[index].name;
+      if (typeof name === 'string') names.push(name);
+    }
+    const rendered = typeof el.value === 'string' ? el.value : '';
+    if (names.length > 0) {
+      return { found: true, count: names.length, names, rendered };
+    }
   }
-  const rendered = typeof el.value === 'string' ? el.value : '';
-  return { found: true, count: names.length, names, rendered };
+  let container = el && typeof el.closest === 'function'
+    ? el.closest('.file-upload, [role="group"]')
+    : null;
+  if (container === null && typeof selector === 'string' && selector.startsWith('#')) {
+    const label = document.querySelector(`label[for="${selector.slice(1)}"]`);
+    container = label && typeof label.closest === 'function'
+      ? label.closest('.file-upload, [role="group"]')
+      : null;
+  }
+  if (container !== null) {
+    const filenameEl = container.querySelector('.file-upload__filename, [aria-label="Remove file"], [title="Delete file"]');
+    if (filenameEl !== null) {
+      const rawText = (filenameEl.textContent ?? '').trim();
+      const basename = rawText.split(/[\\/]/).pop();
+      if (basename.length > 0) {
+        return { found: true, count: 1, names: [basename], rendered: basename };
+      }
+    }
+  }
+  return el === null
+    ? { found: false, count: 0, names: [], rendered: null }
+    : { found: true, count: 0, names: [], rendered: typeof el.value === 'string' ? el.value : '' };
 }
 
 /** Read-only visible option records with internal selectors (browser context). */

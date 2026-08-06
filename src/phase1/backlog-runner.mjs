@@ -222,9 +222,10 @@ function assertExactKeys(value, allowed, code) {
   }
 }
 
-function requireString(value, code, { max = 4096 } = {}) {
+function requireString(value, code, { max = 4096, allowMultiline = false } = {}) {
   if (typeof value !== 'string' || value.length === 0 || value.length > max) fail(code);
-  if (/[\u0000-\u001f\u007f]/u.test(value)) fail(code);
+  const pattern = allowMultiline ? /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u : /[\u0000-\u001f\u007f]/u;
+  if (pattern.test(value)) fail(code);
   return value;
 }
 
@@ -781,6 +782,7 @@ async function supportedQueuedJobs(
         : requireString(row.job_location, 'E_JOB_CANDIDATES', { max: 512 });
       const jobDescription = requireString(row.job_description, 'E_JOB_CANDIDATES', {
         max: 16 * 1024,
+        allowMultiline: true,
       });
       if (typeof row.job_description_sha256 !== 'string'
         || !SHA256_HEX.test(row.job_description_sha256)

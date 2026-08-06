@@ -514,18 +514,28 @@ function validateRetentionAggregate(value, code = 'PAYLOAD_INVALID') {
   const proofs = {};
   for (const [fieldId, proof] of Object.entries(value.proofs)) {
     if (typeof fieldId !== 'string' || fieldId.length === 0 || fieldId.includes('\0')) fail(code);
-    requireExactKeys(proof, new Set(['value_digest', 'action_id', 'file_name']), code);
-    if (!HEX_SHA256.test(proof.value_digest)
+    requireExactKeys(proof, new Set([
+      'field_id',
+      'value_digest',
+      'action_id',
+      'file_name',
+      'source_sha256',
+      'observation_id',
+      'container_identity',
+      'committed_method',
+    ]), code);
+    if (proof.field_id !== fieldId
+      || !HEX_SHA256.test(proof.value_digest)
       || !validActionId(proof.action_id)
       || typeof proof.file_name !== 'string'
-      || !UPLOAD_BASENAME.test(proof.file_name)) {
+      || !UPLOAD_BASENAME.test(proof.file_name)
+      || !HEX_SHA256.test(proof.source_sha256)
+      || proof.observation_id !== value.observation_id
+      || proof.container_identity !== fieldId
+      || !['native_file_list', 'rendered_container'].includes(proof.committed_method)) {
       fail(code);
     }
-    proofs[fieldId] = {
-      value_digest: proof.value_digest,
-      action_id: proof.action_id,
-      file_name: proof.file_name,
-    };
+    proofs[fieldId] = { ...proof };
   }
   return frozenClone({
     schema: RETENTION_PROOFS_SCHEMA,

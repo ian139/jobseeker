@@ -1286,6 +1286,7 @@ function validateCommittedUpload(action, postObservation, location) {
       || file.names.length !== 1 || file.names[0] !== expected) {
     fail('UPLOAD_FILE_NOT_COMMITTED', location);
   }
+  return control;
 }
 
 
@@ -1342,6 +1343,7 @@ export function validateBrowserActionResult(result, plan, postObservation, conte
   const attempts = [];
   const formattedValues = [];
   const uploadProofs = {};
+  const committedUploads = new Map();
   outcomes.forEach((outcome, index) => {
     const action = normalizedPlan.actions[index];
     validateOutcome(outcome, action, `result.outcomes[${index}]`);
@@ -1355,7 +1357,10 @@ export function validateBrowserActionResult(result, plan, postObservation, conte
     if (outcome.outcome === 'succeeded'
         && action.semantic_action === 'upload_file'
         && normalizedPlan.schema !== LEGACY_ACTION_PLAN_SCHEMA) {
-      validateCommittedUpload(action, postObservation, `result.outcomes[${index}]`);
+      committedUploads.set(
+        action.field_id,
+        validateCommittedUpload(action, postObservation, `result.outcomes[${index}]`),
+      );
     }
     attempts.push({
       action_id: action.action_id,
@@ -1375,10 +1380,16 @@ export function validateBrowserActionResult(result, plan, postObservation, conte
       });
     }
     if (outcome.outcome === 'succeeded' && action.semantic_action === 'upload_file') {
+      const control = committedUploads.get(action.field_id);
       uploadProofs[action.field_id] = {
+        field_id: action.field_id,
         action_id: action.action_id,
         value_digest: action.retention.expected_value_digest,
         file_name: action.retention.file_name,
+        source_sha256: action.retention.artifact_sha256,
+        observation_id: postObservation.observation_id,
+        container_identity: control?.stable_id ?? action.field_id,
+        committed_method: control?.tag === 'input' ? 'native_file_list' : 'rendered_container',
       };
     }
   });

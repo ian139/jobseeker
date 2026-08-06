@@ -351,9 +351,14 @@ test('recordAction rejects a journal action without its artifact', () => withSto
 
 test('retention proof aggregates are typed, private, and idempotent', () => withStore(({ store }) => {
   const proof = {
+    field_id: 'resume',
     value_digest: 'a'.repeat(64),
     action_id: 'upload-action',
     file_name: 'Ian Smith Resume.pdf',
+    source_sha256: 'b'.repeat(64),
+    observation_id: 'obs-1',
+    container_identity: 'resume',
+    committed_method: 'rendered_container',
   };
   const first = store.recordRetentionProofs('obs-1', { resume: proof });
   const second = store.recordRetentionProofs('obs-1', { resume: proof });

@@ -735,9 +735,14 @@ test('v2 upload success requires the planned basename committed in post-observat
   const result = resultFor(plan, [success], post);
   assert.deepEqual(result.upload_proofs, {
     resume: {
+      field_id: 'resume',
       action_id: plan.actions[0].action_id,
       value_digest: plan.actions[0].retention.expected_value_digest,
       file_name: 'resume.pdf',
+      source_sha256: FILE_DIGEST,
+      observation_id: 'obs-2',
+      container_identity: 'resume',
+      committed_method: 'native_file_list',
     },
   });
   assert.equal(result.formatted_values.length, 0);
@@ -762,9 +767,14 @@ test('v2 upload success requires the planned basename committed in post-observat
   );
   assert.deepEqual(receipt.upload_proofs, {
     resume: {
+      field_id: 'resume',
       action_id: historical.actions[0].action_id,
       value_digest: historical.actions[0].retention.expected_value_digest,
       file_name: 'resume.pdf',
+      source_sha256: FILE_DIGEST,
+      observation_id: 'obs-2',
+      container_identity: 'resume',
+      committed_method: 'rendered_container',
     },
   });
 });

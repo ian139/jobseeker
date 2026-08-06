@@ -453,9 +453,14 @@ test('blocks an answered file field when the later page omits its control', () =
   });
   const retained = verifyRetention(ledger, uploaded, {
     'resume-file': {
+      field_id: 'resume-file',
       value_digest: proofDigest,
       action_id: 'upload-resume',
       file_name: 'resume.pdf',
+      source_sha256: 'a'.repeat(64),
+      observation_id: 'obs-2',
+      container_identity: 'resume-file',
+      committed_method: 'native_file_list',
     },
   });
   assert.equal(retained.ok, true);

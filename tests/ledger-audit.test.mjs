@@ -632,9 +632,14 @@ test('retains an uploaded file only after a fresh observation proves it remains'
   });
   let result = verifyRetention(ledger, uploaded, {
     'resume-file': {
+      field_id: 'resume-file',
       value_digest: proofDigest,
       action_id: 'upload-resume',
       file_name: 'synthetic.pdf',
+      source_sha256: 'a'.repeat(64),
+      observation_id: 'obs-2',
+      container_identity: 'resume-file',
+      committed_method: 'native_file_list',
     },
   });
   assert.equal(result.ok, true);
@@ -653,9 +658,14 @@ test('retains an uploaded file only after a fresh observation proves it remains'
   ledger = mergeObservation(result.ledger, gone);
   result = verifyRetention(ledger, gone, {
     'resume-file': {
+      field_id: 'resume-file',
       value_digest: proofDigest,
       action_id: 'upload-resume',
       file_name: 'synthetic.pdf',
+      source_sha256: 'a'.repeat(64),
+      observation_id: 'obs-3',
+      container_identity: 'resume-file',
+      committed_method: 'native_file_list',
     },
   });
   assert.equal(result.ok, false);

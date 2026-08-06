@@ -1541,7 +1541,16 @@ export function digestObservedValue(control, value) {
   return digestPrivateValue(normalized);
 }
 
-const RETENTION_PROOF_KEYS = new Set(['value_digest', 'action_id', 'file_name']);
+const RETENTION_PROOF_KEYS = new Set([
+  'field_id',
+  'value_digest',
+  'action_id',
+  'file_name',
+  'source_sha256',
+  'observation_id',
+  'container_identity',
+  'committed_method',
+]);
 
 function normalizeProofs(proofs) {
   if (proofs === undefined || proofs === null) return new Map();
@@ -1552,14 +1561,21 @@ function normalizeProofs(proofs) {
     assertRecord(proof, `retention_proofs.${fieldId}`);
     assertExactKeys(proof, RETENTION_PROOF_KEYS, `retention_proofs.${fieldId}`);
     assertRequiredKeys(proof, [...RETENTION_PROOF_KEYS], `retention_proofs.${fieldId}`);
+    assertString(proof.field_id, `retention_proofs.${fieldId}.field_id`, { identifier: true });
+    if (proof.field_id !== fieldId) fail(`retention_proofs.${fieldId}.field_id`, 'field mismatch');
     validateDigest(proof.value_digest, `retention_proofs.${fieldId}.value_digest`, false);
     assertString(proof.action_id, `retention_proofs.${fieldId}.action_id`, { identifier: true });
     assertBasename(proof.file_name, `retention_proofs.${fieldId}.file_name`);
-    map.set(fieldId, {
-      value_digest: proof.value_digest,
-      action_id: proof.action_id,
-      file_name: proof.file_name,
-    });
+    validateDigest(proof.source_sha256, `retention_proofs.${fieldId}.source_sha256`, false);
+    assertString(proof.observation_id, `retention_proofs.${fieldId}.observation_id`, { identifier: true });
+    assertString(proof.container_identity, `retention_proofs.${fieldId}.container_identity`, { identifier: true });
+    if (proof.container_identity !== fieldId) {
+      fail(`retention_proofs.${fieldId}.container_identity`, 'container mismatch');
+    }
+    if (!['native_file_list', 'rendered_container'].includes(proof.committed_method)) {
+      fail(`retention_proofs.${fieldId}.committed_method`, 'invalid committed method');
+    }
+    map.set(fieldId, { ...proof });
   }
   return map;
 }
@@ -1652,6 +1668,7 @@ function retentionResultFor(field, control, proof, ledger, pendingMutation) {
       } else if (!control.file || control.file.count <= 0 ||
                  !control.file.names.includes(proof.file_name) ||
                  proof.value_digest !== field.value_digest ||
+                 proof.observation_id !== ledger.latest_observation_id ||
                  !uploadActionProvesCurrentField(ledger, field, proof)) {
         errors.push('invalid-proof');
       } else {

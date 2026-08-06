@@ -374,9 +374,14 @@ test('requires typed upload proof and rejects injection, ordinary overrides, and
   assert.ok(result.errors.some((item) => item.code === 'INVALID_PROOF'));
 
   const validProof = {
+    field_id: 'resume-file',
     value_digest: fileDigest,
     action_id: 'upload-1',
     file_name: 'resume.pdf',
+    source_sha256: 'a'.repeat(64),
+    observation_id: 'obs-2',
+    container_identity: 'resume-file',
+    committed_method: 'native_file_list',
   };
   result = verifyRetention(ledger, second, { 'resume-file': validProof });
   assert.equal(result.ok, true);
@@ -401,7 +406,7 @@ test('requires typed upload proof and rejects injection, ordinary overrides, and
   assert.equal(result.ok, false);
 
   result = verifyRetention(ledger, second, {
-    ordinary: validProof,
+    ordinary: { ...validProof, field_id: 'ordinary', container_identity: 'ordinary' },
   });
   assert.equal(result.ok, false);
   assert.ok(result.errors.some((item) => item.field_id === 'ordinary' && item.code === 'INVALID_PROOF'));

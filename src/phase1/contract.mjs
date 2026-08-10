@@ -996,6 +996,7 @@ const PROFILE_CANONICAL_PATHS = Object.freeze({
     Phone: Object.freeze(['contact', 'phone']),
 });
 const PROFILE_CANONICAL_LINK_KINDS = Object.freeze({
+    'profile.links.github': 'github',
     'profile.links.linkedin': 'linkedin',
     'profile.links.portfolio': 'portfolio',
 });

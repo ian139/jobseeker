@@ -333,7 +333,8 @@ async function runSqlite(database, sql) {
       }
       stdout += chunk;
     });
-    child.stderr.resume();
+    let stderr = '';
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
     child.once('error', (error) => {
       if (settled) return;
       settled = true;
@@ -344,15 +345,14 @@ async function runSqlite(database, sql) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      if (code !== 0) reject(new Error('sqlite failed'));
+      if (code !== 0) reject(new Error(`sqlite failed (${code}): ${stderr}`));
       else resolve(stdout.trim());
     });
     child.stdin.end(sql);
-  }).catch(() => {
-    fail('E_SQLITE_COMMAND');
+  }).catch((err) => {
+    fail(`E_SQLITE_COMMAND: ${err.message}`);
   });
 }
-
 function parseRows(stdout, code) {
   if (stdout === '') return [];
   let parsed;

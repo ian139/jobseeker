@@ -121,6 +121,8 @@ async function fixture({ malformedRaw = false } = {}) {
 
 const V5_SHA256 = '783c09fa4c083f731a90c27f0b61c3242ef0b0224daf656d9281bbf8db35d2c3';
 const V6_SHA256 = 'a0cf117e7b155ac7dd842a77250261141b41490c69c502f8e1d72da2de47997e';
+const V7_SHA256 = '7b33c5aac22a2efbbfaa5c579182780defa22fa446a0ab7086d07282dfdaf0c4';
+const V8_SHA256 = 'b95be0f59a4cd9cda6cb21500e831227b5f413df6b93d5daed9ea6d36d641cf2';
 
 async function v5Fixture() {
   const value = await fsp.mkdtemp(path.join(os.tmpdir(), 'ingestion-v5-'));
@@ -141,6 +143,18 @@ async function v6Fixture() {
   const db = new DatabaseSync(value.databasePath);
   db.exec(artifact);
   db.prepare('INSERT INTO schema_migrations (version,name,sha256,applied_at) VALUES (6,?,?,?)').run('006-source-credit-audit', V6_SHA256, NOW);
+  db.close();
+  return value;
+}
+async function v8Fixture() {
+  const value = await v6Fixture();
+  const syncBounds = await fsp.readFile(new URL('../migrations/007-sync-run-bounds.sql', import.meta.url), 'utf8');
+  const resumeArtifacts = await fsp.readFile(new URL('../migrations/008-resume-artifacts.sql', import.meta.url), 'utf8');
+  const db = new DatabaseSync(value.databasePath);
+  db.exec(syncBounds);
+  db.prepare('INSERT INTO schema_migrations (version,name,sha256,applied_at) VALUES (7,?,?,?)').run('007-sync-run-bounds', V7_SHA256, NOW);
+  db.exec(resumeArtifacts);
+  db.prepare('INSERT INTO schema_migrations (version,name,sha256,applied_at) VALUES (8,?,?,?)').run('008-resume-artifacts', V8_SHA256, NOW);
   db.close();
   return value;
 }
@@ -343,12 +357,12 @@ test('schema attestation rejects altered canonical objects', async (t) => {
   assert.throws(() => assertIngestionSchema(databasePath), /E_SCHEMA_OBJECTS/);
 });
 
-test('fresh initialization records only the v8 migration identity', async (t) => {
+test('fresh initialization records only the v9 migration identity', async (t) => {
   const value = await initializedFixture();
   t.after(() => fsp.rm(value.root, { recursive: true, force: true }));
   const db = new DatabaseSync(value.databasePath);
   assert.deepEqual(db.prepare('SELECT version, name FROM schema_migrations ORDER BY version').all().map((row) => ({ ...row })), [
-    { version: 8, name: '008-resume-artifacts' },
+    { version: 9, name: '009-platform-application-bindings' },
   ]);
   db.close();
 });
@@ -366,6 +380,7 @@ test('v5 upgrade adds credit audits and recovery bounds without rebuilding canon
     { version: 6, name: '006-source-credit-audit', sha256: V6_SHA256 },
     { version: 7, name: '007-sync-run-bounds', sha256: db.prepare('SELECT sha256 FROM schema_migrations WHERE version = 7').get().sha256 },
     { version: 8, name: '008-resume-artifacts', sha256: db.prepare('SELECT sha256 FROM schema_migrations WHERE version = 8').get().sha256 },
+    { version: 9, name: '009-platform-application-bindings', sha256: db.prepare('SELECT sha256 FROM schema_migrations WHERE version = 9').get().sha256 },
   ]);
   assert.notEqual(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'source_credit_audits'").get(), undefined);
   assert.deepEqual(db.prepare("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'source_credit_audits_%' ORDER BY name").all().map((row) => row.name), [
@@ -415,7 +430,7 @@ test('v5 upgrade and repeated initialization are idempotent', async (t) => {
   const third = await migrateIngestionDatabase(value.databasePath, { payloadRoot: value.payloadRoot, now: NOW });
   assert.equal(third.idempotent, true);
   const db = new DatabaseSync(value.databasePath);
-  assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map((row) => row.version), [5, 6, 7, 8]);
+  assert.deepEqual(db.prepare('SELECT version FROM schema_migrations ORDER BY version').all().map((row) => row.version), [5, 6, 7, 8, 9]);
   assert.equal(db.prepare('SELECT count(*) AS count FROM source_credit_audits').get().count, 0);
   db.close();
 });
@@ -433,8 +448,81 @@ test('v6 upgrade preserves history and adds deterministic recovery bounds', asyn
     { version: 6, name: '006-source-credit-audit' },
     { version: 7, name: '007-sync-run-bounds' },
     { version: 8, name: '008-resume-artifacts' },
+    { version: 9, name: '009-platform-application-bindings' },
   ]);
   db.close();
+});
+test('v8 upgrade quarantines unresolved application rows for deterministic re-ingestion', async (t) => {
+  const value = await v8Fixture();
+  t.after(() => fsp.rm(value.root, { recursive: true, force: true }));
+  const db = new DatabaseSync(value.databasePath);
+  const insert = db.prepare(`INSERT INTO application_jobs (
+    source_table,source_db,source_rowid,source_job_id,application_url,
+    eligibility_tier,status
+  ) VALUES (?,?,?,?,?,?,?)`);
+  insert.run(
+    'ingestion', 'ingestion', 42, 'legacy-42a', 'https://job-boards.greenhouse.io/example/jobs/42a',
+    'active_verified', 'queued',
+  );
+  insert.run(
+    'archive', 'ingestion', 42, 'legacy-42b', 'https://job-boards.greenhouse.io/example/jobs/42b',
+    'active_verified', 'queued',
+  );
+  db.close();
+  const result = initializeIngestionDatabase(value.databasePath, { now: NOW });
+  assert.equal(result.upgradedFrom, 8);
+  assertIngestionSchema(value.databasePath);
+  const upgraded = new DatabaseSync(value.databasePath);
+  assert.deepEqual(
+    upgraded.prepare('SELECT source_table,status,status_reason,platform,application_host FROM application_jobs ORDER BY id').all().map((row) => ({ ...row })),
+    ['ingestion', 'archive'].map((source_table) => ({
+      source_table,
+      status: 'skipped',
+      status_reason: 'platform_reingest_required',
+      platform: null,
+      application_host: null,
+    })),
+  );
+  upgraded.close();
+});
+
+test('v8 upgrade refuses an active application run without mutating migration evidence', async (t) => {
+  const value = await v8Fixture();
+  t.after(() => fsp.rm(value.root, { recursive: true, force: true }));
+  const db = new DatabaseSync(value.databasePath);
+  db.exec('PRAGMA foreign_keys = OFF;');
+  const job = db.prepare(`INSERT INTO application_jobs (
+    source_table,source_db,source_rowid,source_job_id,application_url,
+    eligibility_tier,status
+  ) VALUES (?,?,?,?,?,?,?) RETURNING id`).get(
+    'jobs', 'ingestion', 43, 'legacy-43', 'https://job-boards.greenhouse.io/example/jobs/43',
+    'active_verified', 'claimed',
+  );
+  const digest = 'a'.repeat(64);
+  const artifact = db.prepare(`INSERT INTO resume_artifacts (
+    application_job_id,normalized_job_id,job_description_sha256,
+    generator_fingerprint_sha256,generator_schema_version,manifest_path,
+    manifest_sha256,pdf_path,pdf_sha256,job_description_path,pages,created_at
+  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`).get(
+    job.id, 1, digest, digest, 'fixture-v1', '/private/manifest.json',
+    digest, '/private/resume.pdf', digest, '/private/job.txt', 1, NOW,
+  );
+  db.prepare(`INSERT INTO application_runs (
+    job_id,status,reason_code,started_at,evidence_path,active,owner_id,
+    browser_session_id,claimed_at,lease_expires_at,last_progress_at,
+    workspace_path,resume_artifact_path,resume_artifact_sha256,
+    answer_memory_path,resume_artifact_id
+  ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+    job.id, 'applying', 'claimed', NOW, '/private/evidence', 1, 'owner',
+    'browser', NOW, NOW, NOW, '/private/workspace', '/private/resume.pdf',
+    digest, '/private/memory.json', artifact.id,
+  );
+  db.close();
+  assert.throws(() => initializeIngestionDatabase(value.databasePath, { now: NOW }), /E_SCHEMA_ACTIVE_RUN/u);
+  const unchanged = new DatabaseSync(value.databasePath);
+  assert.equal(unchanged.prepare('SELECT max(version) AS version FROM schema_migrations').get().version, 8);
+  assert.equal(unchanged.prepare('SELECT active FROM application_runs').get().active, 1);
+  unchanged.close();
 });
 
 test('source credit audit enforces canonical states and one-way baseline-preserving transitions', async (t) => {

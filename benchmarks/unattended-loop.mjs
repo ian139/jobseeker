@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const MATRIX_FILES = Object.freeze([
+  'tests/ingestion-migration.test.mjs',
   'tests/job-source-preparation.test.mjs',
   'tests/backlog-runner.test.mjs',
   'tests/platforms.test.mjs',
@@ -21,7 +22,7 @@ const MATRIX_FILES = Object.freeze([
   'tests/recovery.test.mjs',
 ]);
 
-const child = spawnSync(process.execPath, ['--test', ...MATRIX_FILES], {
+const child = spawnSync(process.execPath, ['--test', '--test-concurrency=1', ...MATRIX_FILES], {
   cwd: ROOT,
   encoding: 'utf8',
   env: { ...process.env, LANG: 'C', LC_ALL: 'C', TZ: 'UTC' },

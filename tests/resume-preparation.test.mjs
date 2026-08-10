@@ -131,17 +131,8 @@ async function fixture(options = {}) {
   db.prepare(`INSERT INTO application_jobs (
     id,source_table,source_db,source_rowid,source_job_id,application_url,eligibility_tier,
     verification_reason,source_posted_at,source_last_seen_at,status,dedupe_group_id
-  ) VALUES (1,'ingestion',?,1,'job-1','https://job-boards.greenhouse.io/example/jobs/1','active_verified','fixture',?,?,'queued',1)`)
+  ) VALUES (1,'jobs',?,1,'job-1','https://job-boards.greenhouse.io/example/jobs/1','active_verified','fixture',?,?,'queued',1)`)
     .run(database, NOW, NOW);
-  db.exec(`
-    ALTER TABLE application_jobs ADD COLUMN platform TEXT;
-    ALTER TABLE application_jobs ADD COLUMN application_host TEXT;
-    ALTER TABLE application_jobs ADD COLUMN job_title TEXT;
-    ALTER TABLE application_jobs ADD COLUMN job_company TEXT;
-    ALTER TABLE application_jobs ADD COLUMN job_location TEXT;
-    ALTER TABLE application_jobs ADD COLUMN job_description TEXT;
-    ALTER TABLE application_jobs ADD COLUMN job_description_sha256 TEXT;
-  `);
   db.prepare(`UPDATE application_jobs SET
     platform = 'greenhouse',
     application_host = 'job-boards.greenhouse.io',
@@ -239,7 +230,7 @@ test('orchestrator targets one queued application job without changing queue ord
   db.prepare(`INSERT INTO application_jobs (
     id,source_table,source_db,source_rowid,source_job_id,application_url,eligibility_tier,
     verification_reason,source_posted_at,source_last_seen_at,status,dedupe_group_id
-  ) VALUES (2,'ingestion',?,2,'job-2','https://job-boards.greenhouse.io/example/jobs/2','active_verified','fixture',?,?,'queued',2)`)
+  ) VALUES (2,'jobs',?,2,'job-2','https://job-boards.greenhouse.io/example/jobs/2','active_verified','fixture',?,?,'queued',2)`)
     .run(value.database, NOW, NOW);
   db.prepare(`UPDATE application_jobs SET
     platform = 'greenhouse',

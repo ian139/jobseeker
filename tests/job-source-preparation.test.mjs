@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
+import { initializeIngestionDatabase } from '../src/ingestion/database.mjs';
 import { claimSpecificQueuedJob } from '../src/phase1/backlog-runner.mjs';
 import { canonicalJson, createAnswerRecord } from '../src/phase1/contract.mjs';
 import { generateBoundResume } from '../src/phase1/preparation.mjs';
@@ -736,4 +737,130 @@ SELECT id, status, status_reason FROM application_jobs ORDER BY id;
     { id: 4, status: 'queued', status_reason: null },
     { id: manualRow.id, status: 'skipped', status_reason: 'unsupported_platform' },
   ]);
+});
+test('migrated database includes platform, application_host, and resume columns and can deterministically ingest then claim Greenhouse/Ashby jobs', async (t) => {
+  const root = await fsp.realpath(await fsp.mkdtemp(path.join(os.tmpdir(), 'job-source-fresh-')));
+  await fsp.chmod(root, 0o700);
+  t.after(() => fsp.rm(root, { recursive: true, force: true }));
+
+  const database = path.join(root, 'jobs.sqlite');
+  await applyHistoricalSchema(database);
+  await fsp.chmod(database, 0o600);
+
+  const rows = await sqlite(database, 'PRAGMA table_info(application_jobs);');
+  const columnNames = new Set(rows.map((row) => row.name));
+  const requiredColumns = [
+    'platform',
+    'application_host',
+    'job_title',
+    'job_company',
+    'job_location',
+    'job_description',
+    'job_description_sha256',
+    'current_resume_artifact_id',
+    'resume_preparation_reason',
+    'resume_preparation_attempted_at',
+    'resume_prepared_at',
+    'resume_preparation_state',
+  ];
+  for (const col of requiredColumns) {
+    assert.ok(columnNames.has(col), `application_jobs missing column ${col}`);
+  }
+
+  const greenhouse = greenhouseEnvelope({
+    applicationUrl: `${GREENHOUSE_URL}?utm_source=fresh_ingest`,
+  });
+  const ashby = ashbyEnvelope();
+
+  const ingested = await ingestSupportedJobs(database, [greenhouse, ashby]);
+  assert.equal(ingested.count, 2);
+  assert.equal(ingested.ids.length, 2);
+
+  await sqlite(database, `
+INSERT INTO dedupe_groups (id) VALUES (${ingested.ids[0]}), (${ingested.ids[1]});
+UPDATE application_jobs SET dedupe_group_id = id WHERE id IN (${ingested.ids.join(', ')});
+INSERT INTO jobs (
+  id, dedupe_group_id, title, company, description, description_sha256, location,
+  source_posted_at, source_updated_at, discovered_at, availability_state, freshness_state
+)
+SELECT
+  id, dedupe_group_id, job_title, job_company, job_description, job_description_sha256, job_location,
+  source_posted_at, source_last_seen_at, source_last_seen_at, 'available', 'fresh'
+FROM application_jobs
+WHERE id IN (${ingested.ids.join(', ')});
+`);
+
+  const listed = await listBoundQueuedJobs(database);
+  assert.equal(listed.count, 2);
+  assert.equal(listed.jobs[0].platform, 'greenhouse');
+  assert.equal(listed.jobs[0].applicationHost, new URL(GREENHOUSE_URL).hostname);
+  assert.equal(listed.jobs[1].platform, 'ashby');
+  assert.equal(listed.jobs[1].applicationHost, new URL(ASHBY_URL).hostname);
+
+  const workspaceRoot = path.join(root, 'workspace');
+  const resumeOutputRoot = path.join(root, 'resume-output');
+  await privateDirectory(workspaceRoot);
+  await privateDirectory(resumeOutputRoot);
+  const resumeProfilePath = path.join(root, 'synthetic-profile.json');
+  const resumeTemplatePath = path.join(root, 'synthetic-template.tex');
+  const resumeSkillPath = path.join(root, 'synthetic-skill.md');
+  const sourceResumePath = path.join(root, 'synthetic-source-resume.pdf');
+  const answerMemoryPath = path.join(root, 'synthetic-answer-memory.jsonl');
+  const applicantProfilePath = path.join(root, 'applicant-profile.json');
+  const compilerPath = path.join(root, 'pdflatex');
+  const counterPath = path.join(root, 'compiler-count.txt');
+  await privateFile(resumeProfilePath, JSON.stringify(profilePayload()));
+  await privateFile(
+    resumeTemplatePath,
+    '\\documentclass{article}\n\\begin{document}\n%%RESUME_HEADER%%\n%%RESUME_SECTIONS%%\n\\end{document}\n',
+  );
+  await privateFile(
+    resumeSkillPath,
+    '# Resume Generation Skill\n\nVersion: 1\n\n## Source-of-truth policy\n\nUse only source-backed claims.\n\n## Output invariants\n\nGenerate exactly one page.\n',
+  );
+  await privateFile(sourceResumePath, '%PDF-1.7\nsynthetic source resume\n');
+  await privateFile(applicantProfilePath, JSON.stringify({ schema: 'phase1-profile-v1' }));
+  await privateFile(counterPath, '0');
+  const approvalContext = {
+    run_contract_sha256: 'a'.repeat(64),
+    observation_id: 'synthetic-observation',
+    field_id: 'synthetic-field',
+    alias: 'synthetic-answer',
+  };
+  const answer = createAnswerRecord({
+    alias: 'synthetic-answer',
+    value: 'Synthetic answer',
+    approved_at: FIXED_NOW,
+    approval_context: approvalContext,
+    approval_context_sha256: sha256Bytes(canonicalJson(approvalContext)),
+  });
+  await privateFile(answerMemoryPath, `${canonicalJson(answer)}\n`);
+  await fsp.copyFile(path.join(PROJECT_ROOT, 'benchmarks', 'fake-latex-compiler.py'), compilerPath);
+  await fsp.chmod(compilerPath, 0o700);
+
+  const orchestrationOptions = {
+    ownerId: 'synthetic-owner',
+    browserSessionId: 'synthetic-browser',
+    now: FIXED_NOW,
+    leaseSeconds: 120,
+    applicantProfilePath,
+    maxActiveJobs: 1,
+    workspaceRoot,
+    sourceResumePath,
+    answerMemoryPath,
+    applicationJobId: listed.jobs[0].id,
+    resumePreparation: {
+      pythonExecutable: path.join(PROJECT_ROOT, '.venv', 'bin', 'python3'),
+      resumeProfilePath,
+      resumeTemplatePath,
+      resumeSkillPath,
+      resumeOutputRoot,
+      resumeCompiler: compilerPath,
+    },
+  };
+  const prepared = await recoverPrepareOrClaimBacklogRun(database, orchestrationOptions);
+  assert.equal(prepared.kind, 'claimed');
+  assert.equal(prepared.run.jobId, listed.jobs[0].id);
+  assert.equal(prepared.run.status, 'applying');
+  assert.equal(prepared.run.active, true);
 });

@@ -1,0 +1,55 @@
+#!/usr/bin/env node
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { listBoundQueuedJobs } from '../src/phase1/job-source.mjs';
+
+const databasePath = process.argv[2] || 'data/RealGreenhouse.sqlite';
+
+async function main() {
+  const db = new DatabaseSync(databasePath);
+
+  console.log(`\n=== All Backlog Applications (${path.basename(databasePath)}) ===\n`);
+
+  const allJobs = db.prepare(`
+    SELECT id, platform, status, status_reason, job_company, job_title, application_url, claimed_at, completed_at
+    FROM application_jobs
+    ORDER BY id ASC
+  `).all();
+
+  if (allJobs.length === 0) {
+    console.log('No jobs found in backlog database.');
+  } else {
+    for (const job of allJobs) {
+      const statusBadge = job.status === 'completed' ? '[COMPLETED]'
+        : job.status === 'claimed' ? '[CLAIMED]  '
+        : job.status === 'queued' ? '[QUEUED]   '
+        : job.status === 'failed' ? '[FAILED]   '
+        : job.status === 'closed' ? '[CLOSED]   '
+        : `[${job.status.toUpperCase()}]`;
+
+      console.log(`Job #${String(job.id).padEnd(4)} ${statusBadge} ${job.job_company || 'Unknown'} - ${job.job_title || 'Untitled'}`);
+      console.log(`           Platform : ${job.platform || 'unclassified'}`);
+      console.log(`           URL      : ${job.application_url}`);
+      if (job.status_reason) console.log(`           Reason   : ${job.status_reason}`);
+      console.log('');
+    }
+  }
+
+  const bound = await listBoundQueuedJobs(databasePath);
+  console.log(`=== Bound Ready-to-Claim Queued Jobs: ${bound.count} ===\n`);
+  if (bound.count === 0) {
+    console.log('No queued jobs ready to claim.');
+  } else {
+    for (const job of bound.jobs) {
+      console.log(`- Job #${job.id}: ${job.company} - ${job.title} (${job.platform})`);
+      console.log(`  URL: ${job.applicationUrl}`);
+    }
+  }
+
+  db.close();
+}
+
+main().catch((err) => {
+  console.error('Error listing jobs:', err.message);
+  process.exit(1);
+});

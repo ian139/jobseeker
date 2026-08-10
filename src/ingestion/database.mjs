@@ -20,8 +20,8 @@ import {
   sha256Text,
   validateNormalizedJob,
 } from './contracts.mjs';
-export const INGESTION_MIGRATION_VERSION = 8;
-export const INGESTION_MIGRATION_NAME = '008-resume-artifacts';
+export const INGESTION_MIGRATION_VERSION = 9;
+export const INGESTION_MIGRATION_NAME = '009-platform-application-bindings';
 
 const SHA256_RE = /^[0-9a-f]{64}$/u;
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u;
@@ -111,6 +111,30 @@ const SYNC_RUN_COLUMNS = Object.freeze([
 const PAGE_COLUMNS = Object.freeze(['sync_run_id', 'page_number', 'request_sha256', 'response_path', 'response_sha256', 'received_at', 'item_count', 'total_results', 'estimated_credits', 'reported_credits']);
 const CREDIT_AUDIT_COLUMNS = Object.freeze(['sync_run_id', 'source', 'period_start', 'period_end', 'observed_before_at', 'credits_before', 'observed_after_at', 'credits_after', 'reported_credits', 'state', 'reason_code']);
 const MIGRATION_COLUMNS = Object.freeze(['version', 'name', 'sha256', 'applied_at']);
+
+function historicalApplicationJobTableSql(table = 'application_jobs', { ifNotExists = false } = {}) {
+  return `
+CREATE TABLE ${ifNotExists ? 'IF NOT EXISTS ' : ''}${quoteIdentifier(table)} (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source_table TEXT NOT NULL,
+  source_db TEXT NOT NULL,
+  source_rowid INTEGER NOT NULL,
+  source_job_id TEXT NOT NULL,
+  application_url TEXT NOT NULL,
+  eligibility_tier TEXT NOT NULL CHECK (eligibility_tier IN ('active_verified','backfill_only','unverified_stale')),
+  verification_reason TEXT,
+  source_posted_at TEXT,
+  source_last_seen_at TEXT,
+  status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','claimed','completed','blocked','closed','skipped','failed','needs_user')),
+  status_reason TEXT,
+  claimed_at TEXT,
+  completed_at TEXT,
+  dedupe_group_id INTEGER REFERENCES dedupe_groups(id) ON DELETE RESTRICT,
+  UNIQUE(source_table, source_db, source_rowid),
+  UNIQUE(application_url)
+);
+`;
+}
 
 const HISTORICAL_SCHEMA_V5_SQL = `
 PRAGMA foreign_keys = OFF;
@@ -236,7 +260,7 @@ CREATE TABLE IF NOT EXISTS source_sync_pages (
   reported_credits REAL CHECK (reported_credits IS NULL OR reported_credits >= 0),
   PRIMARY KEY (sync_run_id, page_number)
 );
-${applicationJobTableSql('application_jobs', { ifNotExists: true })}
+${historicalApplicationJobTableSql('application_jobs', { ifNotExists: true })}
 
 ${applicationRunTableSql('application_runs', { ifNotExists: true })}
 
@@ -254,7 +278,7 @@ CREATE TRIGGER IF NOT EXISTS source_sync_pages_immutable_delete BEFORE DELETE ON
 
 PRAGMA foreign_keys = ON;
 `;
-const FINAL_APPLICATION_INDEX_SQL = `
+const HISTORICAL_APPLICATION_INDEX_SQL = `
 CREATE INDEX IF NOT EXISTS idx_application_jobs_status_id ON application_jobs(status, id);
 CREATE INDEX IF NOT EXISTS idx_application_jobs_dedupe_group ON application_jobs(dedupe_group_id);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_application_jobs_dedupe_group_unique ON application_jobs(dedupe_group_id) WHERE dedupe_group_id IS NOT NULL;
@@ -264,6 +288,11 @@ CREATE INDEX IF NOT EXISTS idx_application_runs_active_status ON application_run
 CREATE UNIQUE INDEX IF NOT EXISTS idx_application_runs_active_job ON application_runs(job_id) WHERE active = 1;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_application_runs_active_owner ON application_runs(owner_id) WHERE active = 1;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_application_runs_active_global ON application_runs((1)) WHERE active = 1;
+`;
+const FINAL_APPLICATION_INDEX_SQL = `
+${HISTORICAL_APPLICATION_INDEX_SQL}
+CREATE INDEX IF NOT EXISTS idx_application_jobs_platform_status ON application_jobs(platform, status, id);
+CREATE INDEX IF NOT EXISTS idx_application_jobs_application_host ON application_jobs(application_host, status, id);
 `;
 const SOURCE_CREDIT_AUDIT_SQL = `
 CREATE TABLE IF NOT EXISTS source_credit_audits (
@@ -419,7 +448,64 @@ BEGIN
   ) THEN RAISE(ABORT, 'invalid active resume binding') END;
 END;
 `;
-export const FINAL_SCHEMA_SQL = `${HISTORICAL_SCHEMA_V7_SQL}\n${RESUME_ARTIFACTS_SQL}`;
+const HISTORICAL_SCHEMA_V8_SQL = `${HISTORICAL_SCHEMA_V7_SQL}\n${RESUME_ARTIFACTS_SQL}`;
+const V9_FRESH_BASE_SQL = HISTORICAL_SCHEMA_V7_SQL.replace(
+  historicalApplicationJobTableSql('application_jobs', { ifNotExists: true }),
+  `${applicationJobTableSql('application_jobs', { ifNotExists: true })}`,
+);
+export const FINAL_SCHEMA_SQL = `
+${V9_FRESH_BASE_SQL}
+CREATE TABLE resume_artifacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  application_job_id INTEGER NOT NULL REFERENCES application_jobs(id) ON DELETE RESTRICT,
+  normalized_job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE RESTRICT,
+  job_description_sha256 TEXT NOT NULL CHECK (length(job_description_sha256) = 64 AND job_description_sha256 NOT GLOB '*[^0-9a-f]*'),
+  generator_fingerprint_sha256 TEXT NOT NULL CHECK (length(generator_fingerprint_sha256) = 64 AND generator_fingerprint_sha256 NOT GLOB '*[^0-9a-f]*'),
+  generator_schema_version TEXT NOT NULL CHECK (length(generator_schema_version) BETWEEN 1 AND 128),
+  manifest_path TEXT NOT NULL CHECK (length(manifest_path) BETWEEN 1 AND 16384),
+  manifest_sha256 TEXT NOT NULL CHECK (length(manifest_sha256) = 64 AND manifest_sha256 NOT GLOB '*[^0-9a-f]*'),
+  pdf_path TEXT NOT NULL CHECK (length(pdf_path) BETWEEN 1 AND 16384),
+  pdf_sha256 TEXT NOT NULL CHECK (length(pdf_sha256) = 64 AND pdf_sha256 NOT GLOB '*[^0-9a-f]*'),
+  job_description_path TEXT NOT NULL CHECK (length(job_description_path) BETWEEN 1 AND 16384),
+  pages INTEGER NOT NULL CHECK (pages = 1),
+  created_at TEXT NOT NULL CHECK (created_at GLOB '????-??-??T??:??:??.???Z'),
+  UNIQUE(application_job_id, job_description_sha256, generator_fingerprint_sha256)
+);
+CREATE INDEX idx_resume_artifacts_application_job ON resume_artifacts(application_job_id, id);
+ALTER TABLE application_runs ADD COLUMN resume_artifact_id INTEGER REFERENCES resume_artifacts(id) ON DELETE RESTRICT;
+CREATE TRIGGER resume_artifacts_immutable_update BEFORE UPDATE ON resume_artifacts BEGIN
+  SELECT RAISE(ABORT, 'immutable resume artifact');
+END;
+CREATE TRIGGER resume_artifacts_immutable_delete BEFORE DELETE ON resume_artifacts BEGIN
+  SELECT RAISE(ABORT, 'immutable resume artifact');
+END;
+CREATE TRIGGER application_jobs_resume_binding_update
+BEFORE UPDATE OF current_resume_artifact_id, resume_preparation_state ON application_jobs
+WHEN NEW.resume_preparation_state = 'ready'
+BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1 FROM resume_artifacts AS a
+    WHERE a.id = NEW.current_resume_artifact_id AND a.application_job_id = NEW.id
+  ) THEN RAISE(ABORT, 'invalid prepared resume binding') END;
+END;
+CREATE TRIGGER application_runs_resume_binding_insert BEFORE INSERT ON application_runs WHEN NEW.active = 1 BEGIN
+  SELECT CASE WHEN NEW.resume_artifact_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM resume_artifacts AS a
+    WHERE a.id = NEW.resume_artifact_id AND a.application_job_id = NEW.job_id
+      AND a.pdf_path = NEW.resume_artifact_path AND a.pdf_sha256 = NEW.resume_artifact_sha256
+  ) THEN RAISE(ABORT, 'invalid active resume binding') END;
+END;
+CREATE TRIGGER application_runs_resume_binding_update
+BEFORE UPDATE OF active, resume_artifact_id, resume_artifact_path, resume_artifact_sha256, job_id ON application_runs
+WHEN NEW.active = 1
+BEGIN
+  SELECT CASE WHEN NEW.resume_artifact_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM resume_artifacts AS a
+    WHERE a.id = NEW.resume_artifact_id AND a.application_job_id = NEW.job_id
+      AND a.pdf_path = NEW.resume_artifact_path AND a.pdf_sha256 = NEW.resume_artifact_sha256
+  ) THEN RAISE(ABORT, 'invalid active resume binding') END;
+END;
+`;
 const HISTORICAL_MIGRATION_005 = Object.freeze({
   version: 5,
   name: '005-unified-ingestion',
@@ -435,12 +521,32 @@ const HISTORICAL_MIGRATION_007 = Object.freeze({
   name: '007-sync-run-bounds',
   sha256: '7b33c5aac22a2efbbfaa5c579182780defa22fa446a0ab7086d07282dfdaf0c4',
 });
+const HISTORICAL_MIGRATION_008 = Object.freeze({
+  version: 8,
+  name: '008-resume-artifacts',
+  sha256: 'b95be0f59a4cd9cda6cb21500e831227b5f413df6b93d5daed9ea6d36d641cf2',
+});
 
 const LEGACY_JOB_COLUMNS = Object.freeze(['id', 'source', 'source_job_id', 'canonical_url', 'title', 'company', 'location', 'remote', 'posted_at', 'discovered_at', 'description', 'status', 'raw_json', 'first_seen_at', 'last_seen_at']);
 const LEGACY_SYNC_COLUMNS = Object.freeze(['id', 'source', 'profile', 'mode', 'started_at', 'finished_at', 'checkpoint', 'success', 'jobs_seen', 'jobs_returned', 'jobs_inserted', 'jobs_updated', 'error']);
 const APPLICATION_JOB_COLUMNS = Object.freeze(['id', 'source_table', 'source_db', 'source_rowid', 'source_job_id', 'application_url', 'eligibility_tier', 'verification_reason', 'source_posted_at', 'source_last_seen_at', 'status', 'status_reason', 'claimed_at', 'completed_at']);
 const APPLICATION_JOB_COLUMNS_WITH_DEDUPE = Object.freeze([...APPLICATION_JOB_COLUMNS, 'dedupe_group_id']);
 const APPLICATION_JOB_COLUMNS_WITH_RESUME = Object.freeze([...APPLICATION_JOB_COLUMNS_WITH_DEDUPE, 'current_resume_artifact_id', 'resume_preparation_reason', 'resume_preparation_attempted_at', 'resume_prepared_at', 'resume_preparation_state']);
+const APPLICATION_JOB_COLUMNS_V9 = Object.freeze([
+  ...APPLICATION_JOB_COLUMNS_WITH_DEDUPE,
+  'platform',
+  'application_host',
+  'job_title',
+  'job_company',
+  'job_location',
+  'job_description',
+  'job_description_sha256',
+  'current_resume_artifact_id',
+  'resume_preparation_reason',
+  'resume_preparation_attempted_at',
+  'resume_prepared_at',
+  'resume_preparation_state',
+]);
 const APPLICATION_RUN_COLUMNS = Object.freeze(['id', 'job_id', 'status', 'reason_code', 'started_at', 'finished_at', 'final_url', 'actions_json', 'evidence_path', 'submit_action_count', 'active', 'owner_id', 'browser_session_id', 'claimed_at', 'lease_expires_at', 'last_progress_at', 'workspace_path', 'resume_artifact_path', 'resume_artifact_sha256', 'answer_memory_path', 'blocker_alias']);
 const APPLICATION_RUN_COLUMNS_WITH_RESUME = Object.freeze([...APPLICATION_RUN_COLUMNS, 'resume_artifact_id']);
 const RESUME_ARTIFACT_COLUMNS = Object.freeze(['id', 'application_job_id', 'normalized_job_id', 'job_description_sha256', 'generator_fingerprint_sha256', 'generator_schema_version', 'manifest_path', 'manifest_sha256', 'pdf_path', 'pdf_sha256', 'job_description_path', 'pages', 'created_at']);
@@ -519,6 +625,8 @@ function assertMigrationHistory(db) {
   if (historicalV6 !== undefined) assertMigrationIdentity(historicalV6, HISTORICAL_MIGRATION_006);
   const historicalV7 = migrationRow(db, HISTORICAL_MIGRATION_007.version);
   if (historicalV7 !== undefined) assertMigrationIdentity(historicalV7, HISTORICAL_MIGRATION_007);
+  const historicalV8 = migrationRow(db, HISTORICAL_MIGRATION_008.version);
+  if (historicalV8 !== undefined) assertMigrationIdentity(historicalV8, HISTORICAL_MIGRATION_008);
   if (db.prepare('SELECT 1 FROM schema_migrations WHERE version > ? LIMIT 1').get(INGESTION_MIGRATION_VERSION) !== undefined) throw new Error('E_SCHEMA_MIGRATION_FUTURE');
 }
 
@@ -558,7 +666,7 @@ function historicalV5SchemaSignature() {
   const expected = new DatabaseSync(':memory:');
   try {
     expected.exec(HISTORICAL_SCHEMA_V5_SQL);
-    expected.exec(FINAL_APPLICATION_INDEX_SQL);
+    expected.exec(HISTORICAL_APPLICATION_INDEX_SQL);
     expectedV5SchemaSignature = schemaSignature(expected);
     return expectedV5SchemaSignature;
   } finally {
@@ -573,7 +681,7 @@ function historicalV6SchemaSignature() {
   try {
     expected.exec(HISTORICAL_SCHEMA_V5_SQL);
     expected.exec(SOURCE_CREDIT_AUDIT_SQL);
-    expected.exec(FINAL_APPLICATION_INDEX_SQL);
+    expected.exec(HISTORICAL_APPLICATION_INDEX_SQL);
     expectedV6SchemaSignature = schemaSignature(expected);
     return expectedV6SchemaSignature;
   } finally {
@@ -587,9 +695,23 @@ function historicalV7SchemaSignature() {
   const expected = new DatabaseSync(':memory:');
   try {
     expected.exec(HISTORICAL_SCHEMA_V7_SQL);
-    expected.exec(FINAL_APPLICATION_INDEX_SQL);
+    expected.exec(HISTORICAL_APPLICATION_INDEX_SQL);
     expectedV7SchemaSignature = schemaSignature(expected);
     return expectedV7SchemaSignature;
+  } finally {
+    expected.close();
+  }
+}
+let expectedV8SchemaSignature = null;
+
+function historicalV8SchemaSignature() {
+  if (expectedV8SchemaSignature !== null) return expectedV8SchemaSignature;
+  const expected = new DatabaseSync(':memory:');
+  try {
+    expected.exec(HISTORICAL_SCHEMA_V8_SQL);
+    expected.exec(HISTORICAL_APPLICATION_INDEX_SQL);
+    expectedV8SchemaSignature = schemaSignature(expected);
+    return expectedV8SchemaSignature;
   } finally {
     expected.close();
   }
@@ -610,7 +732,7 @@ export function assertIngestionSchema(database) {
       ['source_credit_audits', CREDIT_AUDIT_COLUMNS],
       ['schema_migrations', MIGRATION_COLUMNS],
     ]) assertColumns(db, table, columns);
-    assertColumns(db, 'application_jobs', APPLICATION_JOB_COLUMNS_WITH_RESUME);
+    assertColumns(db, 'application_jobs', APPLICATION_JOB_COLUMNS_V9);
     assertColumns(db, 'application_runs', APPLICATION_RUN_COLUMNS_WITH_RESUME);
     assertColumns(db, 'resume_artifacts', RESUME_ARTIFACT_COLUMNS);
     const forbidden = db.prepare("SELECT name FROM pragma_table_info('jobs') WHERE name IN ('raw_json', 'status')").all();
@@ -687,19 +809,81 @@ function assertCanonicalV7Schema(db) {
   if (db.prepare('SELECT 1 FROM schema_migrations WHERE version > ? LIMIT 1').get(HISTORICAL_MIGRATION_007.version) !== undefined) throw new Error('E_SCHEMA_MIGRATION_FUTURE');
   if (db.prepare('PRAGMA foreign_key_check').get() !== undefined) throw new Error('E_SCHEMA_FOREIGN_KEY');
 }
-
-function upgradeV7InTransaction(db, appliedAt) {
-  assertCanonicalV7Schema(db);
-  if (db.prepare('SELECT id FROM application_runs WHERE active = 1 LIMIT 1').get() !== undefined) {
-    throw new Error('E_SCHEMA_ACTIVE_APPLICATION_RUN');
+function assertCanonicalV8Schema(db) {
+  for (const expected of [HISTORICAL_MIGRATION_005, HISTORICAL_MIGRATION_006, HISTORICAL_MIGRATION_007]) {
+    const row = migrationRow(db, expected.version);
+    if (row !== undefined) assertMigrationIdentity(row, expected);
   }
-  db.exec(RESUME_ARTIFACTS_SQL);
+  assertMigrationIdentity(migrationRow(db, HISTORICAL_MIGRATION_008.version), HISTORICAL_MIGRATION_008);
+  assertColumns(db, 'application_jobs', APPLICATION_JOB_COLUMNS_WITH_RESUME);
+  assertColumns(db, 'application_runs', APPLICATION_RUN_COLUMNS_WITH_RESUME);
+  assertColumns(db, 'resume_artifacts', RESUME_ARTIFACT_COLUMNS);
+  if (schemaSignature(db) !== historicalV8SchemaSignature()) throw new Error('E_SCHEMA_OBJECTS');
+  if (db.prepare('PRAGMA foreign_key_check').get() !== undefined) throw new Error('E_SCHEMA_FOREIGN_KEY');
+}
+
+function migrateApplicationJobsToV9(db) {
+  db.exec(applicationJobTableSql());
+  db.exec(`
+INSERT INTO application_jobs_new (
+  id,source_table,source_db,source_rowid,source_job_id,application_url,
+  eligibility_tier,verification_reason,source_posted_at,source_last_seen_at,
+  status,status_reason,claimed_at,completed_at,dedupe_group_id,
+  current_resume_artifact_id,resume_preparation_reason,
+  resume_preparation_attempted_at,resume_prepared_at,resume_preparation_state
+)
+SELECT
+  id,source_table,source_db,source_rowid,source_job_id,application_url,
+  eligibility_tier,verification_reason,source_posted_at,source_last_seen_at,
+  CASE WHEN status NOT IN ('completed','closed','failed','skipped') THEN 'skipped' ELSE status END,
+  CASE WHEN status NOT IN ('completed','closed','failed','skipped') THEN 'platform_reingest_required' ELSE status_reason END,
+  CASE WHEN status NOT IN ('completed','closed','failed','skipped') THEN NULL ELSE claimed_at END,
+  CASE WHEN status NOT IN ('completed','closed','failed','skipped') THEN NULL ELSE completed_at END,
+  dedupe_group_id,current_resume_artifact_id,resume_preparation_reason,
+  resume_preparation_attempted_at,resume_prepared_at,resume_preparation_state
+FROM application_jobs;
+DROP TABLE application_jobs;
+ALTER TABLE application_jobs_new RENAME TO application_jobs;
+CREATE TRIGGER application_jobs_resume_binding_update
+BEFORE UPDATE OF current_resume_artifact_id, resume_preparation_state ON application_jobs
+WHEN NEW.resume_preparation_state = 'ready'
+BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1 FROM resume_artifacts AS a
+    WHERE a.id = NEW.current_resume_artifact_id AND a.application_job_id = NEW.id
+  ) THEN RAISE(ABORT, 'invalid prepared resume binding') END;
+END;
+  `);
+  db.exec(FINAL_APPLICATION_INDEX_SQL);
+}
+
+function upgradeV8InTransaction(db, appliedAt) {
+  if (db.prepare('SELECT id FROM application_runs WHERE active = 1 LIMIT 1').get() !== undefined) {
+    throw new Error('E_SCHEMA_ACTIVE_RUN');
+  }
+  assertCanonicalV8Schema(db);
+  migrateApplicationJobsToV9(db);
   db.prepare('INSERT INTO schema_migrations (version,name,sha256,applied_at) VALUES (?,?,?,?)').run(
     INGESTION_MIGRATION_VERSION,
     INGESTION_MIGRATION_NAME,
     migrationDigest(),
     appliedAt,
   );
+}
+
+function upgradeV7InTransaction(db, appliedAt) {
+  assertCanonicalV7Schema(db);
+  if (db.prepare('SELECT id FROM application_runs WHERE active = 1 LIMIT 1').get() !== undefined) {
+    throw new Error('E_SCHEMA_ACTIVE_RUN');
+  }
+  db.exec(RESUME_ARTIFACTS_SQL);
+  db.prepare('INSERT INTO schema_migrations (version,name,sha256,applied_at) VALUES (?,?,?,?)').run(
+    HISTORICAL_MIGRATION_008.version,
+    HISTORICAL_MIGRATION_008.name,
+    HISTORICAL_MIGRATION_008.sha256,
+    appliedAt,
+  );
+  upgradeV8InTransaction(db, appliedAt);
 }
 
 function upgradeV6InTransaction(db, appliedAt) {
@@ -988,6 +1172,69 @@ CREATE TABLE ${ifNotExists ? 'IF NOT EXISTS ' : ''}${quoteIdentifier(table)} (
   claimed_at TEXT,
   completed_at TEXT,
   dedupe_group_id INTEGER REFERENCES dedupe_groups(id) ON DELETE RESTRICT,
+  platform TEXT CHECK (platform IS NULL OR platform IN ('greenhouse','ashby','employer_hosted')),
+  application_host TEXT CHECK (
+    application_host IS NULL
+    OR (
+      length(application_host) BETWEEN 1 AND 253
+      AND application_host = lower(application_host)
+      AND application_host NOT GLOB '*[^a-z0-9.-]*'
+      AND application_host NOT GLOB '-*'
+      AND application_host NOT GLOB '*-'
+      AND application_host NOT GLOB '.*'
+      AND application_host NOT GLOB '*.'
+    )
+  ),
+  job_title TEXT,
+  job_company TEXT,
+  job_location TEXT,
+  job_description TEXT,
+  job_description_sha256 TEXT CHECK (
+    job_description_sha256 IS NULL
+    OR (
+      length(job_description_sha256) = 64
+      AND job_description_sha256 = lower(job_description_sha256)
+      AND job_description_sha256 NOT GLOB '*[^0-9a-f]*'
+    )
+  ),
+  current_resume_artifact_id INTEGER REFERENCES resume_artifacts(id) ON DELETE RESTRICT,
+  resume_preparation_reason TEXT,
+  resume_preparation_attempted_at TEXT CHECK (resume_preparation_attempted_at IS NULL OR resume_preparation_attempted_at GLOB '????-??-??T??:??:??.???Z'),
+  resume_prepared_at TEXT CHECK (resume_prepared_at IS NULL OR resume_prepared_at GLOB '????-??-??T??:??:??.???Z'),
+  resume_preparation_state TEXT NOT NULL DEFAULT 'pending' CHECK (
+    (resume_preparation_state = 'pending' AND current_resume_artifact_id IS NULL AND resume_preparation_reason IS NULL AND resume_prepared_at IS NULL)
+    OR (resume_preparation_state = 'ready' AND current_resume_artifact_id IS NOT NULL AND resume_preparation_reason IS NULL AND resume_prepared_at IS NOT NULL)
+    OR (resume_preparation_state = 'failed' AND current_resume_artifact_id IS NULL AND resume_preparation_reason IS NOT NULL AND length(resume_preparation_reason) BETWEEN 1 AND 64 AND resume_preparation_reason NOT GLOB '*[^a-z0-9_]*' AND resume_prepared_at IS NULL)
+  ),
+  CHECK (
+    (
+      platform IS NULL
+      AND application_host IS NULL
+      AND job_title IS NULL
+      AND job_company IS NULL
+      AND job_location IS NULL
+      AND job_description IS NULL
+      AND job_description_sha256 IS NULL
+    )
+    OR (
+      platform IN ('greenhouse','ashby')
+      AND application_host IS NOT NULL
+      AND length(job_title) > 0
+      AND length(job_company) > 0
+      AND length(job_location) > 0
+      AND length(job_description) > 0
+      AND job_description_sha256 IS NOT NULL
+    )
+    OR (
+      platform = 'employer_hosted'
+      AND (application_host IS NOT NULL OR status IN ('completed','closed','failed','skipped'))
+      AND length(job_title) > 0
+      AND length(job_company) > 0
+      AND length(job_location) > 0
+      AND length(job_description) > 0
+      AND job_description_sha256 IS NOT NULL
+    )
+  ),
   UNIQUE(source_table, source_db, source_rowid),
   UNIQUE(application_url)
 );
@@ -1073,7 +1320,7 @@ function copyApplicationJobs(db, dedupeByJobId, databasePath) {
 }
 
 function createFinalApplicationJobs(db, dedupeByJobId, databasePath) {
-  db.exec(applicationJobTableSql());
+  db.exec(historicalApplicationJobTableSql('application_jobs_new'));
   copyApplicationJobs(db, dedupeByJobId, databasePath);
   db.exec('DROP TABLE application_jobs; ALTER TABLE application_jobs_new RENAME TO application_jobs;');
 }
@@ -1176,9 +1423,10 @@ export function initializeIngestionDatabase(databasePath, { now = new Date() } =
   const appliedAt = nowIso(now);
   const db = openIngestionDatabase(databasePath);
   try {
-    db.exec('BEGIN IMMEDIATE;');
+    db.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;');
     const hasMigrationTable = tableExists(db, 'schema_migrations');
     const identityBefore = hasMigrationTable ? migrationIdentity(db) : undefined;
+    const historicalV8 = hasMigrationTable ? migrationRow(db, HISTORICAL_MIGRATION_008.version) : undefined;
     const historicalV7 = hasMigrationTable ? migrationRow(db, HISTORICAL_MIGRATION_007.version) : undefined;
     const historicalV6 = hasMigrationTable ? migrationRow(db, HISTORICAL_MIGRATION_006.version) : undefined;
     const historicalV5 = hasMigrationTable ? migrationRow(db, HISTORICAL_MIGRATION_005.version) : undefined;
@@ -1187,6 +1435,12 @@ export function initializeIngestionDatabase(databasePath, { now = new Date() } =
       assertIngestionSchema(db);
       db.exec('COMMIT; PRAGMA foreign_keys = ON;');
       return Object.freeze({ databasePath, version: INGESTION_MIGRATION_VERSION, idempotent: true });
+    }
+    if (historicalV8 !== undefined) {
+      upgradeV8InTransaction(db, appliedAt);
+      assertIngestionSchema(db);
+      db.exec('COMMIT; PRAGMA foreign_keys = ON;');
+      return Object.freeze({ databasePath, version: INGESTION_MIGRATION_VERSION, idempotent: false, upgradedFrom: HISTORICAL_MIGRATION_008.version });
     }
     if (historicalV7 !== undefined) {
       upgradeV7InTransaction(db, appliedAt);
@@ -1216,7 +1470,7 @@ export function initializeIngestionDatabase(databasePath, { now = new Date() } =
     db.exec('COMMIT; PRAGMA foreign_keys = ON;');
     return Object.freeze({ databasePath, version: INGESTION_MIGRATION_VERSION, idempotent: false });
   } catch (error) {
-    try { db.exec('ROLLBACK;'); } catch {}
+    try { db.exec('ROLLBACK; PRAGMA foreign_keys = ON;'); } catch {}
     throw error;
   } finally {
     db.close();
@@ -1233,6 +1487,7 @@ export async function migrateIngestionDatabase(databasePath, { payloadRoot, now 
   try {
     if (tableExists(db, 'schema_migrations')) {
       const identity = migrationIdentity(db);
+      const historicalV8 = migrationRow(db, HISTORICAL_MIGRATION_008.version);
       const historicalV7 = migrationRow(db, HISTORICAL_MIGRATION_007.version);
       const historicalV6 = migrationRow(db, HISTORICAL_MIGRATION_006.version);
       const historicalV5 = migrationRow(db, HISTORICAL_MIGRATION_005.version);
@@ -1242,10 +1497,13 @@ export async function migrateIngestionDatabase(databasePath, { payloadRoot, now 
         assertIngestionSchema(db);
         return Object.freeze({ databasePath, version: INGESTION_MIGRATION_VERSION, idempotent: true });
       }
-      if (historicalV7 !== undefined || historicalV6 !== undefined || historicalV5 !== undefined) {
-        db.exec('BEGIN IMMEDIATE;');
+      if (historicalV8 !== undefined || historicalV7 !== undefined || historicalV6 !== undefined || historicalV5 !== undefined) {
+        db.exec('PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;');
         let upgradedFrom;
-        if (historicalV7 !== undefined) {
+        if (historicalV8 !== undefined) {
+          upgradedFrom = HISTORICAL_MIGRATION_008.version;
+          upgradeV8InTransaction(db, appliedAt);
+        } else if (historicalV7 !== undefined) {
           upgradedFrom = HISTORICAL_MIGRATION_007.version;
         } else if (historicalV6 !== undefined) {
           upgradedFrom = HISTORICAL_MIGRATION_006.version;
@@ -1254,7 +1512,7 @@ export async function migrateIngestionDatabase(databasePath, { payloadRoot, now 
           upgradedFrom = HISTORICAL_MIGRATION_005.version;
           upgradeV5InTransaction(db, appliedAt);
         }
-        upgradeV7InTransaction(db, appliedAt);
+        if (historicalV8 === undefined) upgradeV7InTransaction(db, appliedAt);
         assertIngestionSchema(db);
         db.exec('COMMIT;');
         committed = true;
@@ -1288,7 +1546,9 @@ export async function migrateIngestionDatabase(databasePath, { payloadRoot, now 
     createFinalApplicationJobs(db, dedupeByJobId, databasePath);
     createFinalApplicationRuns(db);
     db.exec(RESUME_ARTIFACTS_SQL);
-    db.exec(FINAL_APPLICATION_INDEX_SQL);
+    db.exec(HISTORICAL_APPLICATION_INDEX_SQL);
+    db.prepare('INSERT INTO schema_migrations (version,name,sha256,applied_at) VALUES (?,?,?,?)').run(HISTORICAL_MIGRATION_008.version, HISTORICAL_MIGRATION_008.name, HISTORICAL_MIGRATION_008.sha256, appliedAt);
+    migrateApplicationJobsToV9(db);
     db.prepare('INSERT INTO schema_migrations (version,name,sha256,applied_at) VALUES (?,?,?,?)').run(INGESTION_MIGRATION_VERSION, INGESTION_MIGRATION_NAME, migrationDigest(), appliedAt);
     db.exec('DROP TABLE legacy_jobs; DROP TABLE legacy_sync_runs;');
     assertIngestionSchema(db);
@@ -1316,8 +1576,8 @@ export const FINAL_TABLE_COLUMNS = Object.freeze({
   source_sync_pages: PAGE_COLUMNS,
   source_credit_audits: CREDIT_AUDIT_COLUMNS,
   schema_migrations: MIGRATION_COLUMNS,
-  application_jobs: APPLICATION_JOB_COLUMNS_WITH_DEDUPE,
-  application_runs: APPLICATION_RUN_COLUMNS,
+  application_jobs: APPLICATION_JOB_COLUMNS_V9,
+  application_runs: APPLICATION_RUN_COLUMNS_WITH_RESUME,
 });
 export { migrationVersion };
 export default Object.freeze({

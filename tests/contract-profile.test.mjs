@@ -538,6 +538,20 @@ test('profile aliases never redirect non-profile answer sources', () => {
         value: 'https://example.test/portfolio',
         missing: false,
     });
+    const githubAlias = 'GitHub URL';
+    assert.deepEqual(resolveAnswer({
+        alias: githubAlias,
+        profileAlias: 'profile.links.github',
+        profile: {
+            schema: PROFILE_SCHEMA,
+            links: [{ kind: 'github', url: 'https://github.example.test/ada' }],
+        },
+    }), {
+        alias: githubAlias,
+        source: 'profile',
+        value: 'https://github.example.test/ada',
+        missing: false,
+    });
     assert.deepEqual(resolveAnswer({
         alias,
         profileAlias,

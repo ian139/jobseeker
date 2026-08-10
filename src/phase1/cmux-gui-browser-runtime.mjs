@@ -1,4 +1,5 @@
 import path from 'node:path';
+import os from 'node:os';
 
 import {
   BrowserAdapterError,
@@ -6,33 +7,34 @@ import {
   cloneTransportValue,
 } from './browser-adapter.mjs';
 
-export const CMUX_TUI_BROWSER_RUNTIME_SCHEMA = 'phase1-cmux-tui-browser-runtime-v1';
-export const CMUX_TUI_BROWSER_PROFILE_MODE = 'persistent';
+export const CMUX_GUI_BROWSER_RUNTIME_SCHEMA = 'phase1-cmux-gui-browser-runtime-v1';
+export const CMUX_GUI_BROWSER_PROFILE_MODE = 'persistent';
 
 const BINDING_KEYS = new Set([
-  'muxSessionId',
-  'targetId',
-  'cdpUrl',
+  'windowId',
+  'workspaceId',
+  'surfaceId',
+  'socketPath',
   'profileMode',
-  'userDataDir',
-]);
-const IDENTIFIER_MAX = 512;
-const TEXT_MAX = 16 * 1024;
-const USER_DATA_DIR_MAX = 4096;
-const RUNTIME_IDENTITY_KEYS = Object.freeze([
-  ['muxSessionId', 'RUNTIME_IDENTITY_MISMATCH'],
-  ['targetId', 'TARGET_IDENTITY_MISMATCH'],
 ]);
 
-export class CmuxTuiBrowserRuntimeError extends BrowserAdapterError {
+const RUNTIME_IDENTITY_KEYS = Object.freeze([
+  ['windowId', 'WINDOW_IDENTITY_MISMATCH'],
+  ['workspaceId', 'WORKSPACE_IDENTITY_MISMATCH'],
+  ['surfaceId', 'SURFACE_IDENTITY_MISMATCH'],
+]);
+
+const UUID_REGEX = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+export class CmuxGuiBrowserRuntimeError extends BrowserAdapterError {
   constructor(code, message = code) {
     super(code, message);
-    this.name = 'CmuxTuiBrowserRuntimeError';
+    this.name = 'CmuxGuiBrowserRuntimeError';
   }
 }
 
 function fail(code) {
-  throw new CmuxTuiBrowserRuntimeError(code);
+  throw new CmuxGuiBrowserRuntimeError(code);
 }
 
 function isRecord(value) {
@@ -57,99 +59,67 @@ function assertSafeText(value, code, maximum) {
   return value;
 }
 
-function assertIdentifier(value, code) {
-  return assertSafeText(value, code, IDENTIFIER_MAX);
+function validateUuid(value, code) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 512) fail(code);
+  if (value.trim() !== value || !UUID_REGEX.test(value)) fail(code);
+  return value;
 }
 
-function isLoopbackHostname(hostname) {
-  const host = hostname.toLowerCase();
-  if (host === 'localhost' || host === '::1') return true;
-  const parts = host.split('.');
-  if (parts.length !== 4 || parts[0] !== '127') return false;
-  return parts.slice(1).every((part) => /^(?:0|[1-9]\d{0,2})$/u.test(part) && Number(part) <= 255);
-}
-
-function validateCdpUrl(value) {
-  const source = assertSafeText(value, 'INVALID_CDP_URL', TEXT_MAX);
-  let parsed;
-  try {
-    parsed = new URL(source);
-  } catch (_) {
-    fail('INVALID_CDP_URL');
+function validateSocketPath(value) {
+  const source = assertSafeText(value, 'INVALID_SOCKET_PATH', 4096);
+  if (!path.posix.isAbsolute(source)) fail('INVALID_SOCKET_PATH');
+  const normalized = path.posix.normalize(source);
+  const ownerSocketDirectory = path.posix.join(os.homedir(), '.local', 'state', 'cmux');
+  const relative = path.posix.relative(ownerSocketDirectory, normalized);
+  if (normalized !== source
+    || relative.length === 0
+    || relative.startsWith('../')
+    || relative.includes('/')
+    || !/^cmux-[1-9][0-9]*\.sock$/u.test(relative)) {
+    fail('INVALID_SOCKET_PATH');
   }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'ws:') fail('INVALID_CDP_URL');
-  if (parsed.username !== '' || parsed.password !== '' || parsed.hash !== '') fail('INVALID_CDP_URL');
-  const hostname = parsed.hostname.startsWith('[') && parsed.hostname.endsWith(']')
-    ? parsed.hostname.slice(1, -1)
-    : parsed.hostname;
-  if (!isLoopbackHostname(hostname)) fail('INVALID_CDP_URL');
-  return source;
-}
-
-function normalizedPosixPath(value) {
-  return path.posix.normalize(value);
-}
-
-function isWithin(parent, candidate) {
-  return candidate === parent || candidate.startsWith(`${parent}/`);
-}
-
-function isOsDefaultChromeProfile(value) {
-  const candidate = normalizedPosixPath(value);
-  const home = typeof process.env.HOME === 'string' && process.env.HOME.length > 0
-    ? normalizedPosixPath(process.env.HOME)
-    : null;
-  if (home === null) return false;
-  const defaults = [
-    path.posix.join(home, 'Library/Application Support/Google/Chrome'),
-    path.posix.join(home, 'Library/Application Support/Chromium'),
-    path.posix.join(home, 'Library/Application Support/Microsoft Edge'),
-  ];
-  return defaults.some((defaultPath) => isWithin(defaultPath, candidate));
-}
-
-function validateUserDataDir(value) {
-  const source = assertSafeText(value, 'INVALID_USER_DATA_DIR', USER_DATA_DIR_MAX);
-  if (!path.posix.isAbsolute(source)) fail('INVALID_USER_DATA_DIR');
-  const normalized = normalizedPosixPath(source);
-  if (normalized !== source || normalized === '/') fail('INVALID_USER_DATA_DIR');
-  if (isOsDefaultChromeProfile(normalized)) fail('INVALID_USER_DATA_DIR');
   return source;
 }
 
 function validateBindingInput(value) {
-  const input = assertPlainRecord(value);
+  const input = assertPlainRecord(value, 'INVALID_BINDING');
   for (const key of Object.keys(input)) {
     if (!BINDING_KEYS.has(key)) fail('INVALID_BINDING');
   }
-  if (!Object.prototype.hasOwnProperty.call(input, 'muxSessionId')) fail('INVALID_MUX_SESSION_ID');
-  if (!Object.prototype.hasOwnProperty.call(input, 'targetId')) fail('INVALID_TARGET_ID');
-  if (!Object.prototype.hasOwnProperty.call(input, 'cdpUrl')) fail('INVALID_CDP_URL');
 
-  const muxSessionId = assertIdentifier(input.muxSessionId, 'INVALID_MUX_SESSION_ID');
-  const targetId = assertIdentifier(input.targetId, 'INVALID_TARGET_ID');
-  const cdpUrl = validateCdpUrl(input.cdpUrl);
+  if (!Object.prototype.hasOwnProperty.call(input, 'windowId')) fail('INVALID_WINDOW_ID');
+  if (!Object.prototype.hasOwnProperty.call(input, 'workspaceId')) fail('INVALID_WORKSPACE_ID');
+  if (!Object.prototype.hasOwnProperty.call(input, 'surfaceId')) fail('INVALID_SURFACE_ID');
+  if (!Object.prototype.hasOwnProperty.call(input, 'socketPath')) fail('INVALID_SOCKET_PATH');
+
+  const windowId = validateUuid(input.windowId, 'INVALID_WINDOW_ID');
+  const workspaceId = validateUuid(input.workspaceId, 'INVALID_WORKSPACE_ID');
+  const surfaceId = validateUuid(input.surfaceId, 'INVALID_SURFACE_ID');
+  const socketPath = validateSocketPath(input.socketPath);
+
   const profileMode = input.profileMode === undefined
-    ? CMUX_TUI_BROWSER_PROFILE_MODE
+    ? CMUX_GUI_BROWSER_PROFILE_MODE
     : input.profileMode;
+
   if (profileMode === 'ephemeral') fail('EPHEMERAL_PROFILE_FORBIDDEN');
-  if (profileMode !== CMUX_TUI_BROWSER_PROFILE_MODE) fail('INVALID_BINDING');
+  if (profileMode !== CMUX_GUI_BROWSER_PROFILE_MODE) fail('INVALID_BINDING');
 
   const binding = {
-    muxSessionId,
-    targetId,
-    cdpUrl,
+    windowId,
+    workspaceId,
+    surfaceId,
+    socketPath,
     profileMode,
   };
-  if (input.userDataDir !== undefined) binding.userDataDir = validateUserDataDir(input.userDataDir);
+
   return Object.freeze(binding);
 }
 
-export function validateCmuxTuiBrowserBinding(value) {
+export function validateCmuxGuiBrowserBinding(value) {
   return validateBindingInput(value);
 }
 
-export function createCmuxTuiBrowserBinding(value) {
+export function createCmuxGuiBrowserBinding(value) {
   return validateBindingInput(value);
 }
 
@@ -157,15 +127,17 @@ function withRuntimeIdentity(payload, binding) {
   const base = payload === undefined
     ? {}
     : (isRecord(payload) ? cloneTransportValue(payload) : { value: cloneTransportValue(payload) });
-  base.muxSessionId = binding.muxSessionId;
-  base.targetId = binding.targetId;
+  base.windowId = binding.windowId;
+  base.workspaceId = binding.workspaceId;
+  base.surfaceId = binding.surfaceId;
   return Object.freeze(base);
 }
 
 function identityMismatch(key, expected, actual) {
   if (typeof actual !== 'string' || actual !== expected) {
-    const code = key === 'muxSessionId' ? 'RUNTIME_IDENTITY_MISMATCH' : 'TARGET_IDENTITY_MISMATCH';
-    throw new CmuxTuiBrowserRuntimeError(code);
+    const entry = RUNTIME_IDENTITY_KEYS.find(([k]) => k === key);
+    const code = entry ? entry[1] : 'INVALID_BINDING';
+    throw new CmuxGuiBrowserRuntimeError(code);
   }
 }
 
@@ -222,7 +194,7 @@ function createRuntimeTransport(transport, binding) {
     },
     closeTarget(payload = {}) {
       if (!hasTransportRoute(transport, 'closeTarget')) {
-        throw new CmuxTuiBrowserRuntimeError('TARGET_CLOSE_UNAVAILABLE');
+        throw new CmuxGuiBrowserRuntimeError('TARGET_CLOSE_UNAVAILABLE');
       }
       const request = withRuntimeIdentity(payload, binding);
       return Promise.resolve()
@@ -233,15 +205,15 @@ function createRuntimeTransport(transport, binding) {
   return Object.freeze(wrapped);
 }
 
-export function createCmuxTuiBrowserTransport(transport, binding) {
-  const normalizedBinding = validateCmuxTuiBrowserBinding(binding);
+export function createCmuxGuiBrowserTransport(transport, binding) {
+  const normalizedBinding = validateCmuxGuiBrowserBinding(binding);
   if (transport === null || typeof transport !== 'object') {
     throw new BrowserTransportError('TRANSPORT_REQUIRED');
   }
   return createRuntimeTransport(transport, normalizedBinding);
 }
 
-export function validateCmuxTuiBrowserResult(value, binding) {
-  const normalizedBinding = validateCmuxTuiBrowserBinding(binding);
+export function validateCmuxGuiBrowserResult(value, binding) {
+  const normalizedBinding = validateCmuxGuiBrowserBinding(binding);
   return validateRuntimeResult(value, normalizedBinding);
 }

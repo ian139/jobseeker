@@ -20,13 +20,12 @@ This file remains authoritative for the established Phase 1–3 contracts and ev
 Greenhouse/Ashby/verified-employer-host source payload
   -> supported-platform classification and canonical SQLite snapshot
   -> deterministic one-page LaTeX resume
-  -> persistent OMP agent in a supervised runtime on the Ubuntu production host
+  -> persistent OMP agent in a supervised runtime on local macOS (launchd / CMUX-hosted OMP)
   -> headed browser application session
   -> every user-facing application field resolved and verified
   -> OMP agent reviews and submits after the completeness audit passes
   -> exact bound claim and owner-private run workspace
-  -> persistent OMP agent in a supervised CMUX-TUI workspace
-  -> platform-specific deterministic browser actions
+  -> persistent OMP agent in a supervised CMUX GUI workspace
   -> model inference only for unresolved non-sensitive response content
   -> every user-facing field retained and audited
   -> OMP submission after the completeness audit passes
@@ -93,7 +92,6 @@ The implementation may choose its file layout, but it must expose one machine-re
 | `browser_mode` | Headed and visible; the same session remains available for OMP review and submission. |
 | `observer` | Playwright/DOM observer that emits a normalized snapshot without deciding answers. |
 | `action_driver` | OMP `browser` on the same headed surface, followed only after an exact-control failure by the pinned mechanic and freshly grounded visual/OMP `computer` fallback; never an autonomous Playwright form-filler or second ledger. |
-| `action_driver` | OMP `browser` tool on the attached CMUX-TUI browser pane, with pinned CLI and the OMP `computer` tool only as ordered fallbacks; never an autonomous Playwright form-filler. |
 | `submit_policy` | Fixed to `omp_agent`. Submission is automated after audit. |
 
 At least one of `applicant_profile_path` or `source_resume_path` is required; both are allowed. `resume_upload_path` remains separately required and may point to the same file as `source_resume_path`.
@@ -101,20 +99,12 @@ At least one of `applicant_profile_path` or `source_resume_path` is required; bo
 When a profile JSON is used, it must be able to represent at least contact details, address, links, education, employment, skills, availability, location/relocation preferences, compensation preferences, work authorization and sponsorship, voluntary demographic choices, reusable yes/no answers, and user-authored explanations. Values remain local and may be omitted until a page actually asks for them.
 
 ## Browser authority
-### CMUX-TUI browser-pane attachment and lifecycle
+### Local CMUX GUI browser attachment and lifecycle
+The browser surface is owned by the local CMUX GUI environment. One CMUX GUI session owns the visible desktop workspace, and each active job owns exactly one surface target. The immutable binding is `{ windowId, workspaceId, surfaceId, socketPath, profileMode: "persistent" }`; reject any identity/binding mismatch or unknown key. Never use `profileMode: "ephemeral"` for a durable application run.
 
-The browser pane is an attachment to the CMUX-TUI runtime, not a second browser. One mux session owns one shared Chrome/CDP runtime, and each active job owns exactly one target in that runtime. The immutable binding is `{ muxSessionId, targetId, cdpUrl, profileMode: "persistent", userDataDir? }`; reject any target/session mismatch. `userDataDir` is optional but, when present, must be an owner-private session-scoped persistent profile. Never use the OS-default Chrome profile or `browser.ephemeral` for a durable application run.
+Obtain `windowId`, `workspaceId`, `surfaceId`, and `socketPath` from `cmux identify --surface`. OMP browser helpers (`cmux browser --surface <surfaceId>`) remain the primary current-browser action path.
 
-Derive the configured CMUX-TUI CDP endpoint in this order: `CMUX_MUX_CDP_URL`, then `browser.cdp_url`, then configured discovery. Require a loopback `ws://` or `http://` endpoint with no credentials or fragment; reject `wss://` and every non-loopback endpoint. Do not implement a custom CDP client: OMP `browser` remains the action driver.
-
-Attach exactly once with the OMP browser tool, selecting the job target on the shared runtime:
-
-```json
-{"action":"open","name":"job-<job-id>","app":{"cdp_url":"<cdpUrl>","target":"<targetId>"}}
-```
-
-This is the concrete `xd://browser` `browser.open` payload. After it succeeds, reuse the named tab through `browser.run`; do not call `browser.open` again for the same binding. Every request and result is fenced by `muxSessionId`, `targetId`, and `observationId`. Acceptance that an action was queued is not evidence that it took effect: after every queued action or batch, take a fresh OMP browser snapshot and observer result, accept that observation, and use it to prove retention before the next action. Close only the job target after the terminal outcome and evidence/database state are durably persisted; never close the shared Chrome runtime.
-
+Reuse the exact visible surface owned by the active job. Every request and result is fenced by `windowId`, `workspaceId`, `surfaceId`, and `observationId`. Acceptance that an action was queued is not evidence that it took effect: after every queued action or batch, take a fresh OMP browser snapshot and observer result, accept that observation, and use it to prove retention before the next action. Close only the job surface target after the terminal outcome and evidence/database state are durably persisted; never close the socket or browser runtime daemon.
 OMP acts by default, without per-job or per-action permission, to:
 
 - inspect the page, DOM/ARIA state, labels, descriptions, options, validation messages, frames, and current values;
@@ -225,8 +215,7 @@ The 2026-07-24 private run remains immutable historical preparation evidence onl
 
 ## OMP kickoff prompt
 
-> Use `skills/application-prep/SKILL.md` as the canonical Phase 1 operating procedure. Start or recover the private run coordinator, then use `selectSafeApplicationBatch` to fill conservative independent routine text fields from one observation and retain them after one fresh chained observation. Keep newly revealed/dependency fields, invalid/retry work, uploads, widgets, choices, navigation, and submission single-action. Use OMP `browser` first; use the pinned exact-control mechanic and freshly grounded visual/computer input only in that order after failure. Submit only through `prepareSubmission -> beginFinalSubmit -> browser/computer action -> fresh observation -> completeFinalSubmit -> finalizeRun`.
-> Use `skills/application-prep/SKILL.md` as the canonical Phase 1 operating procedure. Start or recover the private run coordinator, attach once to the configured CMUX-TUI CDP endpoint with the `xd://browser` `browser.open` payload and exact target selection, then reuse `browser.run` on that target. Use `selectSafeApplicationBatch` to fill conservative independent routine text fields from one observation and retain them only after one fresh chained observation and browser snapshot. Keep newly revealed/dependency fields, invalid/retry work, uploads, widgets, choices, navigation, and submission single-action. Queue acceptance is not effect; only fresh observer/snapshot evidence proves retention. Consult pinned CLI guidance only after the exact browser helper fails. Submit only through `prepareSubmission -> beginFinalSubmit -> browser click -> fresh observation -> completeFinalSubmit -> finalizeRun`.
+> Use `skills/application-prep/SKILL.md` as the canonical Phase 1 operating procedure. Start or recover the private run coordinator, bind the exact visible surface from `cmux identify --surface`, then reuse OMP `cmux browser --surface <surfaceId>` helpers. Use `selectSafeApplicationBatch` to fill conservative independent routine text fields from one observation and retain them only after one fresh chained observation and browser snapshot. Keep newly revealed/dependency fields, invalid/retry work, uploads, widgets, choices, navigation, and submission single-action. Use OMP `browser` first; use the pinned exact-control mechanic and freshly grounded `computer` tool fallbacks when required.
 
 ---
 
@@ -451,7 +440,7 @@ Operational validation failures remain active and repairable. They are not evide
 
 ## Persistent OMP deployment model
 
-OMP—not a custom CLI daemon—is the long-running orchestrator. Production unattended scheduling and deterministic services run on the always-on Ubuntu host; a persistent supervised OMP session owns recovery, claims, browser policy, and submission. The macOS CMUX layout remains a development/diagnosis convenience, not a production dependency.
+OMP—not a custom CLI daemon—is the long-running orchestrator. Production unattended scheduling under launchd and deterministic services run on local macOS; a persistent supervised OMP session hosted inside local CMUX GUI owns recovery, claims, browser policy, and submission.
 
 The supervised runtime keeps:
 

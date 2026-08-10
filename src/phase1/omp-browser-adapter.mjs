@@ -6,16 +6,16 @@ import {
   createBrowserAdapter,
 } from './browser-adapter.mjs';
 import {
-  CmuxTuiBrowserRuntimeError,
-  createCmuxTuiBrowserBinding,
-  createCmuxTuiBrowserTransport,
-} from './cmux-tui-browser-runtime.mjs';
+  CmuxGuiBrowserRuntimeError,
+  createCmuxGuiBrowserBinding,
+  createCmuxGuiBrowserTransport,
+} from './cmux-gui-browser-runtime.mjs';
 
 export const OMP_BROWSER_ADAPTER_SCHEMA = 'phase1-omp-browser-adapter-v1';
 
 /**
- * OMP `browser` tool actions are bound to one target in one CMUX-TUI
- * session. The injected transport carries the binding on every request;
+ * OMP `browser` tool actions are bound to one visible surface target in one CMUX
+ * GUI workspace/window. The injected transport carries the binding on every request;
  * closing a target never exposes a runtime/session close operation.
  */
 export class OmpBrowserAdapter extends BrowserAdapter {
@@ -24,17 +24,18 @@ export class OmpBrowserAdapter extends BrowserAdapter {
   #runtimeTransport;
 
   constructor(transport, binding, options = {}) {
-    const normalizedBinding = createCmuxTuiBrowserBinding(binding);
+    const normalizedBinding = createCmuxGuiBrowserBinding(binding);
     if (options !== undefined && options !== null && typeof options === 'object' &&
       Object.prototype.hasOwnProperty.call(options, 'workspaceId')) {
       throw new BrowserAdapterError('INVALID_OPTIONS');
     }
-    const runtimeTransport = createCmuxTuiBrowserTransport(transport, normalizedBinding);
+    const runtimeTransport = createCmuxGuiBrowserTransport(transport, normalizedBinding);
     super(runtimeTransport, options);
     this.#binding = normalizedBinding;
     this.#identity = Object.freeze({
-      muxSessionId: normalizedBinding.muxSessionId,
-      targetId: normalizedBinding.targetId,
+      windowId: normalizedBinding.windowId,
+      workspaceId: normalizedBinding.workspaceId,
+      surfaceId: normalizedBinding.surfaceId,
     });
     this.#runtimeTransport = runtimeTransport;
   }
@@ -47,12 +48,24 @@ export class OmpBrowserAdapter extends BrowserAdapter {
     return this.#identity;
   }
 
-  get muxSessionId() {
-    return this.#binding.muxSessionId;
+  get windowId() {
+    return this.#binding.windowId;
   }
 
-  get targetId() {
-    return this.#binding.targetId;
+  get workspaceId() {
+    return this.#binding.workspaceId;
+  }
+
+  get surfaceId() {
+    return this.#binding.surfaceId;
+  }
+
+  get socketPath() {
+    return this.#binding.socketPath;
+  }
+
+  get profileMode() {
+    return this.#binding.profileMode;
   }
 
   async closeTarget(options = {}) {
@@ -69,6 +82,6 @@ export {
   BrowserAdapterError,
   BrowserIdentityError,
   BrowserTransportError,
-  CmuxTuiBrowserRuntimeError,
+  CmuxGuiBrowserRuntimeError,
   createBrowserAdapter,
 };

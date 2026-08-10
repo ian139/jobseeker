@@ -975,7 +975,7 @@ export async function resolveField(session, options) {
       : state.ledger;
     const workingField = workingLedger.fields.find((item) => item.field_id === field.field_id);
     const sensitive = workingField.sensitive === true;
-    const allowAgentInference = !sensitive;
+    const allowAgentInference = !sensitive || deliberateBlank;
     const approvalContext = {
       run_contract_sha256: state.runMetadata.run_contract_sha256,
       observation_id: workingLedger.latest_observation_id,

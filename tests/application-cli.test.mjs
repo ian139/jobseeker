@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -110,6 +111,7 @@ function createHarness(t, answers = {}) {
     application_url: 'https://example.invalid/jobs/cli',
     job_description_path: jobPath,
     applicant_profile_path: profilePath,
+    source_resume_path: uploadPath,
     resume_upload_path: uploadPath,
     answer_memory_path: memoryPath,
     run_artifact_dir: path.join(root, 'artifacts'),
@@ -188,6 +190,13 @@ test('strict CLI parser rejects malformed, duplicate, and incomplete flags', () 
       args: { run: 'run.json', observation: 'obs.json' },
     },
   );
+  assert.deepEqual(
+    parseCliArgs(['resolve-blank', '--run', 'run.json', '--request', 'request.json']),
+    {
+      command: 'resolve-blank',
+      args: { run: 'run.json', request: 'request.json' },
+    },
+  );
   for (const argv of [
     [],
     ['unknown'],
@@ -201,6 +210,116 @@ test('strict CLI parser rejects malformed, duplicate, and incomplete flags', () 
       (error) => error instanceof ApplicationCliError,
     );
   }
+});
+
+test('resolve-blank records an observed optional blank without a browser action', async (t) => {
+  const { root, run, runPath } = createHarness(t);
+  await runCli([
+    'accept-observation',
+    '--run', runPath,
+    '--observation', await writePrivateJson(root, 'blank-observation.json', observation(run.application_url, 1, [
+      fieldControl('optional2', null, false, { required: false }),
+      fieldControl('optional', null, false, { required: false }),
+      finalControl(),
+    ])),
+  ]);
+  const resumeSha256 = crypto.createHash('sha256')
+    .update(fs.readFileSync(run.resume_upload_path))
+    .digest('hex');
+  const jobDescriptionSha256 = crypto.createHash('sha256')
+    .update(fs.readFileSync(run.job_description_path))
+    .digest('hex');
+  const rationale = 'Optional identity field is deliberately left blank.';
+  const rationaleDigest = crypto.createHash('sha256').update(rationale).digest('hex');
+  const blankDecision = {
+    ...decision('obs-1', 'optional', null, 'clear'),
+    fieldPolicy: 'identity',
+    answerSource: 'agent_inference',
+    evidenceReferences: [`resume:${resumeSha256}`, `job_description:${jobDescriptionSha256}`],
+    inferenceRationaleDigest: rationaleDigest,
+    inferenceEvidenceDigests: {
+      resumeSha256,
+      jobDescriptionSha256,
+    },
+    expectedRetainedState: null,
+    reasonCode: 'agent_inferred_optional_blank',
+  };
+  const blankResolution = {
+    ...answerResolution('optional'),
+    alias: 'Preferred Name',
+    sensitive: true,
+    deliberate_blank: true,
+    semantic_choice: 'blank',
+  };
+  const secondBlankDecision = {
+    ...blankDecision,
+    fieldId: 'optional2',
+    controlReference: 'control-optional2',
+    fieldPolicy: 'qualification',
+  };
+  const secondBlankResolution = {
+    ...blankResolution,
+    field_id: 'optional2',
+    alias: 'Cover Letter (Optional)',
+    sensitive: false,
+  };
+  const requestPath = await writePrivateJson(root, 'blank-request.json', request({
+    decision: blankDecision,
+    resolution: blankResolution,
+    option: null,
+  }, {
+    items: [
+      {
+        decision: blankDecision,
+        resolution: blankResolution,
+        option: null,
+      },
+      {
+        decision: secondBlankDecision,
+        resolution: secondBlankResolution,
+        option: null,
+      },
+    ],
+    resume: {
+      source_sha256: resumeSha256,
+      answers: {},
+    },
+    agent_inference: {
+      source_resume_sha256: resumeSha256,
+      job_description_sha256: jobDescriptionSha256,
+      answers: {
+        'Preferred Name': {
+          value: null,
+          rationale,
+          evidence: {
+            resume_sha256: resumeSha256,
+            job_description_sha256: jobDescriptionSha256,
+          },
+        },
+        'Cover Letter (Optional)': {
+          value: null,
+          rationale,
+          evidence: {
+            resume_sha256: resumeSha256,
+            job_description_sha256: jobDescriptionSha256,
+          },
+        },
+      },
+    },
+  }));
+
+  const result = await runCli(['resolve-blank', '--run', runPath, '--request', requestPath]);
+  assert.deepEqual(result, {
+    status: 'ok',
+    command: 'resolve-blank',
+    resolved_count: 2,
+    retention_ok: true,
+    retry_required: false,
+  });
+  const prepared = await runCli([
+    'prepare-submit', '--run', runPath, '--final-ref', 'control-final',
+  ]);
+  assert.equal(prepared.authorized, true);
 });
 
 test('secure CLI JSON I/O rejects unsafe inputs and never overwrites output', async (t) => {

@@ -147,3 +147,18 @@ test('unrelated element with data-state="solved" cannot clear a CAPTCHA challeng
   });
   assert.equal(result.blockers.some((b) => b.code === 'captcha'), true);
 });
+
+test('placeholder-only controls expose an exact attribute locator', () => {
+  const result = buildTestDocument({
+    elements: [{
+      tag: 'input',
+      attrs: { role: 'combobox', type: 'text', placeholder: 'Start typing...' },
+      value: '',
+    }],
+  });
+  const control = result.controls.find((candidate) => candidate.role === 'combobox');
+  assert.equal(control.locator.strategy, 'placeholder');
+  assert.equal(control.locator.value, 'Start typing...');
+  assert.equal(control.locator.role, 'combobox');
+  assert.equal(control.locator.name, null);
+});

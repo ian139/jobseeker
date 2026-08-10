@@ -167,19 +167,20 @@ function buildDocument() {
   const yes = document.createElement('button', document, 'Yes', { type: 'button', 'aria-pressed': 'true' });
   const no = document.createElement('button', document, 'No', { type: 'button', 'aria-pressed': 'false' });
   const unrelatedYes = document.createElement('button', document, 'Yes', { type: 'button' });
+  const seeMore = document.createElement('button', document, 'See More', { type: 'button' });
   const submit = document.createElement('button', document, 'Submit Application', { id: 'submit-app', type: 'submit' });
   const locate = document.createElement('button', document, 'Locate me', { type: 'button' });
   yesNo.append(yes, no);
   question.append(prompt, yesNo);
   form.append(question, unrelatedYes, locate, submit);
-  body.append(form);
+  body.append(seeMore, form);
   html.append(body);
   const markConnected = (element) => {
     element._connected = true;
     for (const child of element.children) markConnected(child);
   };
   markConnected(html);
-  return { document, body, yes, no, locate, submit, unrelatedYes };
+  return { document, body, yes, no, locate, seeMore, submit, unrelatedYes };
 }
 
 function observe(document, previousObservationId = null) {
@@ -208,6 +209,7 @@ test('normalizes paired Yes/No buttons into a stable radio field group', () => {
   assert.ok(choices.every((control) => control.locator.strategy === 'role'));
   assert.ok(first.controls.some((control) => control.label === 'Yes' && control.candidate.class === 'unknown'));
   assert.equal(first.controls.find((control) => control.label === 'Locate me').candidate.class, 'non_final_navigation');
+  assert.equal(first.controls.find((control) => control.label === 'See More').candidate.class, 'non_final_navigation');
   assert.equal(first.controls.find((control) => control.label === 'Submit Application').candidate.class, 'final_candidate');
 
   const firstByValue = new Map(choices.map((control) => [control.value, control]));
@@ -697,4 +699,79 @@ test('top-document CAPTCHA response clears blocker without exposing token bytes'
   });
   assert.equal(observation.blockers.some((blocker) => blocker.code === 'captcha'), false);
   assert.equal(JSON.stringify(observation).includes(token), false);
+});
+
+test('bounds native rendered upload evidence before a shared multi-file form', () => {
+  const document = new Document();
+  const html = document.createElement('html');
+  const body = document.createElement('body');
+  const form = document.createElement('form');
+  const resume = document.createElement('div', document, '', { 'data-upload-state': 'committed' });
+  const resumeInput = document.createElement('input', document, '', { id: 'resume', type: 'file' });
+  const resumeName = document.createElement('span', document, 'resume.pdf', {
+    class: 'file-upload__filename',
+  });
+  const cover = document.createElement('div');
+  const coverInput = document.createElement('input', document, '', { id: 'cover', type: 'file' });
+  resume.append(resumeInput, resumeName);
+  cover.append(coverInput);
+  form.append(resume, cover);
+  body.append(form);
+  html.append(body);
+  document.documentElement = html;
+  const markConnected = (element) => {
+    element._connected = true;
+    for (const child of element.children) markConnected(child);
+  };
+  markConnected(html);
+
+  const observation = observe(document);
+  const resumeControl = observation.controls.find((control) => control.locator.value === 'resume');
+  const coverControl = observation.controls.find((control) => control.locator.value === 'cover');
+  assert.deepEqual([...resumeControl.file.names], ['resume.pdf']);
+  assert.equal(coverControl.file.count, 0);
+});
+
+test('classifies file and combobox helper buttons as non-final navigation', () => {
+  const document = new Document();
+  const html = document.createElement('html');
+  const body = document.createElement('body');
+  const form = document.createElement('form');
+  const upload = document.createElement('div', document, '', { class: 'file-upload' });
+  const file = document.createElement('input', document, '', {
+    id: 'resume-file',
+    type: 'file',
+  });
+  const fileButton = document.createElement('button', document, 'resume.pdf', { type: 'button' });
+  const combo = document.createElement('div');
+  const comboInput = document.createElement('input', document, '', {
+    role: 'combobox',
+    type: 'text',
+    placeholder: 'Start typing...',
+  });
+  comboInput.value = '';
+  const comboButton = document.createElement('button', document, '', { type: 'button' });
+  const submit = document.createElement('button', document, 'Submit Application', {
+    id: 'submit',
+    type: 'submit',
+  });
+  upload.append(file, fileButton);
+  combo.append(comboInput, comboButton);
+  form.append(upload, combo, submit);
+  body.append(form);
+  html.append(body);
+  html._connected = true;
+  document.documentElement = html;
+  const markConnected = (element) => {
+    element._connected = true;
+    for (const child of element.children) markConnected(child);
+  };
+  markConnected(html);
+
+  const observation = observe(document);
+  const fileHelper = observation.controls.find((control) => control.label === 'resume.pdf');
+  const comboHelper = observation.controls.find((control) =>
+    control.role === 'button' && control.label === null);
+  assert.equal(fileHelper.candidate.class, 'non_final_navigation');
+  assert.equal(comboHelper.candidate.class, 'non_final_navigation');
 });

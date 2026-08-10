@@ -9,7 +9,7 @@ export const EVIDENCE_SCHEMA_VERSION = 'phase1-evidence-v1';
 export const ACTION_RESULT_RECEIPT_SCHEMA = 'phase1-browser-action-execution-v1';
 export const RETENTION_PROOFS_SCHEMA = 'phase1-retention-proofs-v1';
 export const SUBMISSION_AUTHORIZATION_SCHEMA = 'phase1-submission-authorization-v1';
-export const DEFAULT_MAX_CANONICAL_JSON_BYTES = 1024 * 1024;
+export const DEFAULT_MAX_CANONICAL_JSON_BYTES = 4 * 1024 * 1024;
 export const DEFAULT_MAX_INPUT_BYTES = 256 * 1024 * 1024;
 
 const JOURNAL_NAME = 'action-journal.jsonl';

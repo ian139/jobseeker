@@ -204,6 +204,122 @@ function sortedUnique(values) {
   return [...new Set(values)].sort();
 }
 
+function controlRefOrdinal(ref) {
+  if (typeof ref !== 'string') return null;
+  const match = ref.match(/:(control-[a-z0-9]+)$/u);
+  return match === null ? null : match[1];
+}
+
+function supersededChoiceField(field, activeControls) {
+  if (field.role !== 'radio' || field.present_in_latest_observation) return false;
+  const ordinal = controlRefOrdinal(field.latest_ref);
+  if (ordinal === null) return false;
+  return activeControls.some((control) =>
+    control.role === 'radio'
+    && control.label === field.label
+    && controlRefOrdinal(control.ref) === ordinal);
+}
+
+function supersededTransientField(field, activeControls) {
+  if (field.present_in_latest_observation
+    || !field.optional
+    || field.required
+    || field.role !== 'combobox'
+    || field.kind !== 'input'
+    || field.label !== null
+    || field.name !== null
+    || field.description !== null
+    || field.group_id !== null) {
+    return false;
+  }
+  return activeControls.filter((control) =>
+    control.role === field.role
+    && control.kind === field.kind
+    && control.label === field.label
+    && control.name === field.name
+    && control.description === field.description
+    && control.group_id === field.group_id
+    && control.required === false).length === 1;
+}
+
+function supersededFieldIds(fields, activeControls) {
+  const superseded = supersededChoiceFieldIds(fields, activeControls);
+  for (const field of fields) {
+    if (supersededTransientField(field, activeControls)) superseded.add(field.field_id);
+  }
+  return superseded;
+}
+
+function controlRefPosition(ref) {
+  const ordinal = controlRefOrdinal(ref);
+  if (ordinal === null) return Number.POSITIVE_INFINITY;
+  const position = Number.parseInt(ordinal.slice('control-'.length), 36);
+  return Number.isSafeInteger(position) ? position : Number.POSITIVE_INFINITY;
+}
+
+function radioGroups(values) {
+  const groups = new Map();
+  for (const value of values) {
+    const key = groupKey(value);
+    if (key === null) continue;
+    const group = groups.get(key) ?? [];
+    group.push(value);
+    groups.set(key, group);
+  }
+  return [...groups.values()];
+}
+
+function radioGroupSignature(group) {
+  return JSON.stringify([...group]
+    .sort((left, right) => controlRefPosition(left.latest_ref ?? left.ref) -
+      controlRefPosition(right.latest_ref ?? right.ref))
+    .map((value) => value.label));
+}
+
+function groupBySignature(groups) {
+  const grouped = new Map();
+  for (const group of groups) {
+    const signature = radioGroupSignature(group);
+    const matching = grouped.get(signature) ?? [];
+    matching.push(group);
+    grouped.set(signature, matching);
+  }
+  return grouped;
+}
+
+function supersededChoiceFieldIds(fields, activeControls) {
+  const superseded = new Set(fields
+    .filter((field) => supersededChoiceField(field, activeControls))
+    .map((field) => field.field_id));
+  const activeBySignature = groupBySignature(radioGroups(
+    activeControls.filter((control) => control.role === 'radio'),
+  ));
+  const staleByObservation = new Map();
+  for (const field of fields) {
+    if (field.role !== 'radio' || field.present_in_latest_observation) continue;
+    const observationId = field.latest_observation_id;
+    const groups = staleByObservation.get(observationId) ?? new Map();
+    const key = groupKey(field);
+    if (key === null) continue;
+    const group = groups.get(key) ?? [];
+    group.push(field);
+    groups.set(key, group);
+    staleByObservation.set(observationId, groups);
+  }
+  for (const groups of staleByObservation.values()) {
+    const staleBySignature = groupBySignature([...groups.values()]);
+    for (const [signature, staleGroups] of staleBySignature) {
+      const activeGroups = activeBySignature.get(signature) ?? [];
+      if (activeGroups.length === 0 || activeGroups.length !== staleGroups.length) continue;
+      for (const group of staleGroups) {
+        for (const field of group) superseded.add(field.field_id);
+      }
+    }
+  }
+  return superseded;
+}
+
+
 export function auditCompletion(ledger, observation, options = undefined) {
   validateLedger(ledger);
   validateObservation(observation);
@@ -216,6 +332,7 @@ export function auditCompletion(ledger, observation, options = undefined) {
   const unretained = new Set();
   const revealed = new Set();
   const staleRefs = new Set();
+  const supersededChoiceIds = supersededFieldIds(ledger.fields, activeControls);
   const blockers = [];
   const finalCandidates = observation.controls.filter((control) =>
     control.candidate.class === 'final_candidate' && control.visible && control.enabled && !isHoneypotControl(control),
@@ -270,6 +387,7 @@ export function auditCompletion(ledger, observation, options = undefined) {
   }
   for (const field of ledger.fields) {
     if (activeFieldIds.has(field.field_id) || field.revealed_observation_id === null) continue;
+    if (supersededChoiceIds.has(field.field_id)) continue;
     const issues = priorFieldIssueSet(field);
     if (issues.unresolved || issues.missingFile) unresolved.add(field.field_id);
     if (issues.invalid) invalid.add(field.field_id);
@@ -284,7 +402,7 @@ export function auditCompletion(ledger, observation, options = undefined) {
 
 
   auditRadioGroups(
-    ledger.fields,
+    ledger.fields.filter((field) => !supersededChoiceIds.has(field.field_id)),
     unresolved,
     invalid,
     unretained,

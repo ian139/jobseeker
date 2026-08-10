@@ -538,6 +538,219 @@ test('treats one retained radio selection as a complete group', () => {
   assert.deepEqual(audit.unretained_field_ids, []);
 });
 
+test('retains a checked radio option resolved as selected boolean state', () => {
+  const radioA = control('radio-a', {
+    ref: 'ref-radio-a',
+    kind: 'radio',
+    tag: 'input',
+    type: 'radio',
+    role: 'radio',
+    group_id: 'work-mode',
+    name: 'work-mode',
+    checked: false,
+    value: 'remote',
+    value_present: false,
+  });
+  const radioB = control('radio-b', {
+    ref: 'ref-radio-b',
+    kind: 'radio',
+    tag: 'input',
+    type: 'radio',
+    role: 'radio',
+    group_id: 'work-mode',
+    name: 'work-mode',
+    checked: true,
+    value: 'onsite',
+    value_present: true,
+  });
+  const current = observation('obs-1', [radioA, radioB, finalCandidate()]);
+  const result = verifyRetention(
+    answer(createLedger(current), 'radio-b', 'obs-1', 'ref-radio-b', true),
+    current,
+  );
+  assert.equal(result.ok, true);
+  assert.equal(fieldById(result.ledger, 'radio-b').retained, true);
+  assert.equal(auditCompletion(result.ledger, current).passed, true);
+});
+
+
+test('audit ignores a superseded radio identity at the same observed control position', () => {
+  const before = observation('obs-1', [
+    control('old-yes', {
+      ref: 'obs-1:control-a',
+      kind: 'radio',
+      tag: 'input',
+      type: 'radio',
+      role: 'radio',
+      label: 'Yes',
+      group_id: 'old-group',
+      checked: false,
+      value: 'Yes',
+      value_present: false,
+    }),
+    control('old-no', {
+      ref: 'obs-1:control-b',
+      kind: 'radio',
+      tag: 'input',
+      type: 'radio',
+      role: 'radio',
+      label: 'No',
+      group_id: 'old-group',
+      checked: false,
+      value: 'No',
+      value_present: false,
+    }),
+    finalCandidate(),
+  ]);
+  const after = observation('obs-2', [
+    control('new-yes', {
+      ref: 'obs-2:control-a',
+      kind: 'radio',
+      tag: 'input',
+      type: 'radio',
+      role: 'radio',
+      label: 'Yes',
+      group_id: 'new-group',
+      checked: false,
+      value: 'Yes',
+      value_present: false,
+    }),
+    control('new-no', {
+      ref: 'obs-2:control-b',
+      kind: 'radio',
+      tag: 'input',
+      type: 'radio',
+      role: 'radio',
+      label: 'No',
+      group_id: 'new-group',
+      checked: true,
+      value: 'No',
+      value_present: true,
+    }),
+    finalCandidate(),
+  ], 'obs-1');
+  let ledger = mergeObservation(createLedger(before), after);
+  ledger = answer(ledger, 'new-no', 'obs-2', 'obs-2:control-b', true);
+  const retained = verifyRetention(ledger, after);
+  assert.equal(retained.ok, true);
+  assert.equal(auditCompletion(retained.ledger, after).passed, true);
+});
+
+test('audit ignores a superseded radio group shifted by an inserted control', () => {
+  const before = observation('obs-1', [
+    control('old-yes', {
+      ref: 'obs-1:control-a',
+      kind: 'radio',
+      tag: 'input',
+      type: 'radio',
+      role: 'radio',
+      label: 'Yes',
+      group_id: 'old-group',
+      checked: false,
+      value: 'Yes',
+      value_present: false,
+    }),
+    control('old-no', {
+      ref: 'obs-1:control-b',
+      kind: 'radio',
+      tag: 'input',
+      type: 'radio',
+      role: 'radio',
+      label: 'No',
+      group_id: 'old-group',
+      checked: false,
+      value: 'No',
+      value_present: false,
+    }),
+    finalCandidate(),
+  ]);
+  const after = observation('obs-2', [
+    control('new-yes', {
+      ref: 'obs-2:control-b',
+      kind: 'radio',
+      tag: 'input',
+      type: 'radio',
+      role: 'radio',
+      label: 'Yes',
+      group_id: 'new-group',
+      checked: false,
+      value: 'Yes',
+      value_present: false,
+    }),
+    control('new-no', {
+      ref: 'obs-2:control-c',
+      kind: 'radio',
+      tag: 'input',
+      type: 'radio',
+      role: 'radio',
+      label: 'No',
+      group_id: 'new-group',
+      checked: true,
+      value: 'No',
+      value_present: true,
+    }),
+    finalCandidate(),
+  ], 'obs-1');
+  let ledger = mergeObservation(createLedger(before), after);
+  ledger = answer(ledger, 'new-no', 'obs-2', 'obs-2:control-c', true);
+  const retained = verifyRetention(ledger, after);
+  assert.equal(retained.ok, true);
+  assert.equal(auditCompletion(retained.ledger, after).passed, true);
+});
+test('custom combobox text retains only after a successful selection action', () => {
+  const before = observation('obs-1', [control('location', {
+    ref: 'ref-location-before',
+    kind: 'input',
+    tag: 'input',
+    type: 'text',
+    role: 'combobox',
+    value: '',
+    value_present: false,
+    selected: [],
+    options: [],
+  }), finalCandidate()]);
+  const after = observation('obs-2', [control('location', {
+    ref: 'ref-location-after',
+    kind: 'input',
+    tag: 'input',
+    type: 'text',
+    role: 'combobox',
+    value: 'Exact City',
+    value_present: true,
+    selected: [],
+    options: [],
+  }), finalCandidate()], 'obs-1');
+  let withoutAction = answer(
+    createLedger(before),
+    'location',
+    'obs-1',
+    'ref-location-before',
+    'Exact City',
+  );
+  withoutAction = mergeObservation(withoutAction, after);
+  assert.equal(verifyRetention(withoutAction, after).ok, false);
+
+  let ledger = answer(
+    createLedger(before),
+    'location',
+    'obs-1',
+    'ref-location-before',
+    'Exact City',
+  );
+  ledger = recordActionAttempt(ledger, {
+    action_id: 'select-location',
+    action: 'select',
+    field_id: 'location',
+    observation_id: 'obs-1',
+    ref: 'ref-location-before',
+    outcome: 'succeeded',
+  });
+  ledger = mergeObservation(ledger, after);
+  const result = verifyRetention(ledger, after);
+  assert.equal(result.ok, true);
+  assert.equal(fieldById(result.ledger, 'location').retained, true);
+});
+
 test('requires deliberate retained state for every grouped checkbox option', () => {
   const checkboxA = control('check-a', {
     ref: 'ref-check-a',

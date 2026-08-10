@@ -426,11 +426,19 @@ function assertContextAllowLists(decision, context) {
 }
 
 function assertPolicyRestrictions(decision) {
-  if (decision.answerSource === 'agent_inference' && PROTECTED_POLICIES.has(decision.fieldPolicy)) {
+  const inferredBlank = decision.answerSource === 'agent_inference'
+    && decision.proposedAction === 'clear'
+    && decision.proposedAnswer === null
+    && decision.expectedRetainedState === null;
+  if (decision.answerSource === 'agent_inference'
+      && PROTECTED_POLICIES.has(decision.fieldPolicy)
+      && !inferredBlank) {
     fail('E_DECISION_INFERENCE_POLICY', 'answerSource');
   }
   const allowed = POLICY_ALLOWED_SOURCES[decision.fieldPolicy];
-  if (!allowed.has(decision.answerSource)) fail('E_DECISION_POLICY_SOURCE', 'fieldPolicy');
+  if (!allowed.has(decision.answerSource) && !inferredBlank) {
+    fail('E_DECISION_POLICY_SOURCE', 'fieldPolicy');
+  }
 }
 
 function assertEvidenceRequirements(decision) {
@@ -526,7 +534,8 @@ function assertActionCompatibility(decision, context) {
     fail('E_DECISION_ACTION_CONTROL', 'proposedAction');
   }
   if (decision.proposedAction === 'toggle' && kind !== undefined
-      && !['checkbox', 'radio', 'switch', 'input'].includes(String(kind).toLowerCase())) {
+      && !['checkbox', 'radio', 'switch', 'input'].includes(String(kind).toLowerCase())
+      && !['checkbox', 'radio', 'switch'].includes(String(control.role ?? '').toLowerCase())) {
     fail('E_DECISION_ACTION_CONTROL', 'proposedAction');
   }
   if (decision.proposedAction === 'upload_file' && kind !== undefined

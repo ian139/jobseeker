@@ -981,6 +981,10 @@ function candidateValue(candidate, alias) {
 
 const PROFILE_CANONICAL_PATHS = Object.freeze({
     'profile.address.country': Object.freeze(['address', 'country']),
+    'profile.address.city': Object.freeze(['address', 'city']),
+    'profile.address.formatted': Object.freeze(['address', 'formatted']),
+    'profile.address.postal_code': Object.freeze(['address', 'postal_code']),
+    'profile.address.region': Object.freeze(['address', 'region']),
     'profile.location_preferences.onsite': Object.freeze(['location_preferences', 'onsite']),
     'profile.relocation.willing': Object.freeze(['relocation', 'willing']),
     'profile.address.street': Object.freeze(['address', 'street']),
@@ -1025,6 +1029,29 @@ function canonicalRelocationValue(profile, alias) {
     return relocation.found ? relocation : preference;
 }
 
+function canonicalSponsorshipValue(profile, alias) {
+    if (alias !== 'profile.sponsorship.not_needed') return { found: false };
+    const needed = ownPathValue(profile, ['sponsorship', 'needed']);
+    return needed.found && typeof needed.value === 'boolean'
+        ? { found: true, value: !needed.value }
+        : { found: false };
+}
+
+function canonicalCityMatchValue(profile, alias) {
+    const positivePrefix = 'profile.address.city.is:';
+    const negativePrefix = 'profile.address.city.is_not:';
+    const positive = alias.startsWith(positivePrefix);
+    const prefix = positive ? positivePrefix : negativePrefix;
+    if (!positive && !alias.startsWith(negativePrefix)) return { found: false };
+    const expected = normalizedQuestion(alias.slice(prefix.length));
+    const city = ownPathValue(profile, ['address', 'city']);
+    if (!city.found || typeof city.value !== 'string' || expected.length === 0) {
+        return { found: false };
+    }
+    const matches = normalizedQuestion(city.value) === expected;
+    return { found: true, value: positive ? matches : !matches };
+}
+
 
 function normalizedQuestion(value) {
     return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
@@ -1059,6 +1086,22 @@ function canonicalEmploymentValue(profile, alias) {
         match = employment[key];
     }
     return match === undefined ? { found: false } : { found: true, value: match };
+}
+
+function canonicalEducationValue(profile, alias) {
+    if (alias !== 'profile.education.college.institution'
+        || !isPlainObject(profile)
+        || !Array.isArray(profile.education)) {
+        return { found: false };
+    }
+    const candidates = profile.education.filter((entry) =>
+        isPlainObject(entry)
+        && entry.level === 'college'
+        && typeof entry.institution === 'string'
+        && entry.institution.length > 0);
+    return candidates.length === 1
+        ? { found: true, value: candidates[0].institution }
+        : { found: false };
 }
 
 
@@ -1237,13 +1280,25 @@ function profileValue(profile, alias) {
     if (relocation.found) {
         return relocation;
     }
+    const sponsorship = canonicalSponsorshipValue(profile, alias);
+    if (sponsorship.found) {
+        return sponsorship;
+    }
     const link = canonicalLinkValue(profile, alias);
     if (link.found) {
         return link;
     }
+    const cityMatch = canonicalCityMatchValue(profile, alias);
+    if (cityMatch.found) {
+        return cityMatch;
+    }
     const employment = canonicalEmploymentValue(profile, alias);
     if (employment.found) {
         return employment;
+    }
+    const canonicalEducation = canonicalEducationValue(profile, alias);
+    if (canonicalEducation.found) {
+        return canonicalEducation;
     }
     const exact = candidateValue(profile, alias);
     if (exact.found) {

@@ -14,8 +14,14 @@
     "./platforms": "./src/phase1/platforms.mjs",
     "./preparation": "./src/phase1/preparation.mjs"
   },
+  "bin": {
+    "augjobs-cmux-observe": "./bin/augjobs-cmux-observe",
+    "augjobs-cmux-execute": "./bin/augjobs-cmux-execute"
+  },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "list-jobs": "./bin/augjobs-list"
+    "list-jobs": "./bin/augjobs-list",
+    "cmux-observe": "./bin/augjobs-cmux-observe",
+    "cmux-execute": "./bin/augjobs-cmux-execute"
   }
 }

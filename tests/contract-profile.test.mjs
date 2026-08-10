@@ -357,6 +357,27 @@ test('memory outranks every lower source and aliases are exact', () => {
     );
     assert.equal(
         resolveAnswer({
+            alias: 'profile.address.city',
+            profile: { schema: PROFILE_SCHEMA, address: { city: 'Exact City' } },
+        }).value,
+        'Exact City',
+    );
+    assert.equal(
+        resolveAnswer({
+            alias: 'profile.address.city.is:Exact City',
+            profile: { schema: PROFILE_SCHEMA, address: { city: 'Exact City' } },
+        }).value,
+        true,
+    );
+    assert.equal(
+        resolveAnswer({
+            alias: 'profile.address.city.is_not:Los Angeles',
+            profile: { schema: PROFILE_SCHEMA, address: { city: 'Exact City' } },
+        }).value,
+        true,
+    );
+    assert.equal(
+        resolveAnswer({
             alias: 'profile.location_preferences.onsite',
             profile: structuredProfile,
         }).value,
@@ -368,6 +389,20 @@ test('memory outranks every lower source and aliases are exact', () => {
             profile: structuredProfile,
         }).value,
         true,
+    );
+    assert.equal(
+        resolveAnswer({
+            alias: 'profile.sponsorship.not_needed',
+            profile: { schema: PROFILE_SCHEMA, sponsorship: { needed: false } },
+        }).value,
+        true,
+    );
+    assert.equal(
+        resolveAnswer({
+            alias: 'profile.sponsorship.not_needed',
+            profile: { schema: PROFILE_SCHEMA, sponsorship: { needed: true } },
+        }).value,
+        false,
     );
     assert.equal(
         resolveAnswer({
@@ -566,8 +601,37 @@ test('profile aliases never redirect non-profile answer sources', () => {
         alias,
         profileAlias,
         memory: [testAnswerRecord(profileAlias, 'synthetic-alias', '2026-01-01T00:00:00.000Z')],
+
         resume: { answers: { [profileAlias]: 'synthetic-alias' } },
         user: { [profileAlias]: 'synthetic-alias' },
+    }).missing, true);
+});
+test('canonical college institution resolves only one exact profile credential', () => {
+    const alias = 'Current Company or University';
+    const profileAlias = 'profile.education.college.institution';
+    const profile = {
+        schema: PROFILE_SCHEMA,
+        education: [{
+            institution: 'Example University',
+            level: 'college',
+        }],
+    };
+    assert.deepEqual(resolveAnswer({ alias, profileAlias, profile }), {
+        alias,
+        source: 'profile',
+        value: 'Example University',
+        missing: false,
+    });
+    assert.equal(resolveAnswer({
+        alias,
+        profileAlias,
+        profile: {
+            ...profile,
+            education: [
+                ...profile.education,
+                { institution: 'Second University', level: 'college' },
+            ],
+        },
     }).missing, true);
 });
 

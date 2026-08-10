@@ -237,13 +237,19 @@ function selectorFromControl(control, controls, location) {
   requiredKeys(locator, ['strategy', 'value', 'role', 'name'], `${location}.locator`);
   const strategy = safeString(locator.strategy, `${location}.locator.strategy`, { max: 32, identifier: true });
   const value = safeString(locator.value, `${location}.locator.value`);
-  if (!['test_id', 'id', 'name'].includes(strategy)) fail('UNSAFE_SELECTOR', `${location}.locator.strategy`);
+  if (!['test_id', 'id', 'name', 'placeholder', 'role'].includes(strategy)) {
+    fail('UNSAFE_SELECTOR', `${location}.locator.strategy`);
+  }
   const matches = controls.filter((candidate) => (
-    candidate?.locator?.strategy === strategy && candidate?.locator?.value === value
+    candidate?.locator?.strategy === strategy
+    && candidate?.locator?.value === value
+    && (strategy !== 'role' || candidate?.locator?.role === locator.role)
   ));
   if (matches.length !== 1) fail('NON_UNIQUE_SELECTOR', `${location}.locator`);
   if (strategy === 'test_id') return `[data-testid=${JSON.stringify(value)}]`;
   if (strategy === 'name') return `[name=${JSON.stringify(value)}]`;
+  if (strategy === 'placeholder') return `[placeholder=${JSON.stringify(value)}]`;
+  if (strategy === 'role') return `aria/${value}`;
   return `[id=${JSON.stringify(value)}]`;
 }
 

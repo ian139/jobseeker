@@ -1251,8 +1251,9 @@ export function recordResolution(ledger, resolution) {
       field.final) {
     throw new Phase1StaleReferenceError('resolution is not bound to the latest reachable control');
   }
-  if (normalized.source === 'agent_inference' &&
-      (normalized.sensitive === true || field.sensitive)) {
+  if (normalized.source === 'agent_inference'
+      && (normalized.sensitive === true || field.sensitive)
+      && !(normalized.value_digest === null && normalized.semantic_choice === 'blank')) {
     fail('resolution.source', 'agent_inference is prohibited for sensitive fields');
   }
   const fields = ledger.fields.map((item, itemIndex) => {
@@ -1605,16 +1606,34 @@ function normalizedChoiceText(value) {
     .replace(/\s+/g, ' ')
     .trim();
 }
-function customComboboxRetainsAnswer(field, control) {
+function customComboboxRetainsAnswer(field, control, ledger) {
   if (control.role !== 'combobox' || control.tag === 'select') return null;
   const selected = Array.isArray(control.selected) ? control.selected : [];
-  if (selected.length !== 1) return false;
-  const candidates = [...selected];
-  for (const option of control.options) {
-    if (!option.selected) continue;
-    candidates.push(option.value, option.label);
+  if (selected.length === 1) {
+    const candidates = [...selected];
+    for (const option of control.options) {
+      if (!option.selected) continue;
+      candidates.push(option.value, option.label);
+    }
+    return candidates.some((value) => digestObservedValue(control, value) === field.value_digest);
   }
-  return candidates.some((value) => digestObservedValue(control, value) === field.value_digest);
+  if (selected.length > 1 || !control.value_present) return false;
+  const committedSelection = ledger.action_attempts.some((action) =>
+    action.field_id === field.field_id
+    && action.action === 'select'
+    && action.outcome === 'succeeded'
+    && action.stale_ref === false);
+  return committedSelection
+    && digestObservedValue(control, control.value) === field.value_digest;
+}
+
+function observedControlRetainsAnswer(field, control) {
+  if (control.role === 'radio'
+      && control.checked === true
+      && digestPrivateValue(true) === field.value_digest) {
+    return true;
+  }
+  return digestObservedValue(control, control.value) === field.value_digest;
 }
 
 
@@ -1695,9 +1714,9 @@ function retentionResultFor(field, control, proof, ledger, pendingMutation) {
     } else if (proof !== undefined) {
       errors.push('proof-not-allowed');
     } else {
-      const customSelection = customComboboxRetainsAnswer(field, control);
+      const customSelection = customComboboxRetainsAnswer(field, control, ledger);
       retained = control.value_present && (customSelection ??
-        digestObservedValue(control, control.value) === field.value_digest);
+        observedControlRetainsAnswer(field, control));
     }
     if (!retained && !errors.includes('proof-required') && !errors.includes('invalid-proof') &&
         !errors.includes('proof-not-allowed')) {

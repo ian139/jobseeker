@@ -259,11 +259,45 @@
     }
     return null;
   }
+  function descendantFileInputCount(root) {
+    const stack = [];
+    try {
+      for (const child of root.children || []) stack.push(child);
+    } catch (_) {
+      return 0;
+    }
+    let count = 0;
+    let visited = 0;
+    while (stack.length && visited < 256) {
+      const candidate = stack.pop();
+      visited += 1;
+      if (!candidate || candidate.nodeType !== 1) continue;
+      const tag = candidate.tagName ? candidate.tagName.toLowerCase() : "";
+      if (tag === "input" && nativeType(candidate, tag) === "file") {
+        count += 1;
+        if (count > 1) return count;
+      }
+      try {
+        for (const child of candidate.children || []) stack.push(child);
+      } catch (_) {
+        // Ignore an unusual detached subtree.
+      }
+    }
+    return count;
+  }
+
   function uploadContainerFor(element) {
     let identified = null;
     let semantic = null;
+    let bounded = null;
     let current = parentElement(element);
     for (let depth = 0; current && depth < 64; depth += 1) {
+      const tag = current.tagName && current.tagName.toLowerCase();
+      const fileInputCount = descendantFileInputCount(current);
+      if (fileInputCount === 1) bounded = current;
+      if (fileInputCount > 1 || tag === "form" || tag === "body" || tag === "html") {
+        return bounded || identified || semantic || parentElement(element);
+      }
       if (hasClassToken(current, "file-upload")
           || hasClassToken(current, "ashby-application-form-autofill-input-root")
           || (current.querySelector && current.querySelector(':scope > input[type="file"]')
@@ -275,14 +309,13 @@
           (testIdFor(current) || attr(current, "id") || attr(current, "name"))) {
         identified = current;
       }
-      const tag = current.tagName && current.tagName.toLowerCase();
       if (semantic === null &&
           (tag === "label" || tag === "fieldset" || rawRole(current) === "group")) {
         semantic = current;
       }
       current = parentElement(current);
     }
-    return identified || semantic || parentElement(element);
+    return bounded || identified || semantic || parentElement(element);
   }
 
 
@@ -576,6 +609,7 @@
   function locatorFor(element, role, label, name) {
     const testId = testIdFor(element);
     const id = attr(element, "id");
+    const placeholder = attr(element, "placeholder");
     let strategy = "none";
     let value = null;
     if (testId) {
@@ -587,6 +621,9 @@
     } else if (name) {
       strategy = "name";
       value = name;
+    } else if (placeholder) {
+      strategy = "placeholder";
+      value = placeholder;
     } else if (role && label) {
       strategy = "role";
       value = label;
@@ -975,10 +1012,53 @@
   function insideForm(element) {
     return Boolean(ancestor(element, (candidate) => candidate.tagName && candidate.tagName.toLowerCase() === "form"));
   }
+
+  function auxiliaryFieldButton(element, info) {
+    if (info.role !== "button") return false;
+    let current = parentElement(element);
+    for (let depth = 0; current && depth < 12; depth += 1) {
+      const tag = current.tagName ? current.tagName.toLowerCase() : "";
+      if (tag === "form" || tag === "body" || tag === "html") return false;
+      const controls = [];
+      const stack = [];
+      try {
+        for (const child of current.children || []) stack.push(child);
+      } catch (_) {
+        return false;
+      }
+      let visited = 0;
+      while (stack.length && visited < 128) {
+        const candidate = stack.pop();
+        visited += 1;
+        if (!candidate || candidate.nodeType !== 1) continue;
+        const candidateTag = candidate.tagName ? candidate.tagName.toLowerCase() : "";
+        const candidateRole = rawRole(candidate);
+        const candidateType = nativeType(candidate, candidateTag);
+        if (candidateTag === "input" || candidateTag === "select" || candidateTag === "textarea"
+            || candidateRole === "combobox") {
+          controls.push({ role: candidateRole, type: candidateType });
+          if (controls.length > 1) break;
+        }
+        try {
+          for (const child of candidate.children || []) stack.push(child);
+        } catch (_) {
+          // Ignore an unusual detached subtree.
+        }
+      }
+      if (controls.length === 1
+          && (controls[0].type === "file" || controls[0].role === "combobox")) {
+        return true;
+      }
+      if (controls.length > 1) return false;
+      current = parentElement(current);
+    }
+    return false;
+  }
+
   function candidateFor(element, info, label, verifiedChoice = false) {
     const normalized = (label || attr(element, "title") || "").toLowerCase().replace(/\s+/g, " ").trim();
     const finalPattern = /\b(submit|send application|complete application|finish application|finali[sz]e|confirm and apply|submit application)\b/i;
-    const navigationPattern = /\b(apply|start application|begin application|continue|next|proceed|review|go to application|begin|get started)\b/i;
+    const navigationPattern = /\b(apply|start application|begin application|continue|next|proceed|review|go to application|begin|get started|(?:see|show|read) more|(?:see|show) less)\b/i;
     const helperPattern = /^(?:toggle flyout|attach|dropbox|google drive|enter manually|add another|remove file|clear selections|remove file|upload file|delete file|replace|locate me)$/i;
     const submitType = info.type === "submit" || info.type === "image";
     if (info.type === "file"
@@ -1000,6 +1080,9 @@
     }
     if (navigationPattern.test(normalized) || helperPattern.test(normalized)) {
       return { class: "non_final_navigation", reason: "visible control has an ordinary application-navigation label" };
+    }
+    if (auxiliaryFieldButton(element, info)) {
+      return { class: "non_final_navigation", reason: "visible auxiliary field control" };
     }
     return { class: "unknown", reason: "visible user-facing control has no recognized field or navigation label" };
   }

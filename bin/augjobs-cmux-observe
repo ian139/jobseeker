@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+import { runCmuxObserverCli } from '../src/phase1/cmux-observer-cli.mjs';
+
+runCmuxObserverCli(process.argv).catch((err) => {
+  const code = err?.code || 'E_UNKNOWN_ERROR';
+  const message = err?.message || String(err);
+  console.error(JSON.stringify({ status: 'error', code, message }));
+  process.exitCode = 1;
+});

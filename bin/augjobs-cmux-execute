@@ -1,0 +1,15 @@
+#!/usr/bin/env node
+import { runCmuxPlanExecutor } from '../src/phase1/cmux-plan-executor.mjs';
+
+runCmuxPlanExecutor(process.argv).catch((err) => {
+  const result = Object.freeze({
+    status: 'failed',
+    plan_id: err?.planId ?? null,
+    completed_action_count: err?.completedActionCount ?? 0,
+    completed_step_count: err?.completedStepCount ?? 0,
+    failed_action_id: err?.failedActionId ?? null,
+    error_code: err?.code ?? 'E_UNKNOWN_ERROR',
+  });
+  console.log(JSON.stringify(result));
+  process.exitCode = 1;
+});

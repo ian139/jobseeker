@@ -48,6 +48,7 @@ const SEMANTIC_CHOICES = new Set([
 ]);
 const COMMAND_FLAGS = Object.freeze({
   'accept-observation': Object.freeze(['run', 'observation']),
+  'resolve-blank': Object.freeze(['run', 'request']),
   plan: Object.freeze(['run', 'request', 'output']),
   'pending-plan': Object.freeze(['run', 'output']),
   'complete-action': Object.freeze(['run', 'plan', 'result', 'observation']),
@@ -307,7 +308,8 @@ function validateOption(value, location) {
   fail('E_CLI_SCHEMA', `${location}.kind`);
 }
 
-export function validateBrowserActionRequest(value) {
+export function validateBrowserActionRequest(value, options = undefined) {
+  const allowDeliberateBlankBatch = options?.allowDeliberateBlankBatch === true;
   exactKeys(value, new Set([
     'schema',
     'driver',
@@ -363,8 +365,16 @@ export function validateBrowserActionRequest(value) {
     }
     if (item.option?.kind === 'greenhouse_education') needsGreenhouseCatalog = true;
   }
+  const deliberateBlankBatch = allowDeliberateBlankBatch
+    && value.items.every((item) =>
+      item.resolution.kind === 'answer'
+      && item.resolution.deliberate_blank === true
+      && item.decision.proposedAction === 'clear'
+      && item.decision.proposedAnswer === null
+      && item.decision.expectedRetainedState === null);
   if (value.items.length > 1
-    && value.items.some((item) => item.decision.proposedAction !== 'fill_text')) {
+    && value.items.some((item) => item.decision.proposedAction !== 'fill_text')
+    && !deliberateBlankBatch) {
     fail('E_CLI_SCHEMA', '$.items');
   }
   if (needsGreenhouseCatalog
@@ -513,9 +523,66 @@ async function createPlan(args, deps) {
   });
 }
 
+async function resolveBlank(args, deps) {
+  const request = validateBrowserActionRequest(await secureReadJson(args.request), {
+    allowDeliberateBlankBatch: true,
+  });
+  const session = await openSession(args.run, {
+    resume: request.resume ?? undefined,
+    agentInference: request.agent_inference ?? undefined,
+    now: deps.now,
+  });
+  for (const [index, item] of request.items.entries()) {
+    const location = `$.items[${index}]`;
+    const decision = validateApplicationDecision(item.decision);
+    if (item.resolution.kind !== 'answer'
+      || item.resolution.deliberate_blank !== true
+      || decision.proposedAction !== 'clear'
+      || decision.proposedAnswer !== null
+      || decision.expectedRetainedState !== null) {
+      fail('E_CLI_BLANK_RESOLUTION', `${location} must declare an exact deliberate blank`);
+    }
+    const control = session.observation.controls.find((candidate) =>
+      candidate.stable_id === item.resolution.field_id
+      && candidate.ref === decision.controlReference);
+    const fileCount = control?.file?.count ?? 0;
+    if (control === undefined
+      || control.required
+      || control.value_present
+      || control.checked === true
+      || control.selected === true
+      || fileCount !== 0) {
+      fail('E_CLI_BLANK_NOT_OBSERVED', `${location} is not an observed optional blank`);
+    }
+    const resolved = await resolveField(session, resolutionOptions(item.resolution));
+    if (resolved.missing) fail('E_CLI_ANSWER_MISSING');
+    if (resolved.answer.source !== decision.answerSource) {
+      fail('E_CLI_ANSWER_SOURCE');
+    }
+    if (resolved.answer.source === 'agent_inference'
+      && (resolved.answer.inference_rationale_digest !== decision.inferenceRationaleDigest
+        || canonicalJson(resolved.answer.inference_evidence_digests) !== canonicalJson({
+          resume_sha256: decision.inferenceEvidenceDigests.resumeSha256,
+          job_description_sha256: decision.inferenceEvidenceDigests.jobDescriptionSha256,
+        }))) {
+      fail('E_CLI_INFERENCE_EVIDENCE');
+    }
+  }
+  const retention = await verifyRetention(session);
+  return Object.freeze({
+    status: retention.ok ? 'ok' : 'blocked',
+    command: 'resolve-blank',
+    resolved_count: request.items.length,
+    retention_ok: retention.ok,
+    retry_required: retention.retry_required,
+  });
+}
+
+
 export async function runCli(argv = process.argv.slice(2), deps = {}) {
   const { command, args } = parseCliArgs(argv);
   if (command === 'plan') return createPlan(args, deps);
+  if (command === 'resolve-blank') return resolveBlank(args, deps);
   const session = await openSession(args.run, {
     initialize: command === 'accept-observation',
     now: deps.now,

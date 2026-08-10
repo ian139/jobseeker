@@ -283,6 +283,27 @@ test('creates a fill plan with exact private step arguments and normalized actio
   });
 });
 
+test('creates a unique placeholder attribute selector', () => {
+  const current = observation('obs-1', [control('location', {
+    locator: {
+      strategy: 'placeholder',
+      value: 'Start typing...',
+      role: 'combobox',
+      name: null,
+    },
+  })]);
+  const ledger = resolvedLedger(current, [{ field_id: 'location', value: 'Exact City' }]);
+  const plan = createBrowserActionPlan({
+    observation: current,
+    ledger,
+    decisions: [decision('location', 'fill_text', 'Exact City')],
+    answerAliases: { location: { alias: 'location', value: 'Exact City' } },
+    optionMatches: {},
+    driver: 'omp_browser',
+  });
+  assert.equal(plan.actions[0].steps[0].selector, '[placeholder="Start typing..."]');
+});
+
 test('supports clear, toggle, native select, custom select, and upload actions', () => {
   const native = control('country', {
     kind: 'select',

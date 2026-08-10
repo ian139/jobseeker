@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  AugGood local OMP worker supervisor (LaunchAgent template).
+
+  INERT UNTIL EXPLICITLY INSTALLED: this file in the repository is a template.
+  It is not loaded and does nothing until it is copied to
+  ~/Library/LaunchAgents/com.ian.jobs.auggood-worker.plist and bootstrapped,
+  for example:
+
+      mkdir -p ~/Library/LaunchAgents
+      cp src/scheduler/launchd/com.ian.jobs.auggood-worker.plist \
+         ~/Library/LaunchAgents/com.ian.jobs.auggood-worker.plist
+      mkdir -p /Users/ian/Projects/jobs-new/private/logs
+      launchctl bootstrap gui/$(id -u) \
+         ~/Library/LaunchAgents/com.ian.jobs.auggood-worker.plist
+
+  The supervisor loads the owner-only config at
+  /Users/ian/Projects/jobs-new/private/auggood-worker.json, ensures exactly one
+  CMUX workspace containing one OMP worker process, and never closes the
+  browser or the workspace. Aqua session type keeps the worker in the owner's
+  GUI session so its CMUX workspace stays visible.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ian.jobs.auggood-worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/ian/Projects/jobs-new/src/scheduler/local-omp-supervisor.mjs</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/ian/Projects/jobs-new</string>
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>/Users/ian/Projects/jobs-new/private/logs/auggood-worker.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ian/Projects/jobs-new/private/logs/auggood-worker.err.log</string>
+</dict>
+</plist>

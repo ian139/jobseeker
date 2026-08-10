@@ -4,6 +4,7 @@ import {
   readFileSync,
 } from 'node:fs';
 import {
+  lstat,
   mkdir,
   open,
   rename,
@@ -11,10 +12,40 @@ import {
   rmdir,
 } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { openIngestionDatabase } from '../ingestion/database.mjs';
 import { createAdapter as registryCreateAdapter } from '../ingestion/source-registry.mjs';
 import { syncSource as defaultSyncSource } from '../ingestion/sync.mjs';
+
+export const MAX_SCHEDULER_CONFIG_BYTES = 1024 * 1024;
+export const DEFAULT_MINIMUM_INTERVAL_HOURS = 4;
+const LOCK_FILE_NAME = 'scheduler.lock';
+const NOFOLLOW = fsConstants.O_NOFOLLOW ?? 0;
+
+const SINGLE_SOURCE_CONFIG_KEYS = new Set([
+  'source',
+  'profile',
+  'postedAtMaxAgeDays',
+  'queryFilters',
+  'pageSize',
+  'maxPages',
+  'maxItems',
+  'databasePath',
+  'privateRoot',
+  'timeoutMs',
+  'maxPreviewRetries',
+  'retryDelayMs',
+  'minimumIntervalHours',
+]);
+
+const MULTI_SOURCE_CONFIG_KEYS = new Set([
+  'timezone',
+  'databasePath',
+  'privateRoot',
+  'flagPath',
+  'minimumIntervalHours',
+  'sources',
+]);
 
 /**
  * Loads key-value environment variables from a file (e.g. private/.env) if it exists.
@@ -63,28 +94,57 @@ export function formatFormattedDate(date = new Date(), timeZone = 'America/New_Y
 }
 
 /**
- * Checks whether a succeeded sync_run exists for the source and profile on the specified date string.
+ * Returns the timestamp of the most recent succeeded sync run for the source and
+ * profile, or null when none exists. Uses finished_at when available and falls
+ * back to started_at.
  */
-export function hasSucceededRunToday({ database, source, profile, dateStr, timeZone = 'America/New_York' }) {
+export function lastSucceededRunAt({ database, source, profile }) {
   try {
-    const rows = database.prepare(
-      "SELECT started_at FROM sync_runs WHERE source = ? AND profile = ? AND state = 'succeeded'"
-    ).all(source, profile);
-
-    for (const row of rows) {
-      if (!row.started_at) continue;
-      const rowDateStr = formatFormattedDate(new Date(row.started_at), timeZone);
-      if (rowDateStr === dateStr) {
-        return true;
-      }
-    }
+    const row = database.prepare(
+      "SELECT started_at, finished_at FROM sync_runs WHERE source = ? AND profile = ? AND state = 'succeeded' ORDER BY id DESC LIMIT 1"
+    ).get(source, profile);
+    if (!row) return null;
+    return row.finished_at ?? row.started_at;
   } catch (err) {
     if (err?.code === 'ERR_SQLITE_ERROR' || err?.message?.includes('no such table')) {
-      return false;
+      return null;
     }
     throw err;
   }
-  return false;
+}
+
+/**
+ * Returns the most recent sync run row identity for the source and profile,
+ * or null when no run exists yet.
+ */
+function latestRun({ database, source, profile }) {
+  try {
+    return database.prepare(
+      'SELECT id, state, reason_code FROM sync_runs WHERE source = ? AND profile = ? ORDER BY id DESC LIMIT 1'
+    ).get(source, profile) ?? null;
+  } catch (err) {
+    if (err?.code === 'ERR_SQLITE_ERROR' || err?.message?.includes('no such table')) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Returns true when the last succeeded run finished within minimumIntervalHours
+ * of now, fencing repeated runs within the configured interval.
+ */
+export function withinMinimumInterval({ lastSucceededAt, now, minimumIntervalHours }) {
+  const lastMs = Date.parse(lastSucceededAt);
+  const nowMs = Date.parse(now);
+  if (!Number.isFinite(lastMs) || !Number.isFinite(nowMs)) return false;
+  return nowMs - lastMs < minimumIntervalHours * 60 * 60 * 1000;
+}
+
+function configError(code, detail = '') {
+  const error = new Error(detail ? `${code}: ${detail}` : code);
+  error.code = code;
+  return error;
 }
 
 export const MAX_WAKE_PAYLOAD_BYTES = 64 * 1024;
@@ -288,43 +348,226 @@ export async function waitForOmpWake({
 }
 
 /**
- * Loads configuration object from options, file path, or fallback example config.
+ * Securely reads a scheduler config file. The parent directory must be owned by
+ * the current user and not group/world writable; the file itself must not be a
+ * symlink, must be owned by the current user, must be owner-only, and must not
+ * exceed MAX_SCHEDULER_CONFIG_BYTES.
  */
-export function loadConfig(options = {}) {
+export async function readSchedulerConfigFile(configPath) {
+  if (typeof configPath !== 'string' || configPath.length === 0) {
+    throw configError('E_SCHEDULER_CONFIG', 'config path required');
+  }
+  const absolute = resolve(configPath);
+  const parent = await lstat(dirname(absolute)).catch(() => {
+    throw configError('E_SCHEDULER_CONFIG', 'config unreadable');
+  });
+  if (
+    !parent.isDirectory()
+    || (parent.mode & 0o022) !== 0
+    || (typeof process.getuid === 'function' && parent.uid !== process.getuid())
+  ) {
+    throw configError('E_SCHEDULER_CONFIG', 'config parent not private');
+  }
+
+  let handle;
+  try {
+    handle = await open(absolute, fsConstants.O_RDONLY | NOFOLLOW);
+    const info = await handle.stat();
+    const linked = await lstat(absolute);
+    if (
+      !info.isFile()
+      || !linked.isFile()
+      || info.dev !== linked.dev
+      || info.ino !== linked.ino
+      || info.size > MAX_SCHEDULER_CONFIG_BYTES
+      || (info.mode & 0o077) !== 0
+      || (typeof process.getuid === 'function' && info.uid !== process.getuid())
+    ) {
+      throw configError('E_SCHEDULER_CONFIG', 'config not private');
+    }
+    const text = await handle.readFile('utf8');
+    return JSON.parse(text);
+  } catch (error) {
+    if (error instanceof SyntaxError) throw configError('E_SCHEDULER_CONFIG', 'config invalid JSON');
+    if (error?.code === 'E_SCHEDULER_CONFIG') throw error;
+    throw configError('E_SCHEDULER_CONFIG', 'config unreadable');
+  } finally {
+    await handle?.close();
+  }
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function unknownKeys(value, allowed) {
+  return Object.keys(value).filter((key) => !allowed.has(key));
+}
+
+/**
+ * Normalizes either the multi-source scheduler shape ({sources: [...]}) or the
+ * single-source private shape ({source, profile, ...}) into an internal list of
+ * source entries. Single-source options map to one paid source without exposing
+ * their values outside the returned sources list.
+ */
+export function normalizeSchedulerConfig(config) {
+  if (!isObject(config)) throw configError('E_SCHEDULER_CONFIG', 'config must be an object');
+
+  if (Array.isArray(config.sources)) {
+    const unknown = unknownKeys(config, MULTI_SOURCE_CONFIG_KEYS);
+    if (unknown.length > 0) {
+      throw configError('E_SCHEDULER_CONFIG', `unknown config keys: ${unknown.join(', ')}`);
+    }
+    const sources = config.sources.map((entry) => {
+      if (!isObject(entry)) throw configError('E_SCHEDULER_CONFIG', 'source entry must be an object');
+      if (typeof entry.source !== 'string' || entry.source.length === 0) {
+        throw configError('E_SCHEDULER_CONFIG', 'source entry requires a source');
+      }
+      return {
+        source: entry.source,
+        profile: entry.profile ?? 'default',
+        mode: entry.mode ?? 'paid',
+        options: isObject(entry.options) ? entry.options : {},
+      };
+    });
+    return { kind: 'multi', sources, config };
+  }
+
+  if (typeof config.source === 'string' && config.source.length > 0) {
+    const unknown = unknownKeys(config, SINGLE_SOURCE_CONFIG_KEYS);
+    if (unknown.length > 0) {
+      throw configError('E_SCHEDULER_CONFIG', `unknown config keys: ${unknown.join(', ')}`);
+    }
+    const options = {};
+    for (const key of ['postedAtMaxAgeDays', 'queryFilters', 'pageSize', 'maxPages', 'maxItems', 'timeoutMs', 'maxPreviewRetries', 'retryDelayMs']) {
+      if (config[key] !== undefined) options[key] = config[key];
+    }
+    return {
+      kind: 'single',
+      sources: [{
+        source: config.source,
+        profile: config.profile ?? 'default',
+        mode: 'paid',
+        options,
+      }],
+      config,
+    };
+  }
+
+  throw configError('E_SCHEDULER_CONFIG', 'config must define sources[] or a single source');
+}
+
+/**
+ * Loads configuration from an in-memory object or from the first existing
+ * secure config file candidate (configPath, SCHEDULER_CONFIG_PATH, or
+ * private/scheduler-config.json).
+ */
+export async function loadConfig(options = {}) {
   if (options.config) return options.config;
 
   const candidatePaths = [
     options.configPath,
     process.env.SCHEDULER_CONFIG_PATH,
     resolve(process.cwd(), 'private/scheduler-config.json'),
-    resolve(process.cwd(), 'src/scheduler/config.example.json'),
   ].filter(Boolean);
 
   for (const path of candidatePaths) {
     if (existsSync(path)) {
-      try {
-        const raw = readFileSync(path, 'utf8');
-        return JSON.parse(raw);
-      } catch (err) {
-        throw new Error(`Failed to parse scheduler config at ${path}: ${err.message}`);
-      }
+      return await readSchedulerConfigFile(path);
     }
   }
 
-  throw new Error('No scheduler configuration file found.');
+  throw configError('E_SCHEDULER_CONFIG', 'no scheduler configuration file found');
+}
+
+function boundedInterval(value) {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 24 * 365) {
+    throw configError('E_SCHEDULER_CONFIG', 'minimumIntervalHours must be a positive integer');
+  }
+  return value;
 }
 
 /**
- * Runs the daily source ingestion scheduler.
+ * Acquires the scheduler cycle lock inside privateRoot with O_EXCL semantics.
+ * Fails closed when another cycle holds the lock.
+ */
+async function acquireCycleLock(privateRoot) {
+  const lockPath = join(privateRoot, LOCK_FILE_NAME);
+  const token = randomUUID();
+  let handle;
+  try {
+    handle = await open(
+      lockPath,
+      fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_WRONLY | NOFOLLOW,
+      0o600,
+    );
+    await handle.writeFile(`${JSON.stringify({
+      pid: process.pid,
+      token,
+      acquiredAt: new Date().toISOString(),
+    })}\n`, 'utf8');
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    return { lockPath, token };
+  } catch (error) {
+    if (handle !== undefined) {
+      await handle.close().catch(() => {});
+      await rm(lockPath, { force: true }).catch(() => {});
+    }
+    if (error?.code === 'EEXIST' || error?.code === 'ELOOP') {
+      throw configError('E_SCHEDULER_LOCKED', 'another scheduler cycle is already running');
+    }
+    throw error;
+  }
+}
+
+/**
+ * Releases the cycle lock only when it still belongs to this cycle, so a stale
+ * or replaced lock is never removed by a different owner.
+ */
+async function releaseCycleLock(lock) {
+  if (!lock) return;
+  try {
+    const content = readFileSync(lock.lockPath, 'utf8');
+    const parsed = JSON.parse(content);
+    if (parsed.token !== lock.token) return;
+  } catch {
+    return;
+  }
+  await rm(lock.lockPath, { force: true });
+}
+
+async function requirePrivateRoot(privateRoot) {
+  const status = await lstat(privateRoot).catch(() => {
+    throw configError('E_SCHEDULER_PRIVATE_ROOT', 'private root unreadable');
+  });
+  if (!status.isDirectory()
+    || status.isSymbolicLink()
+    || (status.mode & 0o077) !== 0
+    || (typeof process.getuid === 'function' && status.uid !== process.getuid())) {
+    throw configError('E_SCHEDULER_PRIVATE_ROOT', 'private root must be owner-only');
+  }
+}
+
+/**
+ * Runs the scheduled source ingestion cycle: acquires the cycle lock, fences
+ * sources by minimum interval and paid ambiguity, syncs due sources, and
+ * publishes an OMP wake only when new queue rows were inserted.
  */
 export async function runDailyScheduler(options = {}) {
   loadEnv(options.envPath);
 
-  const config = loadConfig(options);
+  const config = await loadConfig(options);
+  const normalized = normalizeSchedulerConfig(config);
+
   const timeZone = options.timeZone ?? config.timezone ?? 'America/New_York';
   const databasePath = options.databasePath ?? config.databasePath ?? process.env.DATABASE_PATH ?? 'data/RealJobs.sqlite';
   const privateRoot = options.privateRoot ?? config.privateRoot ?? process.env.PRIVATE_ROOT ?? 'private/artifacts';
-  const flagPath = options.flagPath ?? config.flagPath ?? resolve(process.cwd(), 'scheduler/wake-omp.flag');
+  const flagPath = options.flagPath ?? config.flagPath ?? join(privateRoot, 'wake-omp.flag');
+  const minimumIntervalHours = boundedInterval(
+    options.minimumIntervalHours ?? config.minimumIntervalHours ?? DEFAULT_MINIMUM_INTERVAL_HOURS,
+  );
   const now = options.now ? new Date(options.now).toISOString() : new Date().toISOString();
   const todayDateStr = formatFormattedDate(now, timeZone);
 
@@ -339,38 +582,51 @@ export async function runDailyScheduler(options = {}) {
     ownedDb = true;
   }
 
-  const sources = options.sources ?? config.sources ?? [];
   const results = [];
-
-  await mkdir(privateRoot, { recursive: true, mode: 0o700 });
+  let totalQueueRowsInserted = 0;
+  let flagFile = null;
+  let lock = null;
 
   try {
-    for (const sourceConfig of sources) {
+    await mkdir(privateRoot, { recursive: true, mode: 0o700 });
+    await requirePrivateRoot(privateRoot);
+    lock = await acquireCycleLock(privateRoot);
+
+    for (const sourceConfig of normalized.sources) {
       const source = sourceConfig.source;
-      const profile = sourceConfig.profile ?? 'default';
-      const mode = sourceConfig.mode ?? 'paid';
+      const profile = sourceConfig.profile;
+      const mode = sourceConfig.mode;
       const sourceOpts = sourceConfig.options ?? {};
 
-      const alreadySynced = hasSucceededRunToday({
-        database: db,
-        source,
-        profile,
-        dateStr: todayDateStr,
-        timeZone,
-      });
-      if (alreadySynced) {
-        console.log(`[scheduler] Source ${source}:${profile} already succeeded for date ${todayDateStr} (${timeZone}). Skipping.`);
+      const lastSucceededAt = lastSucceededRunAt({ database: db, source, profile });
+      if (lastSucceededAt !== null && withinMinimumInterval({ lastSucceededAt, now, minimumIntervalHours })) {
+        console.log(`[scheduler] Source ${source}:${profile} succeeded within ${minimumIntervalHours}h interval. Skipping.`);
         results.push({
           source,
           profile,
           status: 'skipped',
-          reason: 'already_succeeded_today',
+          reason: 'within_minimum_interval',
+          date: todayDateStr,
+          lastSucceededAt,
+        });
+        continue;
+      }
+
+      const lastRun = latestRun({ database: db, source, profile });
+      if (lastRun !== null && lastRun.state === 'paid_ambiguous') {
+        console.log(`[scheduler] Source ${source}:${profile} last run is paid_ambiguous (${lastRun.reason_code ?? 'unknown'}). Not replaying.`);
+        results.push({
+          source,
+          profile,
+          status: 'paid_ambiguous',
+          syncRunId: lastRun.id,
+          reasonCode: lastRun.reason_code ?? 'paid_request_ambiguous',
           date: todayDateStr,
         });
         continue;
       }
 
-      console.log(`[scheduler] Synchronizing source ${source}:${profile} for date ${todayDateStr}...`);
+      console.log(`[scheduler] Synchronizing source ${source}:${profile}...`);
       const adapter = await createAdapterFn({
         source,
         profile,
@@ -379,10 +635,12 @@ export async function runDailyScheduler(options = {}) {
         now,
       });
 
-      const defaultBounds = {
-        limit: 25,
-        maxPages: 100,
-        windowEnd: now,
+      const boundsObject = {
+        limit: sourceOpts.pageSize ?? sourceOpts.limit ?? 25,
+        maxPages: sourceOpts.maxPages ?? 100,
+        maxItems: sourceOpts.maxItems ?? null,
+        windowEnd: sourceOpts.windowEnd ?? now,
+        ...(sourceOpts.bounds ?? {}),
       };
 
       const syncResult = await syncSourceFn({
@@ -395,19 +653,31 @@ export async function runDailyScheduler(options = {}) {
         privateRoot,
         paidAuthorization: true,
         now,
-        ...defaultBounds,
         ...sourceOpts,
-        bounds: {
-          limit: sourceOpts.limit ?? 25,
-          maxPages: sourceOpts.maxPages ?? 100,
-          windowEnd: sourceOpts.windowEnd ?? now,
-          ...(sourceOpts.bounds ?? {}),
-        },
+        limit: boundsObject.limit,
+        maxPages: boundsObject.maxPages,
+        maxItems: boundsObject.maxItems,
+        windowEnd: boundsObject.windowEnd,
+        bounds: boundsObject,
       });
+
+      if (syncResult.state === 'paid_ambiguous') {
+        console.log(`[scheduler] Source ${source}:${profile} finished paid_ambiguous (${syncResult.reasonCode ?? 'unknown'}). Not retried.`);
+        results.push({
+          source,
+          profile,
+          status: 'paid_ambiguous',
+          syncRunId: syncResult.syncRunId ?? null,
+          reasonCode: syncResult.reasonCode ?? 'paid_request_ambiguous',
+          date: todayDateStr,
+        });
+        continue;
+      }
       if (syncResult.state !== 'succeeded') {
         throw new Error(`Sync for source ${source}:${profile} failed with state '${syncResult.state}' (reason: ${syncResult.reasonCode ?? 'unknown'})`);
       }
 
+      totalQueueRowsInserted += Number(syncResult.queueRowsInserted ?? 0);
       results.push({
         source,
         profile,
@@ -417,10 +687,12 @@ export async function runDailyScheduler(options = {}) {
       });
     }
 
-    const flagFile = await wakeOmpSession({
-      reason: 'daily_scheduler_complete',
-      flagPath,
-    });
+    if (totalQueueRowsInserted > 0) {
+      flagFile = await wakeOmpSession({
+        reason: 'daily_scheduler_complete',
+        flagPath,
+      });
+    }
 
     return {
       date: todayDateStr,
@@ -429,6 +701,7 @@ export async function runDailyScheduler(options = {}) {
       flagPath: flagFile,
     };
   } finally {
+    await releaseCycleLock(lock);
     if (ownedDb && db) {
       try {
         db.close();

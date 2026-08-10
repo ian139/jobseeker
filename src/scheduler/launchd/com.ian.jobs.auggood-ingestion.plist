@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.ian.jobs.auggood-ingestion</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/ian/Projects/jobs-new/src/scheduler/run-daily.mjs</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/Users/ian/Projects/jobs-new</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SCHEDULER_CONFIG_PATH</key>
+    <string>private/auggood-ingestion.json</string>
+  </dict>
+  <key>StartInterval</key>
+  <integer>14400</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>KeepAlive</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/Users/ian/Projects/jobs-new/private/logs/auggood-ingestion.stdout.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ian/Projects/jobs-new/private/logs/auggood-ingestion.stderr.log</string>
+</dict>
+</plist>

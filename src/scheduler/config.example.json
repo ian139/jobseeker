@@ -3,6 +3,7 @@
   "databasePath": "data/RealJobs.sqlite",
   "privateRoot": "private/artifacts",
   "flagPath": "scheduler/wake-omp.flag",
+  "minimumIntervalHours": 4,
   "sources": [
     {
       "source": "theirstack",

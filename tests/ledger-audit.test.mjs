@@ -463,7 +463,8 @@ test('accepts the declared answer-source precedence and rejects unknown sources'
   let ledger = createLedger(current);
   assert.deepEqual(ANSWER_SOURCES, [
     'memory',
-    'profile',
+    'profile_verified',
+    'profile_user_attested',
     'resume',
     'agent_inference',
     'user',

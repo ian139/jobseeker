@@ -6,6 +6,7 @@ import path from 'node:path';
 export const RUN_SCHEMA = 'phase1-run-v1';
 export const ANSWER_SCHEMA = 'phase1-answer-v2';
 export const LEGACY_ANSWER_SCHEMA = 'phase1-answer-v1';
+export const PROFILE_SCHEMA = 'phase1-profile-v2';
 export const BROWSER_MODE = 'headed';
 export const OBSERVER = 'playwright_dom_v1';
 export const ACTION_DRIVER = 'omp_browser';
@@ -19,14 +20,15 @@ export const RUN_FIXED_VALUES = Object.freeze({
 
 export const CONTRACT_SCHEMAS = Object.freeze({
     run: RUN_SCHEMA,
-    profile: 'phase1-profile-v1',
+    profile: PROFILE_SCHEMA,
     answer: ANSWER_SCHEMA,
 });
 
 
 export const ANSWER_SOURCES = Object.freeze([
     'memory',
-    'profile',
+    'profile_verified',
+    'profile_user_attested',
     'resume',
     'agent_inference',
     'user',
@@ -44,6 +46,7 @@ const MAX_INFERENCE_RATIONALE_LENGTH = 8192;
 const SHA256_HEX = /^[0-9a-f]{64}$/u;
 const INFERENCE_ENTRY_KEYS = new Set(['value', 'rationale', 'evidence']);
 const INFERENCE_EVIDENCE_KEYS = new Set(['resume_sha256', 'job_description_sha256']);
+export const PROFILE_INFERENCE_EVIDENCE_KEYS = new Set(['source_resume_sha256', 'job_description_sha256']);
 
 export const RUN_KEYS = Object.freeze([
     'schema',
@@ -626,7 +629,7 @@ export async function validateRunContractLocal(input) {
         } catch {
             fail('E_JSON_MALFORMED', 'applicant_profile_path');
         }
-        if (!isPlainObject(profile) || profile.schema !== 'phase1-profile-v1') {
+        if (!isPlainObject(profile) || profile.schema !== PROFILE_SCHEMA) {
             fail('E_RUN_PROFILE_SCHEMA', 'applicant_profile_path');
         }
         const { validateProfile } = await import('./profile.mjs');
@@ -691,6 +694,7 @@ export async function loadRunInputs(input) {
         sourceResumeIdentity = inputIdentity(run.source_resume_path, resumeBytes);
     }
     const resumeIdentity = await checkPdfIdentity(run.resume_upload_path);
+    validateInferenceBinding(profile, sourceResumeIdentity, jobDescriptionIdentity);
     const memory = await loadAnswerMemory(run.answer_memory_path);
     return Object.freeze({
         profile,
@@ -699,6 +703,28 @@ export async function loadRunInputs(input) {
         sourceResumeIdentity,
         jobDescriptionIdentity,
     });
+}
+
+function validateInferenceBinding(profile, sourceResumeIdentity, jobDescriptionIdentity) {
+    if (!isPlainObject(profile) || !isPlainObject(profile.inferred_facts)) {
+        return;
+    }
+    const aliases = Object.keys(profile.inferred_facts);
+    if (aliases.length === 0) {
+        return;
+    }
+    if (sourceResumeIdentity === null) {
+        fail('E_RUN_INFERENCE_UNBOUND', 'source_resume_path');
+    }
+    for (const alias of aliases) {
+        const entry = profile.inferred_facts[alias];
+        if (entry.evidence.source_resume_sha256 !== sourceResumeIdentity.sha256) {
+            fail('E_RUN_INFERENCE_EVIDENCE_MISMATCH', `inferred_facts.${alias}.evidence.source_resume_sha256`);
+        }
+        if (entry.evidence.job_description_sha256 !== jobDescriptionIdentity.sha256) {
+            fail('E_RUN_INFERENCE_EVIDENCE_MISMATCH', `inferred_facts.${alias}.evidence.job_description_sha256`);
+        }
+    }
 }
 
 function requireAlias(value, location) {
@@ -1266,50 +1292,73 @@ function semanticStatusValue(profile, alias) {
 
 
 
-function profileValue(profile, alias) {
+function tierCanonicalValue(tier, alias) {
     const segments = Object.hasOwn(PROFILE_CANONICAL_PATHS, alias)
         ? PROFILE_CANONICAL_PATHS[alias]
         : undefined;
     if (segments !== undefined) {
-        const canonical = ownPathValue(profile, segments);
+        const canonical = ownPathValue(tier, segments);
         if (canonical.found) {
             return canonical;
         }
     }
-    const relocation = canonicalRelocationValue(profile, alias);
+    const relocation = canonicalRelocationValue(tier, alias);
     if (relocation.found) {
         return relocation;
     }
-    const sponsorship = canonicalSponsorshipValue(profile, alias);
+    const sponsorship = canonicalSponsorshipValue(tier, alias);
     if (sponsorship.found) {
         return sponsorship;
     }
-    const link = canonicalLinkValue(profile, alias);
+    const link = canonicalLinkValue(tier, alias);
     if (link.found) {
         return link;
     }
-    const cityMatch = canonicalCityMatchValue(profile, alias);
+    const cityMatch = canonicalCityMatchValue(tier, alias);
     if (cityMatch.found) {
         return cityMatch;
     }
-    const employment = canonicalEmploymentValue(profile, alias);
+    const employment = canonicalEmploymentValue(tier, alias);
     if (employment.found) {
         return employment;
     }
-    const canonicalEducation = canonicalEducationValue(profile, alias);
-    if (canonicalEducation.found) {
-        return canonicalEducation;
-    }
-    const exact = candidateValue(profile, alias);
-    if (exact.found) {
-        return exact;
-    }
-    const semantic = semanticLinkValue(profile, alias);
+    return canonicalEducationValue(tier, alias);
+}
+
+function tierSemanticValue(tier, alias) {
+    const semantic = semanticLinkValue(tier, alias);
     if (semantic.found) {
         return semantic;
     }
-    const education = semanticEducationValue(profile, alias);
-    return education.found ? education : semanticStatusValue(profile, alias);
+    const education = semanticEducationValue(tier, alias);
+    return education.found ? education : semanticStatusValue(tier, alias);
+}
+
+function profileValue(profile, alias) {
+    if (!isPlainObject(profile)) {
+        return { found: false };
+    }
+    for (const [tier, source] of [
+        [profile.verified_facts, 'profile_verified'],
+        [profile.user_attested_facts, 'profile_user_attested'],
+    ]) {
+        if (!isPlainObject(tier)) {
+            continue;
+        }
+        const canonical = tierCanonicalValue(tier, alias);
+        if (canonical.found) {
+            return { found: true, value: canonical.value, source };
+        }
+        const exact = candidateValue(tier, alias);
+        if (exact.found) {
+            return { found: true, value: exact.value, source };
+        }
+        const semantic = tierSemanticValue(tier, alias);
+        if (semantic.found) {
+            return { found: true, value: semantic.value, source };
+        }
+    }
+    return { found: false };
 }
 
 function memoryValue(memory, alias) {
@@ -1340,22 +1389,52 @@ function memoryValue(memory, alias) {
     fail('E_ANSWER_MEMORY_SCHEMA', 'memory');
 }
 
-function exactPlainDataObject(value, keys, location) {
+function exactPlainDataObject(value, keys, location, code = 'E_ANSWER_INFERENCE_SCHEMA') {
     const object = requirePlainObject(value, location);
     const ownKeys = Reflect.ownKeys(object);
     if (ownKeys.length !== keys.size
         || ownKeys.some((key) => typeof key !== 'string' || !keys.has(key))) {
-        fail('E_ANSWER_INFERENCE_SCHEMA', location);
+        fail(code, location);
     }
     for (const key of keys) {
         const descriptor = Object.getOwnPropertyDescriptor(object, key);
         if (descriptor === undefined
             || descriptor.enumerable !== true
             || !Object.hasOwn(descriptor, 'value')) {
-            fail('E_ANSWER_INFERENCE_SCHEMA', `${location}.${key}`);
+            fail(code, `${location}.${key}`);
         }
     }
     return object;
+}
+
+export function validateInferenceEntry(input, location = '$', {
+    evidenceKeys = INFERENCE_EVIDENCE_KEYS,
+    schemaCode = 'E_ANSWER_INFERENCE_SCHEMA',
+    rationaleCode = 'E_ANSWER_INFERENCE_RATIONALE',
+    evidenceCode = 'E_ANSWER_INFERENCE_EVIDENCE',
+} = {}) {
+    const entry = exactPlainDataObject(input, INFERENCE_ENTRY_KEYS, location, schemaCode);
+    assertJsonValue(entry.value, `${location}.value`);
+    requireString(entry.rationale, rationaleCode, `${location}.rationale`, {
+        max: MAX_INFERENCE_RATIONALE_LENGTH,
+    });
+    if (entry.rationale.trim().length === 0) {
+        fail(rationaleCode, `${location}.rationale`);
+    }
+    const evidence = exactPlainDataObject(entry.evidence, evidenceKeys, `${location}.evidence`, schemaCode);
+    for (const key of evidenceKeys) {
+        requireString(evidence[key], evidenceCode, `${location}.evidence.${key}`, {
+            max: 64,
+        });
+        if (!SHA256_HEX.test(evidence[key])) {
+            fail(evidenceCode, `${location}.evidence.${key}`);
+        }
+    }
+    return {
+        value: entry.value,
+        rationale: entry.rationale,
+        evidence,
+    };
 }
 
 function inferenceValue(candidate, alias) {
@@ -1363,34 +1442,44 @@ function inferenceValue(candidate, alias) {
     if (!selected.found) {
         return selected;
     }
-    const location = `agent_inference.${alias}`;
-    const entry = exactPlainDataObject(selected.value, INFERENCE_ENTRY_KEYS, location);
-    assertJsonValue(entry.value, `${location}.value`);
-    requireString(entry.rationale, 'E_ANSWER_INFERENCE_RATIONALE', `${location}.rationale`, {
-        max: MAX_INFERENCE_RATIONALE_LENGTH,
-    });
-    if (entry.rationale.trim().length === 0) {
-        fail('E_ANSWER_INFERENCE_RATIONALE', `${location}.rationale`);
-    }
-    const evidence = exactPlainDataObject(
-        entry.evidence,
-        INFERENCE_EVIDENCE_KEYS,
-        `${location}.evidence`,
-    );
-    for (const key of INFERENCE_EVIDENCE_KEYS) {
-        requireString(evidence[key], 'E_ANSWER_INFERENCE_EVIDENCE', `${location}.evidence.${key}`, {
-            max: 64,
-        });
-        if (!SHA256_HEX.test(evidence[key])) {
-            fail('E_ANSWER_INFERENCE_EVIDENCE', `${location}.evidence.${key}`);
-        }
-    }
+    const entry = validateInferenceEntry(selected.value, `agent_inference.${alias}`);
     return {
         found: true,
         value: structuredClone(entry.value),
         inference_rationale_digest: crypto.createHash('sha256').update(entry.rationale, 'utf8').digest('hex'),
-        inference_evidence_digests: structuredClone(evidence),
+        inference_evidence_digests: structuredClone(entry.evidence),
     };
+}
+
+function storedInferenceValue(profile, alias) {
+    if (!isPlainObject(profile) || !isPlainObject(profile.inferred_facts)) {
+        return { found: false };
+    }
+    if (!Object.hasOwn(profile.inferred_facts, alias)) {
+        return { found: false };
+    }
+    const entry = validateInferenceEntry(profile.inferred_facts[alias], `inferred_facts.${alias}`, {
+        evidenceKeys: PROFILE_INFERENCE_EVIDENCE_KEYS,
+        schemaCode: 'E_PROFILE_INFERENCE_SCHEMA',
+        rationaleCode: 'E_PROFILE_INFERENCE_RATIONALE',
+        evidenceCode: 'E_PROFILE_INFERENCE_EVIDENCE',
+    });
+    return {
+        found: true,
+        value: structuredClone(entry.value),
+        inference_rationale_digest: crypto.createHash('sha256').update(entry.rationale, 'utf8').digest('hex'),
+        inference_evidence_digests: {
+            resume_sha256: entry.evidence.source_resume_sha256,
+            job_description_sha256: entry.evidence.job_description_sha256,
+        },
+    };
+}
+
+function isUnknownAlias(profile, alias, profileAlias) {
+    if (!isPlainObject(profile) || !Array.isArray(profile.unknowns)) {
+        return false;
+    }
+    return profile.unknowns.includes(alias) || profile.unknowns.includes(profileAlias);
 }
 
 export function resolveAnswer({
@@ -1402,30 +1491,58 @@ export function resolveAnswer({
     agentInference = undefined,
     agent_inference = undefined,
     user = undefined,
+    allowInference = true,
 } = {}) {
     requireAlias(alias, 'alias');
     requireAlias(profileAlias, 'profileAlias');
-    const candidates = [
-        { source: 'memory', candidate: memoryValue(memory, alias) },
-        { source: 'profile', candidate: profileValue(profile, profileAlias) },
-        { source: 'resume', candidate: candidateValue(resume, alias) },
-    ];
-    for (const { source, candidate } of candidates) {
-        if (candidate.found) {
-            return { alias, source, value: structuredClone(candidate.value), missing: false };
-        }
+
+    const memoryCandidate = memoryValue(memory, alias);
+    if (memoryCandidate.found) {
+        return { alias, source: 'memory', value: structuredClone(memoryCandidate.value), missing: false };
     }
 
-    const inference = inferenceValue(agentInference ?? agent_inference, alias);
-    if (inference.found) {
-        return {
-            alias,
-            source: 'agent_inference',
-            value: inference.value,
-            missing: false,
-            inference_rationale_digest: inference.inference_rationale_digest,
-            inference_evidence_digests: inference.inference_evidence_digests,
-        };
+    const unknown = isUnknownAlias(profile, alias, profileAlias);
+    if (!unknown) {
+        const profileCandidate = profileValue(profile, profileAlias);
+        if (profileCandidate.found) {
+            return {
+                alias,
+                source: profileCandidate.source,
+                value: structuredClone(profileCandidate.value),
+                missing: false,
+            };
+        }
+
+        const resumeCandidate = candidateValue(resume, alias);
+        if (resumeCandidate.found) {
+            return { alias, source: 'resume', value: structuredClone(resumeCandidate.value), missing: false };
+        }
+
+        if (allowInference) {
+            const storedInference = storedInferenceValue(profile, profileAlias);
+            if (storedInference.found) {
+                return {
+                    alias,
+                    source: 'agent_inference',
+                    value: storedInference.value,
+                    missing: false,
+                    inference_rationale_digest: storedInference.inference_rationale_digest,
+                    inference_evidence_digests: storedInference.inference_evidence_digests,
+                };
+            }
+
+            const inference = inferenceValue(agentInference ?? agent_inference, alias);
+            if (inference.found) {
+                return {
+                    alias,
+                    source: 'agent_inference',
+                    value: inference.value,
+                    missing: false,
+                    inference_rationale_digest: inference.inference_rationale_digest,
+                    inference_evidence_digests: inference.inference_evidence_digests,
+                };
+            }
+        }
     }
 
     const userCandidate = candidateValue(user, alias);

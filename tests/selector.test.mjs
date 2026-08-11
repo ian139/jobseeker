@@ -85,12 +85,13 @@ test('classifies explicit, protected, subjective, qualification, and conservativ
   assert.equal(classifyFieldPolicy({ label: 'Years of programming experience' }), 'qualification');
   assert.deepEqual(ANSWER_SOURCES_BY_POLICY.subjective, [
     'memory',
-    'profile',
+    'profile_verified',
+    'profile_user_attested',
     'resume',
     'agent_inference',
     'user',
   ]);
-  assert.deepEqual(ANSWER_SOURCES_BY_POLICY.legal, ['memory', 'profile', 'resume', 'user']);
+  assert.deepEqual(ANSWER_SOURCES_BY_POLICY.legal, ['memory', 'profile_verified', 'profile_user_attested', 'resume', 'user']);
 });
 
 test('batches only independent ordinary fields', () => {

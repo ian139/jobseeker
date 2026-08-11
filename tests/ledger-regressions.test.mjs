@@ -468,7 +468,8 @@ test('requires typed upload proof and rejects injection, ordinary overrides, and
 test('requires UI-backed deliberate blanks and excludes job wording evidence', () => {
   assert.deepEqual(ANSWER_SOURCES, [
     'memory',
-    'profile',
+    'profile_verified',
+    'profile_user_attested',
     'resume',
     'agent_inference',
     'user',
@@ -528,7 +529,7 @@ test('requires UI-backed deliberate blanks and excludes job wording evidence', (
     field_id: 'optional-select',
     observation_id: 'obs-1',
     ref: 'ref-optional-select',
-    source: 'profile',
+    source: 'profile_verified',
     value_digest: null,
     semantic_choice: 'not_applicable',
   });
@@ -611,7 +612,7 @@ test('requires valid agent inference metadata and clears it on sensitive reclass
   }
 
   assert.throws(
-    () => recordResolution(ledger, resolution('inferred', { source: 'profile' })),
+    () => recordResolution(ledger, resolution('inferred', { source: 'profile_verified' })),
     /inference metadata is restricted to agent_inference/i,
   );
 
@@ -675,14 +676,14 @@ test('requires observer-normalized checkbox validity and rejects custom errors',
       field_id: 'source-a',
       observation_id: current.observation_id,
       ref: current.controls[0].ref,
-      source: 'profile',
+      source: 'profile_verified',
       value_digest: digestPrivateValue(true),
     });
     return recordResolution(ledger, {
       field_id: 'source-b',
       observation_id: current.observation_id,
       ref: current.controls[1].ref,
-      source: 'profile',
+      source: 'profile_verified',
       value_digest: null,
       semantic_choice: 'none',
     });

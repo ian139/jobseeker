@@ -99,8 +99,10 @@ function createHarness(t, answers = {}) {
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const jobPath = privateFile(root, 'job.txt', 'Synthetic job description.');
   const profilePath = privateFile(root, 'profile.json', JSON.stringify({
-    schema: 'phase1-profile-v1',
-    answers,
+    schema: 'phase1-profile-v2',
+    verified_facts: {
+      answers,
+    },
   }));
   const uploadPath = privateFile(root, 'resume.pdf', '%PDF-1.7\nsynthetic');
   const memoryDir = path.join(root, 'memory');
@@ -131,8 +133,8 @@ function decision(observationId, fieldId, proposedAnswer, proposedAction = 'fill
     controlReference: `control-${fieldId}`,
     fieldPolicy: 'qualification',
     proposedAnswer,
-    answerSource: 'profile',
-    evidenceReferences: [`profile:${fieldId}`],
+    answerSource: 'profile_verified',
+    evidenceReferences: [`profile_verified:${fieldId}`],
     inferenceRationaleDigest: null,
     inferenceEvidenceDigests: null,
     proposedAction,

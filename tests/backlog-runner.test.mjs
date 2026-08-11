@@ -146,7 +146,7 @@ SET platform = 'greenhouse',
 }
 
 function profileValue() {
-  return JSON.stringify({ schema: 'phase1-profile-v1' });
+  return JSON.stringify({ schema: 'phase1-profile-v2' });
 }
 
 async function privateInput(filePath, contents) {
@@ -964,7 +964,7 @@ test('workspace keeps contract and evidence private and distinct', async () => {
     assert.equal(Object.hasOwn(contract, 'description'), false);
     assert.equal(Object.hasOwn(contract, 'applicant_name'), false);
     assert.equal((await fsp.readFile(workspace.contractPath, 'utf8')).includes('fixture job description'), false);
-    assert.equal((await fsp.readFile(workspace.contractPath, 'utf8')).includes('phase1-profile-v1'), false);
+    assert.equal((await fsp.readFile(workspace.contractPath, 'utf8')).includes('phase1-profile-v2'), false);
     const snapshot = JSON.parse(await fsp.readFile(workspace.jobSnapshotPath, 'utf8'));
     assert.equal(snapshot.job_title, run.jobTitle);
     assert.equal(snapshot.job_company, run.jobCompany);

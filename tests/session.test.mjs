@@ -133,8 +133,10 @@ function createHarness(t, { answers = {}, profile = null, sourceResume = null } 
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
 
   const profileInput = profile ?? {
-    schema: 'phase1-profile-v1',
-    answers,
+    schema: 'phase1-profile-v2',
+    verified_facts: {
+      answers,
+    },
   };
   const jobDescription = 'Synthetic job description.';
   const jobPath = privateFile(root, 'job.txt', jobDescription);
@@ -239,8 +241,8 @@ function plannedFillDecision(current, fieldId, value) {
     controlReference: `control-${fieldId}`,
     fieldPolicy: 'qualification',
     proposedAnswer: value,
-    answerSource: 'profile',
-    evidenceReferences: [`profile:${fieldId}`],
+    answerSource: 'profile_verified',
+    evidenceReferences: [`profile_verified:${fieldId}`],
     inferenceRationaleDigest: null,
     inferenceEvidenceDigests: null,
     proposedAction: 'fill_text',
@@ -593,10 +595,12 @@ test('fresh committed upload result records a succeeded ledger proof after helpe
 test('routine contact aliases resolve canonical private profile values', async (t) => {
   const harness = createHarness(t, {
     profile: {
-      schema: 'phase1-profile-v1',
-      contact: {
-        email: 'fixture@example.test',
-        phone: '555-0100',
+      schema: 'phase1-profile-v2',
+      verified_facts: {
+        contact: {
+          email: 'fixture@example.test',
+          phone: '555-0100',
+        },
       },
     },
   });
@@ -609,18 +613,20 @@ test('routine contact aliases resolve canonical private profile values', async (
 
   const email = await resolveField(session, { field_id: 'email', alias: 'E-mail' });
   const mobile = await resolveField(session, { field_id: 'mobile', alias: 'Mobile' });
-  assert.equal(email.answer.source, 'profile');
+  assert.equal(email.answer.source, 'profile_verified');
   assert.equal(email.answer.value, 'fixture@example.test');
-  assert.equal(mobile.answer.source, 'profile');
+  assert.equal(mobile.answer.source, 'profile_verified');
   assert.equal(mobile.answer.value, '555-0100');
 });
 
 test('coordinator uses the sensitive structured country resolution contract', async (t) => {
   const harness = createHarness(t, {
     profile: {
-      schema: 'phase1-profile-v1',
-      address: { country: 'Structured Country' },
-      answers: { 'profile.address.country': 'Conflicting Alias Country' },
+      schema: 'phase1-profile-v2',
+      verified_facts: {
+        address: { country: 'Structured Country' },
+        answers: { 'profile.address.country': 'Conflicting Alias Country' },
+      },
     },
   });
   const { run, runPath } = harness.runFor('structured-country');
@@ -632,7 +638,7 @@ test('coordinator uses the sensitive structured country resolution contract', as
     alias: 'profile.address.country',
     sensitive: true,
   });
-  assert.equal(resolution.answer.source, 'profile');
+  assert.equal(resolution.answer.source, 'profile_verified');
   assert.equal(resolution.answer.value, 'Structured Country');
   assert.equal(
     resolution.ledger.fields.find((field) => field.field_id === 'country').sensitive,
@@ -651,14 +657,16 @@ test('coordinator uses the sensitive structured country resolution contract', as
 test('numeric profile answers retain canonical salary and GPA DOM values', async (t) => {
   const harness = createHarness(t, {
     profile: {
-      schema: 'phase1-profile-v1',
-      compensation: { currency: 'USD', target: 120000, period: 'year' },
-      education: [{
-        institution: 'Example University',
-        level: 'college',
-        gpa: 3.8,
-        current: true,
-      }],
+      schema: 'phase1-profile-v2',
+      verified_facts: {
+        compensation: { currency: 'USD', target: 120000, period: 'year' },
+        education: [{
+          institution: 'Example University',
+          level: 'college',
+          gpa: 3.8,
+          current: true,
+        }],
+      },
     },
   });
   const { run, runPath } = harness.runFor('numeric-profile-values');
@@ -680,7 +688,7 @@ test('numeric profile answers retain canonical salary and GPA DOM values', async
     alias: 'What salary do you require?',
     sensitive: true,
   });
-  assert.equal(salary.answer.source, 'profile');
+  assert.equal(salary.answer.source, 'profile_verified');
   assert.equal(salary.answer.value, 120000);
   await recordAction(session, { action: 'fill', field_id: 'salary', outcome: 'succeeded' });
   await acceptObservation(
@@ -695,7 +703,7 @@ test('numeric profile answers retain canonical salary and GPA DOM values', async
     alias: 'College GPA',
     sensitive: true,
   });
-  assert.equal(gpa.answer.source, 'profile');
+  assert.equal(gpa.answer.source, 'profile_verified');
   assert.equal(gpa.answer.value, 3.8);
   await recordAction(session, { action: 'fill', field_id: 'gpa', outcome: 'succeeded' });
   await acceptObservation(
@@ -759,6 +767,94 @@ test('sensitive country excludes both resume and agent inference', async (t) => 
     ]),
   );
   await finalizeRetained(session, harness.screenshotPath);
+});
+
+test('stored profile inference records through the ledger with canonical evidence digests', async (t) => {
+  const sourceResume = 'Synthetic stored inference source resume.';
+  const sourceSha256 = crypto.createHash('sha256').update(sourceResume).digest('hex');
+  const jobSha256 = crypto.createHash('sha256').update('Synthetic job description.').digest('hex');
+  const harness = createHarness(t, {
+    sourceResume,
+    profile: {
+      schema: 'phase1-profile-v2',
+      inferred_facts: {
+        field: {
+          value: 'Stored derived answer',
+          rationale: 'Grounded in the verified source resume and job description.',
+          evidence: {
+            source_resume_sha256: sourceSha256,
+            job_description_sha256: jobSha256,
+          },
+        },
+      },
+    },
+  });
+  const { run, runPath } = harness.runFor('stored-inference');
+  const session = await startRun(runPath, {
+    startedAt: '2026-07-25T08:00:00.000Z',
+  });
+  await acceptObservation(session, observation(run.application_url, 1, [fieldControl('field')]));
+  const resolved = await resolveField(session, { field_id: 'field', alias: 'field' });
+  assert.equal(resolved.answer.source, 'agent_inference');
+  assert.equal(resolved.answer.value, 'Stored derived answer');
+  assert.deepEqual(resolved.answer.inference_evidence_digests, {
+    resume_sha256: sourceSha256,
+    job_description_sha256: jobSha256,
+  });
+  const field = resolved.ledger.fields.find((item) => item.field_id === 'field');
+  assert.equal(field.answer_state, 'answered');
+  assert.equal(field.answer_source, 'agent_inference');
+  assert.equal(field.value_digest, digestPrivateValue('Stored derived answer'));
+  assert.equal(field.inference_rationale_digest, resolved.answer.inference_rationale_digest);
+  assert.deepEqual(field.inference_evidence_digests, resolved.answer.inference_evidence_digests);
+  assert.equal(Object.hasOwn(field, 'rationale'), false);
+});
+
+test('sensitive stored inference falls through to explicit user or missing', async (t) => {
+  const sourceResume = 'Synthetic stored inference source resume.';
+  const sourceSha256 = crypto.createHash('sha256').update(sourceResume).digest('hex');
+  const jobSha256 = crypto.createHash('sha256').update('Synthetic job description.').digest('hex');
+  const harness = createHarness(t, {
+    sourceResume,
+    profile: {
+      schema: 'phase1-profile-v2',
+      inferred_facts: {
+        work_authorization: {
+          value: 'Stored inferred authorization',
+          rationale: 'Grounded in the verified source resume and job description.',
+          evidence: {
+            source_resume_sha256: sourceSha256,
+            job_description_sha256: jobSha256,
+          },
+        },
+      },
+    },
+  });
+  const { run, runPath } = harness.runFor('sensitive-stored-inference');
+  const session = await startRun(runPath, {
+    startedAt: '2026-07-25T08:00:00.000Z',
+  });
+  await acceptObservation(session, observation(run.application_url, 1, [fieldControl('work_authorization')]));
+  const missing = await resolveField(session, {
+    field_id: 'work_authorization',
+    alias: 'work_authorization',
+  });
+  assert.equal(missing.missing, true);
+  const unresolved = missing.ledger.fields.find((item) => item.field_id === 'work_authorization');
+  assert.equal(unresolved.sensitive, true);
+  assert.equal(unresolved.answer_state, 'unresolved');
+  assert.equal(unresolved.answer_source, null);
+  assert.equal(unresolved.value_digest, null);
+  assert.equal(unresolved.inference_rationale_digest, null);
+  assert.equal(unresolved.inference_evidence_digests, null);
+
+  const explicit = await resolveField(session, {
+    field_id: 'work_authorization',
+    alias: 'work_authorization',
+    user: { answers: { work_authorization: 'Explicit user answer' } },
+  });
+  assert.equal(explicit.answer.source, 'user');
+  assert.equal(explicit.answer.value, 'Explicit user answer');
 });
 
 test('agent inference rejects per-answer evidence mismatched to envelope hashes', async (t) => {
@@ -828,7 +924,7 @@ test('coordinator enforces observe-act-reobserve and final submission authorizat
 
   await acceptObservation(session, observation(run.application_url, 1, [fieldControl('field')]));
   const resolved = await resolveField(session, { field_id: 'field', alias: 'field' });
-  assert.equal(resolved.answer.source, 'profile');
+  assert.equal(resolved.answer.source, 'profile_verified');
   await assert.rejects(
     recordAction(session, { action: 'final_submit', outcome: 'attempted' }),
     /must use beginFinalSubmit/,
@@ -932,7 +1028,7 @@ test('prepareSubmission authorizes final_submit', async (t) => {
 
   await acceptObservation(session, observation(run.application_url, 1, [fieldControl('field')]));
   const resolved = await resolveField(session, { field_id: 'field', alias: 'field' });
-  assert.equal(resolved.answer.source, 'profile');
+  assert.equal(resolved.answer.source, 'profile_verified');
   await recordAction(session, { action: 'fill', field_id: 'field', outcome: 'succeeded' });
   await acceptObservation(
     session,
@@ -1388,8 +1484,8 @@ function plannedSelectDecision(current, fieldId, value) {
     controlReference: `control-${fieldId}`,
     fieldPolicy: 'qualification',
     proposedAnswer: value,
-    answerSource: 'profile',
-    evidenceReferences: [`profile:${fieldId}`],
+    answerSource: 'profile_verified',
+    evidenceReferences: [`profile_verified:${fieldId}`],
     inferenceRationaleDigest: null,
     inferenceEvidenceDigests: null,
     proposedAction: 'select_option',

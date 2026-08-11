@@ -9,13 +9,14 @@ const FIELD_POLICY_VALUES = Object.freeze([
 
 const ANSWER_SOURCES = Object.freeze([
   'memory',
-  'profile',
+  'profile_verified',
+  'profile_user_attested',
   'resume',
   'agent_inference',
   'user',
 ]);
 const SUBJECTIVE_ANSWER_SOURCES = ANSWER_SOURCES;
-const PROTECTED_ANSWER_SOURCES = Object.freeze(['memory', 'profile', 'resume', 'user']);
+const PROTECTED_ANSWER_SOURCES = Object.freeze(['memory', 'profile_verified', 'profile_user_attested', 'resume', 'user']);
 const RESUME_ANSWER_SOURCES = Object.freeze(['resume']);
 const ANSWER_SOURCE_SET = new Set(ANSWER_SOURCES);
 const NORMALIZED_ACTIONS = Object.freeze([

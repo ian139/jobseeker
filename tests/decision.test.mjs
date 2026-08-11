@@ -63,7 +63,7 @@ test('schema and runtime expose the same canonical vocabularies', async () => {
     'resumeSha256',
     'jobDescriptionSha256',
   ]);
-  assert.deepEqual(ANSWER_SOURCES, ['memory', 'profile', 'resume', 'agent_inference', 'user']);
+  assert.deepEqual(ANSWER_SOURCES, ['memory', 'profile_verified', 'profile_user_attested', 'resume', 'agent_inference', 'user']);
   assert.equal(Object.isFrozen(ANSWER_SOURCES), true);
   assert.equal(Object.isFrozen(FIELD_POLICIES), true);
   assert.equal(Object.isFrozen(PROPOSED_ACTIONS), true);
@@ -77,10 +77,11 @@ test('valid source-backed decision passes without mutation', () => {
   assert.notEqual(output, input);
 });
 
-test('all five canonical sources validate without a second source selector', () => {
+test('all six canonical sources validate without a second source selector', () => {
   const sourceBacked = [
     ['memory', ['memory:answer-1']],
-    ['profile', ['profile:answer-1']],
+    ['profile_verified', ['profile_verified:answer-1']],
+    ['profile_user_attested', ['profile_user_attested:answer-1']],
     ['resume', ['resume:answer-1']],
   ];
   for (const [answerSource, evidenceReferences] of sourceBacked) {
@@ -191,13 +192,13 @@ test('source evidence and non-inference metadata constraints are enforced', () =
 test('select options require current option membership and compatible controls', () => {
   const select = decision({
     proposedAnswer: 'Remote',
-    answerSource: 'profile',
-    evidenceReferences: ['profile:answer-1'],
+    answerSource: 'profile_verified',
+    evidenceReferences: ['profile_verified:answer-1'],
     proposedAction: 'select_option',
     expectedRetainedState: 'Remote',
   });
   assert.equal(validateApplicationDecision(select, context({
-    allowedSources: ['profile'],
+    allowedSources: ['profile_verified'],
     allowedActions: ['select_option'],
     currentControl: {
       kind: 'select',
@@ -208,7 +209,7 @@ test('select options require current option membership and compatible controls',
   })).proposedAnswer, 'Remote');
   assert.throws(
     () => validateApplicationDecision(select, context({
-      allowedSources: ['profile'],
+      allowedSources: ['profile_verified'],
       allowedActions: ['select_option'],
       currentControl: {
         kind: 'select',

@@ -123,7 +123,7 @@
         "controlReference": { "oneOf": [{ "$ref": "#/$defs/identifier" }, { "type": "null" }] },
         "fieldPolicy": { "enum": ["subjective", "qualification", "legal", "demographic", "identity", "hard_fact"] },
         "proposedAnswer": { "$ref": "#/$defs/jsonValue" },
-        "answerSource": { "enum": ["memory", "profile", "resume", "agent_inference", "user"] },
+        "answerSource": { "enum": ["memory", "profile_verified", "profile_user_attested", "resume", "agent_inference", "user"] },
         "evidenceReferences": {
           "type": "array",
           "maxItems": 64,

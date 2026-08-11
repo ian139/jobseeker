@@ -1,6 +1,6 @@
 const SUPPORTED_PLATFORMS = Object.freeze(['greenhouse', 'ashby', 'employer_hosted']);
 const SUPPORTED_PLATFORM_SET = new Set(SUPPORTED_PLATFORMS);
-const ANSWER_SOURCES = new Set(['memory', 'profile', 'resume', 'agent_inference', 'user']);
+const ANSWER_SOURCES = new Set(['memory', 'profile_verified', 'profile_user_attested', 'resume', 'agent_inference', 'user']);
 const CANDIDATE_CLASSES = new Set(['field', 'non_final_navigation', 'final_candidate', 'unknown']);
 const TEXT_INPUT_TYPES = new Set(['text', 'email', 'tel', 'url', 'number', 'date', 'password']);
 const NON_TEXT_INPUT_TYPES = new Set(['radio', 'checkbox', 'select', 'file', 'submit', 'button']);

@@ -470,9 +470,9 @@ test('plans Greenhouse controls from observer snake_case fields with distinct me
     }),
   ];
   const input = planInput('greenhouse', 'gh-observation-1', controls, {
-    'gh-name': answer('profile', 'Avery Applicant'),
+    'gh-name': answer('profile_verified', 'Avery Applicant'),
     'gh-resume': answer('resume', RESUME_UPLOAD_PATH),
-    'gh-country': answer('profile', 'United States'),
+    'gh-country': answer('profile_verified', 'United States'),
     'gh-authorization': answer('memory', 'Yes'),
   });
   const before = structuredClone(input);
@@ -491,7 +491,7 @@ test('plans Greenhouse controls from observer snake_case fields with distinct me
       operation: 'fill_text',
       mechanic: 'greenhouse_native_input',
       value: 'Avery Applicant',
-      source: 'profile',
+      source: 'profile_verified',
       controlReference: 'gh-ref-name',
     },
     {
@@ -507,7 +507,7 @@ test('plans Greenhouse controls from observer snake_case fields with distinct me
       operation: 'select_option',
       mechanic: 'greenhouse_native_select',
       value: 'US',
-      source: 'profile',
+      source: 'profile_verified',
       controlReference: 'gh-ref-country',
     },
     {
@@ -564,7 +564,7 @@ test('plans Ashby controls from observer snake_case fields with distinct mechani
     }),
   ];
   const input = planInput('ashby', 'ashby-observation-1', controls, {
-    'ashby-name': answer('profile', 'Avery Applicant'),
+    'ashby-name': answer('profile_verified', 'Avery Applicant'),
     'ashby-resume': answer('resume', RESUME_UPLOAD_PATH),
     'ashby-location': answer('memory', 'Remote'),
     'ashby-authorization': answer('memory', 'Yes'),
@@ -583,7 +583,7 @@ test('plans Ashby controls from observer snake_case fields with distinct mechani
       operation: 'fill_text',
       mechanic: 'ashby_native_input',
       value: 'Avery Applicant',
-      source: 'profile',
+      source: 'profile_verified',
       controlReference: 'ashby-ref-name',
     },
     {
@@ -630,7 +630,7 @@ test('reports unavailable controls without acting and rejects mismatched readonl
       enabled: false,
       disabled: true,
     })],
-    { 'gh-disabled': answer('profile', 'Avery Applicant') },
+    { 'gh-disabled': answer('profile_verified', 'Avery Applicant') },
   ));
   assert.deepEqual(unavailable.actions, []);
   assert.deepEqual(unavailable.unresolved, [
@@ -645,7 +645,7 @@ test('reports unavailable controls without acting and rejects mismatched readonl
       value: 'Observed value',
       value_present: true,
     })],
-    { 'ashby-readonly': answer('profile', 'Different value') },
+    { 'ashby-readonly': answer('profile_verified', 'Different value') },
   );
   assert.throws(
     () => planPlatformApplication(readonlyInput),
@@ -715,8 +715,8 @@ test('plans custom Greenhouse choices and checkbox transitions without redundant
     controls,
     {
       'gh-team': answer('memory', 'Engineering'),
-      'gh-consent': answer('profile', 'Yes'),
-      'gh-retained-consent': answer('profile', 'Yes'),
+      'gh-consent': answer('profile_verified', 'Yes'),
+      'gh-retained-consent': answer('profile_verified', 'Yes'),
     },
   ));
 
@@ -734,7 +734,7 @@ test('plans custom Greenhouse choices and checkbox transitions without redundant
       operation: 'toggle',
       mechanic: 'greenhouse_native_checkbox',
       value: true,
-      source: 'profile',
+      source: 'profile_verified',
       controlReference: 'gh-ref-consent',
     },
   ]);
@@ -755,7 +755,7 @@ test('plans employer-hosted controls and leaves unknown widgets unresolved', () 
       }),
     ],
     {
-      'employer-name': answer('profile', 'Avery Applicant'),
+      'employer-name': answer('profile_verified', 'Avery Applicant'),
       'employer-widget': answer('memory', 'Exact value'),
     },
     {
@@ -772,7 +772,7 @@ test('plans employer-hosted controls and leaves unknown widgets unresolved', () 
     operation: 'fill_text',
     mechanic: 'employer_hosted_native_input',
     value: 'Avery Applicant',
-    source: 'profile',
+    source: 'profile_verified',
     controlReference: 'employer-ref-name',
   }]);
   assert.deepEqual(plan.unresolved, [{
@@ -787,7 +787,7 @@ test('reclassifies an employer redirect before selecting platform mechanics', ()
     'employer_hosted',
     'redirect-observation-1',
     [observerControl('redirect-name', 'redirect-ref-name')],
-    { 'redirect-name': answer('profile', 'Avery Applicant') },
+    { 'redirect-name': answer('profile_verified', 'Avery Applicant') },
     {
       applicationUrl: EMPLOYER_HOSTED_URL,
       applicationHost: EMPLOYER_HOST,

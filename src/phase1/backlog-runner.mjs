@@ -130,7 +130,8 @@ const SAFE_ACTION_OUTCOMES = new Set([
 
 const SAFE_ACTION_SOURCES = new Set([
   'memory',
-  'profile',
+  'profile_verified',
+  'profile_user_attested',
   'resume',
   'agent_inference',
   'user',

@@ -36,8 +36,8 @@ Success is one `generated-resume-v1` JSON object with exact keys `schema`, `job_
 
 1. Load and fingerprint `resume/SKILL.md` on every generation. Its digest is part of the immutable generation identity.
 2. Ground every selected claim in `private/resume/profile.json`. Job text supplies relevance only, never applicant facts.
-3. Preserve `resume/Resume.tex` structure, typography, margins, sections, and markers.
-4. Compile and inspect the actual PDF. Require exactly one page with extractable text.
+3. Preserve `resume/Resume.tex` structure, typography, margins, sections, and markers, including the guide-style `\resumeRoleContext`, `\resumeGroupHeading`, and `\resumeTechLine` commands.
+4. Compile and inspect the actual PDF. Require one to two pages with extractable text.
 5. Publish exactly five owner-private files in the fingerprinted artifact directory:
    - `resume.tex`
    - `resume.pdf`

@@ -505,7 +505,7 @@ FROM application_jobs WHERE status = 'queued' ORDER BY id;
     '# Resume Generation Skill\n\nVersion: 1\n\n## Source-of-truth policy\n\nUse only source-backed claims.\n\n## Output invariants\n\nGenerate exactly one page.\n',
   );
   await privateFile(sourceResumePath, '%PDF-1.7\nsynthetic source resume\n');
-  await privateFile(applicantProfilePath, JSON.stringify({ schema: 'phase1-profile-v1' }));
+  await privateFile(applicantProfilePath, JSON.stringify({ schema: 'phase1-profile-v2' }));
   await privateFile(seedDescriptionPath, 'synthetic preflight description');
   await privateFile(seedResumePath, '%PDF-1.7\nsynthetic preflight resume\n');
   await privateFile(counterPath, '0');
@@ -819,7 +819,7 @@ WHERE id IN (${ingested.ids.join(', ')});
     '# Resume Generation Skill\n\nVersion: 1\n\n## Source-of-truth policy\n\nUse only source-backed claims.\n\n## Output invariants\n\nGenerate exactly one page.\n',
   );
   await privateFile(sourceResumePath, '%PDF-1.7\nsynthetic source resume\n');
-  await privateFile(applicantProfilePath, JSON.stringify({ schema: 'phase1-profile-v1' }));
+  await privateFile(applicantProfilePath, JSON.stringify({ schema: 'phase1-profile-v2' }));
   await privateFile(counterPath, '0');
   const approvalContext = {
     run_contract_sha256: 'a'.repeat(64),

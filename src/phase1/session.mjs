@@ -39,7 +39,7 @@ import {
 import { normalizeGreenhouseObservation } from './greenhouse-observation.mjs';
 
 const SESSION_STATES = new WeakMap();
-const DELIBERATE_BLANK_SOURCES = new Set(['memory', 'profile', 'agent_inference', 'user']);
+const DELIBERATE_BLANK_SOURCES = new Set(['memory', 'profile_verified', 'profile_user_attested', 'agent_inference', 'user']);
 const FINAL_SUBMIT_TERMINAL_OUTCOMES = new Set(['succeeded', 'failed', 'blocked']);
 const MAX_FORMATTED_VALUE_LENGTH = 4096;
 
@@ -975,7 +975,7 @@ export async function resolveField(session, options) {
       : state.ledger;
     const workingField = workingLedger.fields.find((item) => item.field_id === field.field_id);
     const sensitive = workingField.sensitive === true;
-    const allowAgentInference = !sensitive || deliberateBlank;
+    const allowInference = !sensitive || deliberateBlank;
     const approvalContext = {
       run_contract_sha256: state.runMetadata.run_contract_sha256,
       observation_id: workingLedger.latest_observation_id,
@@ -1003,7 +1003,8 @@ export async function resolveField(session, options) {
       memory: state.memory,
       profile: state.profile ?? undefined,
       resume: sensitive ? undefined : state.resume,
-      agentInference: allowAgentInference ? state.agentInference : undefined,
+      allowInference,
+      agentInference: allowInference ? state.agentInference : undefined,
       user: input.user,
     });
     if (answer.missing && input.formatted_value !== undefined) {
@@ -1024,7 +1025,7 @@ export async function resolveField(session, options) {
       return Object.freeze({ missing: true, answer, ledger: workingLedger, ledgerRef });
     }
     if (deliberateBlank && !DELIBERATE_BLANK_SOURCES.has(answer.source)) {
-      throw new TypeError('deliberate blanks require memory, profile, evidence-backed agent inference, or user evidence');
+      throw new TypeError('deliberate blanks require memory, profile_verified, profile_user_attested, evidence-backed agent inference, or user evidence');
     }
     if (remember && answer.source !== 'user') {
       throw new TypeError('remembered answers require user as the selected answer source');

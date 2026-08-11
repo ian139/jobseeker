@@ -1,7 +1,7 @@
 """Strict, deterministic resume generation for queued jobs.
 
 This module owns structured-profile validation, evidence-grounded optimization,
-LaTeX rendering, bounded compilation, one-page fitting, and private artifact
+LaTeX rendering, bounded compilation, two-page fitting, and private artifact
 publication.  It deliberately does not access the database or submit jobs.
 """
 
@@ -37,7 +37,7 @@ __all__ = [
 
 # These limits apply before parsing and before subprocess invocation.  They are
 # intentionally conservative because profile and job data are user-controlled.
-_GENERATOR_SCHEMA_VERSION = "resume-generator-v4"
+_GENERATOR_SCHEMA_VERSION = "resume-generator-v5"
 _PROFILE_SCHEMA_VERSION = 1
 _MAX_PROFILE_BYTES = 256 * 1024
 _MAX_TEMPLATE_BYTES = 512 * 1024
@@ -65,12 +65,14 @@ _MAX_LEADERSHIP = 2
 _MAX_SKILLS = 20
 _MIN_SKILLS_LINE_CHARS = 90
 _MAX_EXPANSION_ATTEMPTS = 64
+_MAX_PAGES = 2
 
 _ALGORITHM_DESCRIPTOR = (
     "title-first-requirements-field-selection-v4|source-backed-claims|graduation-render-v2|"
-    "experience-first-fill-v2|tectonic-pdflatex-bounded-argv-v1|"
-    "private-five-artifact-cache-v3|strict-profile-v2-coursework-expansion-v2-advisory-cache-v1|"
-    "authoritative-resume-skill-v2"
+    "experience-first-fill-v2|guide-role-metadata-v1|two-page-fitting-v1|"
+    "tectonic-pdflatex-bounded-argv-v1|private-five-artifact-cache-v3|"
+    "strict-profile-v2-coursework-expansion-v2-advisory-cache-v1|"
+    "authoritative-resume-skill-v2|contiguous-group-rendering-v1|seeded-ordered-single-line-skills-v1"
 )
 _ALGORITHM_SHA256 = hashlib.sha256(_ALGORITHM_DESCRIPTOR.encode("ascii")).hexdigest()
 
@@ -233,6 +235,7 @@ class _Bullet:
     keywords: tuple[str, ...]
     sources: tuple[str, ...]
     verification: str | None = None
+    group: str | None = None
 
 
 @dataclass(frozen=True)
@@ -245,6 +248,8 @@ class _ExperienceEntry:
     bullets: tuple[_Bullet, ...]
     keywords: tuple[str, ...]
     sources: tuple[str, ...]
+    context: str | None = None
+    technologies: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -257,6 +262,8 @@ class _LeadershipEntry:
     bullets: tuple[_Bullet, ...]
     keywords: tuple[str, ...]
     sources: tuple[str, ...]
+    context: str | None = None
+    technologies: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -598,20 +605,27 @@ def _parse_date_range(obj: Any, label: str) -> _DateRange:
 
 def _parse_bullet(obj: Any, label: str) -> _Bullet:
     obj = _dict(obj, label)
-    _check_keys(obj, frozenset({"id", "text", "keywords", "sources"}), frozenset({"id", "text", "keywords", "sources", "verification"}), label)
+    _check_keys(
+        obj,
+        frozenset({"id", "text", "keywords", "sources"}),
+        frozenset({"id", "text", "keywords", "sources", "verification", "group"}),
+        label,
+    )
     return _Bullet(
         id=_nonempty_string(obj["id"], f"{label}.id"),
         text=_nonempty_string(obj["text"], f"{label}.text"),
         keywords=_parse_string_list(obj["keywords"], f"{label}.keywords", nonempty=True),
         sources=_parse_string_list(obj["sources"], f"{label}.sources", nonempty=True),
         verification=_string(obj["verification"], f"{label}.verification") if "verification" in obj else None,
+        group=_string(obj["group"], f"{label}.group") if "group" in obj else None,
     )
 
 
 def _parse_experience_entry(obj: Any, label: str) -> _ExperienceEntry:
     obj = _dict(obj, label)
-    expected = frozenset({"id", "title", "organization", "location", "dates", "bullets", "keywords", "sources"})
-    _check_exact_keys(obj, expected, label)
+    required = frozenset({"id", "title", "organization", "location", "dates", "bullets", "keywords", "sources"})
+    allowed = required | frozenset({"context", "technologies"})
+    _check_keys(obj, required, allowed, label)
     bullets = tuple(_parse_bullet(v, f"{label}.bullets[{i}]") for i, v in enumerate(_list(obj["bullets"], f"{label}.bullets")))
     return _ExperienceEntry(
         id=_nonempty_string(obj["id"], f"{label}.id"),
@@ -622,13 +636,16 @@ def _parse_experience_entry(obj: Any, label: str) -> _ExperienceEntry:
         bullets=bullets,
         keywords=_parse_string_list(obj["keywords"], f"{label}.keywords", nonempty=True),
         sources=_parse_string_list(obj["sources"], f"{label}.sources", nonempty=True),
+        context=_string(obj["context"], f"{label}.context") if "context" in obj else None,
+        technologies=_parse_string_list(obj["technologies"], f"{label}.technologies") if "technologies" in obj else (),
     )
 
 
 def _parse_leadership_entry(obj: Any, label: str) -> _LeadershipEntry:
     obj = _dict(obj, label)
-    expected = frozenset({"id", "title", "organization", "location", "dates", "bullets", "keywords", "sources"})
-    _check_exact_keys(obj, expected, label)
+    required = frozenset({"id", "title", "organization", "location", "dates", "bullets", "keywords", "sources"})
+    allowed = required | frozenset({"context", "technologies"})
+    _check_keys(obj, required, allowed, label)
     bullets = tuple(_parse_bullet(v, f"{label}.bullets[{i}]") for i, v in enumerate(_list(obj["bullets"], f"{label}.bullets")))
     return _LeadershipEntry(
         id=_nonempty_string(obj["id"], f"{label}.id"),
@@ -639,6 +656,8 @@ def _parse_leadership_entry(obj: Any, label: str) -> _LeadershipEntry:
         bullets=bullets,
         keywords=_parse_string_list(obj["keywords"], f"{label}.keywords", nonempty=True),
         sources=_parse_string_list(obj["sources"], f"{label}.sources", nonempty=True),
+        context=_string(obj["context"], f"{label}.context") if "context" in obj else None,
+        technologies=_parse_string_list(obj["technologies"], f"{label}.technologies") if "technologies" in obj else (),
     )
 
 
@@ -1151,8 +1170,10 @@ def _profile_evidence(profile: ResumeProfile) -> tuple[str, ...]:
     for entries in (profile.experience, profile.leadership):
         for entry in entries:
             values.extend((entry.title, entry.organization, entry.location, entry.dates.display, *entry.keywords))
+            values.extend((entry.context or "", *entry.technologies))
             for bullet in entry.bullets:
                 values.extend((bullet.text, *bullet.keywords))
+                values.append(bullet.group or "")
     for entry in profile.education:
         values.extend((entry.institution, entry.location, entry.degree, entry.dates.display, entry.graduation.default, *entry.keywords))
         for rule in entry.graduation.rules:
@@ -1211,7 +1232,9 @@ def _renderable_profile_evidence(profile: ResumeProfile, plan: ResumePlan) -> tu
     for entries in (profile.experience, profile.leadership):
         for entry in entries:
             values.extend((entry.title, entry.organization, entry.location, entry.dates.display))
+            values.extend((entry.context or "", *entry.technologies))
             values.extend(bullet.text for bullet in entry.bullets)
+            values.extend(bullet.group or "" for bullet in entry.bullets)
     for entry in profile.education:
         values.extend((
             entry.institution,
@@ -1268,6 +1291,24 @@ def _select_skills(
     scored.sort(key=lambda item: (-item[0], item[1], item[2].casefold(), item[3], item[4]))
     seen: set[str] = set()
     result: list[str] = []
+    # Seed the best-scoring entries from each headline category (languages and
+    # DevOps first, ML last) so the categorized skills block always opens with
+    # them; the remaining slots fill by relevance score.
+    headline_categories = (("languages", 4), ("infrastructure", 3), ("cloud_and_platform", 2), ("engineering", 2), ("ai_ml", 2))
+    category_names = [category for category, _entries in ordered_categories]
+    for headline, seed_count in headline_categories:
+        if headline not in category_names:
+            continue
+        category_index = category_names.index(headline)
+        seeded = 0
+        for item in scored:
+            if seeded >= seed_count:
+                break
+            if item[3] != category_index or item[0] <= 0 or item[2].casefold() in seen:
+                continue
+            seen.add(item[2].casefold())
+            result.append(item[2])
+            seeded += 1
     for _score, _rank, name, _category_index, _entry_index in scored:
         key = name.casefold()
         if key not in seen:
@@ -1359,11 +1400,30 @@ def _render_selection(
     for entry_id, bullet_ids in selection.experience:
         entry = by_exp[entry_id]
         exp_lines.append(_subheading(_latex_escape(entry.title), _latex_escape(entry.dates.display), _latex_escape(entry.organization), _latex_escape(entry.location)))
+        if entry.context:
+            exp_lines.append(r"\resumeRoleContext{" + _latex_escape(entry.context) + "}")
         bullets = {bullet.id: bullet for bullet in entry.bullets}
         chosen = [bullets[bullet_id] for bullet_id in bullet_ids if bullet_id in bullets]
         if chosen:
+            # Keep same-group bullets contiguous so each group heading renders
+            # once; stable sort preserves relevance order within each group.
+            group_order: dict[str, int] = {}
+            for bullet in chosen:
+                key = bullet.group.strip() if bullet.group else ""
+                if key not in group_order:
+                    group_order[key] = len(group_order)
+            chosen = sorted(chosen, key=lambda bullet: group_order[bullet.group.strip() if bullet.group else ""])
             exp_lines.append(r"\resumeItemListStart")
-            exp_lines.extend(r"\resumeItem{" + _latex_escape(bullet.text) + "}" for bullet in chosen)
+            previous_group: str | None = None
+            for bullet in chosen:
+                group = bullet.group.strip() if bullet.group else ""
+                group = group or None
+                if group is not None and group != previous_group:
+                    exp_lines.append(r"\resumeGroupHeading{" + _latex_escape(group) + "}")
+                previous_group = group
+                exp_lines.append(r"\resumeItem{" + _latex_escape(bullet.text) + "}")
+            if entry.technologies:
+                exp_lines.append(r"\resumeTechLine{" + _latex_escape(", ".join(entry.technologies)) + "}")
             exp_lines.append(r"\resumeItemListEnd")
     if exp_lines:
         sections.append(("Experience", "\n".join(exp_lines)))
@@ -1371,11 +1431,30 @@ def _render_selection(
     for entry_id, bullet_ids in selection.leadership:
         entry = by_lead[entry_id]
         lead_lines.append(_subheading(_latex_escape(entry.title), _latex_escape(entry.dates.display), _latex_escape(entry.organization), _latex_escape(entry.location)))
+        if entry.context:
+            lead_lines.append(r"\resumeRoleContext{" + _latex_escape(entry.context) + "}")
         bullets = {bullet.id: bullet for bullet in entry.bullets}
         chosen = [bullets[bullet_id] for bullet_id in bullet_ids if bullet_id in bullets]
         if chosen:
+            # Keep same-group bullets contiguous so each group heading renders
+            # once; stable sort preserves relevance order within each group.
+            group_order = {}
+            for bullet in chosen:
+                key = bullet.group.strip() if bullet.group else ""
+                if key not in group_order:
+                    group_order[key] = len(group_order)
+            chosen = sorted(chosen, key=lambda bullet: group_order[bullet.group.strip() if bullet.group else ""])
             lead_lines.append(r"\resumeItemListStart")
-            lead_lines.extend(r"\resumeItem{" + _latex_escape(bullet.text) + "}" for bullet in chosen)
+            previous_group = None
+            for bullet in chosen:
+                group = bullet.group.strip() if bullet.group else ""
+                group = group or None
+                if group is not None and group != previous_group:
+                    lead_lines.append(r"\resumeGroupHeading{" + _latex_escape(group) + "}")
+                previous_group = group
+                lead_lines.append(r"\resumeItem{" + _latex_escape(bullet.text) + "}")
+            if entry.technologies:
+                lead_lines.append(r"\resumeTechLine{" + _latex_escape(", ".join(entry.technologies)) + "}")
             lead_lines.append(r"\resumeItemListEnd")
     if lead_lines:
         sections.append(("Leadership", "\n".join(lead_lines)))
@@ -1395,8 +1474,41 @@ def _render_selection(
     if project_lines:
         sections.append(("Projects", "\n".join(project_lines)))
     if compressed_skills:
-        sections.append(("Technical Skills", r"\resumeItem{\textbf{Skills:} " + _latex_escape(", ".join(compressed_skills)) + "}"))
+        sections.append(("Technical Skills", r"\resumeItem{\textbf{Skills:} " + _latex_escape(", ".join(_order_skills(profile, compressed_skills))) + "}"))
     return tuple(sections)
+
+
+# Display order for the single-line Technical Skills list: languages first,
+# then DevOps/infrastructure, then ML, then everything else. Only ordering
+# changes; the compressed one-line layout matches the classic template.
+_SKILL_CATEGORY_ORDER: tuple[str, ...] = (
+    "languages",
+    "infrastructure",
+    "cloud_and_platform",
+    "practices",
+    "engineering",
+    "frameworks",
+    "databases_and_data",
+    "ai_ml",
+    "algorithms_and_cs",
+    "domains",
+)
+
+
+def _order_skills(profile: ResumeProfile, compressed_skills: tuple[str, ...]) -> tuple[str, ...]:
+    rank = {category: index for index, category in enumerate(_SKILL_CATEGORY_ORDER)}
+    category_of: dict[str, int] = {}
+    for category, entries in profile.skills.items():
+        for entry in entries:
+            key = entry.name.casefold()
+            value = rank.get(category, len(rank))
+            if key not in category_of or value < category_of[key]:
+                category_of[key] = value
+    position = {name.casefold(): index for index, name in enumerate(compressed_skills)}
+    return tuple(sorted(
+        compressed_skills,
+        key=lambda name: (category_of.get(name.casefold(), len(rank)), position[name.casefold()]),
+    ))
 
 
 def _selected_claims(
@@ -1455,14 +1567,14 @@ def _selected_claims(
 
 def _profile_claim_texts(profile: ResumeProfile) -> dict[str, str]:
     claims: dict[str, str] = {}
-    for entry in profile.education:
-        claims[entry.id] = " ".join(
-            (entry.institution, entry.location, entry.degree, entry.dates.display, *entry.keywords, *entry.coursework)
-        )
     for entry in (*profile.experience, *profile.leadership, *profile.projects):
-        claims[entry.id] = _entry_text(entry)
+        if isinstance(entry, (_ExperienceEntry, _LeadershipEntry)):
+            entry_values = (entry.context or "", *entry.technologies)
+        else:
+            entry_values = ()
+        claims[entry.id] = " ".join(part for part in (*(_entry_text(entry),), *entry_values) if part)
         for bullet in entry.bullets:
-            claims[bullet.id] = _bullet_text(bullet)
+            claims[bullet.id] = " ".join(part for part in (bullet.text, *bullet.keywords, bullet.group or "") if part)
     for category, entries in profile.skills.items():
         for entry in entries:
             claims[f"skill:{category}:{entry.name}"] = " ".join((entry.name, *entry.keywords))
@@ -2118,8 +2230,8 @@ def _inspect_pdf_bytes(pdf_bytes: bytes) -> tuple[int, str]:
 
 def _validate_pdf_bytes(pdf_bytes: bytes) -> int:
     pages, text = _inspect_pdf_bytes(pdf_bytes)
-    if pages != 1:
-        raise RuntimeError(f"generated PDF has {pages} page(s); exactly 1 required")
+    if not 1 <= pages <= _MAX_PAGES:
+        raise RuntimeError(f"generated PDF has {pages} page(s); 1-2 required")
     if not text.strip():
         raise RuntimeError("generated PDF has no extractable text")
     return pages
@@ -2622,7 +2734,7 @@ def _expand_plan(
     compiler_signature: tuple[int, int, int, int, int, int],
     initial_measure: tuple[int, str] | None = None,
 ) -> ResumePlan:
-    """Add supported content while retaining the fullest one-page candidate."""
+    """Add supported content while retaining the fullest acceptable candidate."""
     current = plan
     if initial_measure is None:
         pages, current_text = _compile_plan(
@@ -2630,7 +2742,7 @@ def _expand_plan(
         )
     else:
         pages, current_text = initial_measure
-    if pages != 1:
+    if not 1 <= pages <= _MAX_PAGES:
         raise RuntimeError(f"cannot expand resume with {pages} page(s)")
     current_audit = _audit_rendered_resume(profile, current, job, current_text)
     attempted: set[tuple[str, tuple[str, ...]]] = set()
@@ -2680,7 +2792,7 @@ def _expand_plan(
                 stage_matches_current = False
                 if pages < 1:
                     raise RuntimeError(f"generated resume has {pages} page(s)")
-                if pages != 1:
+                if pages > _MAX_PAGES:
                     found_candidate = True
                     break
                 candidate_audit = _audit_rendered_resume(profile, candidate, job, candidate_text)
@@ -2782,7 +2894,7 @@ def _trim_plan(
         pages, text = _compile_plan(
             current, job, template_text, output_dir, compiler, compiler_signature
         )
-        if pages == 1:
+        if pages <= _MAX_PAGES:
             return current, (pages, text)
         if pages < 1:
             raise RuntimeError(f"generated resume has {pages} page(s)")
@@ -2799,9 +2911,9 @@ def _trim_plan(
         if next_selection is None:
             next_selection = _remove_optional_experience(selection, profile, trim_terms)
         if next_selection is None:
-            raise RuntimeError(f"unable to fit resume to one page after trimming ({pages} pages)")
+            raise RuntimeError(f"unable to fit resume to two pages after trimming ({pages} pages)")
         current = _replace_plan_selection(current, profile, next_selection)
-    raise RuntimeError("unable to fit resume to one page within trim bound")
+    raise RuntimeError("unable to fit resume to two pages within trim bound")
 
 
 # ---------------------------------------------------------------------------
@@ -3243,7 +3355,7 @@ def generate_resume(
         )
         if pages < 1:
             raise RuntimeError(f"generated resume has {pages} page(s)")
-        if pages != 1:
+        if pages > _MAX_PAGES:
             plan, measure = _trim_plan(
                 plan,
                 profile,
@@ -3289,8 +3401,8 @@ def generate_resume(
             private=False,
         )
         pages, rendered_text = _inspect_pdf_bytes(pdf_bytes)
-        if pages != 1:
-            raise RuntimeError(f"generated PDF has {pages} page(s); exactly 1 required")
+        if not 1 <= pages <= _MAX_PAGES:
+            raise RuntimeError(f"generated PDF has {pages} page(s); 1-2 required")
         if not rendered_text.strip():
             raise RuntimeError("generated PDF has no extractable text")
         ats_audit = _audit_rendered_resume(profile, plan, job, rendered_text)

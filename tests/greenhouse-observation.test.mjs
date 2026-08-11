@@ -123,7 +123,7 @@ function answeredLedger(fieldId, value, observation, options = {}) {
     field_id: fieldId,
     observation_id: observation.observation_id,
     ref: control.ref,
-    source: 'profile',
+    source: 'profile_verified',
     value_digest: digestObservedValue(control, value),
   });
   if (options.withSelect !== false) {
@@ -411,7 +411,7 @@ test('leaves unresolved and blank fields untouched', () => {
     field_id: 'department',
     observation_id: observation.observation_id,
     ref: control.ref,
-    source: 'profile',
+    source: 'profile_verified',
     semantic_choice: 'not_applicable',
   });
   normalized = normalizeGreenhouseObservation(observation, blank);
@@ -431,7 +431,7 @@ test('leaves fields without a successful select action untouched', () => {
     field_id: 'department',
     observation_id: observation.observation_id,
     ref: control.ref,
-    source: 'profile',
+    source: 'profile_verified',
     value_digest: digestObservedValue(control, 'Engineering'),
   });
   ledger = recordActionAttempt(ledger, {
@@ -462,7 +462,7 @@ test('leaves failed and other-field select actions untouched', () => {
       field_id: fieldId,
       observation_id: observation.observation_id,
       ref: target.ref,
-      source: 'profile',
+      source: 'profile_verified',
       value_digest: digestObservedValue(target, value),
     });
   }
@@ -521,7 +521,7 @@ test('normalizes only the matching control and preserves every other control', (
     field_id: 'department',
     observation_id: first.observation_id,
     ref: department.ref,
-    source: 'profile',
+    source: 'profile_verified',
     value_digest: digestObservedValue(department, 'Engineering'),
   });
   ledger = recordActionAttempt(ledger, {
@@ -539,7 +539,7 @@ test('normalizes only the matching control and preserves every other control', (
     field_id: 'location',
     observation_id: second.observation_id,
     ref: location.ref,
-    source: 'profile',
+    source: 'profile_verified',
     value_digest: digestObservedValue(location, 'Remote'),
   });
 

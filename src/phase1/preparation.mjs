@@ -31,7 +31,7 @@ const MAX_RESUME_PDF_BYTES = 8 * 1024 * 1024;
 const MAX_REPORT_BYTES = 512 * 1024;
 const MAX_MANIFEST_BYTES = 256 * 1024;
 const MAX_MATCHED_KEYWORDS = 256;
-const GENERATOR_SCHEMA_VERSION = 'resume-generator-v4';
+const GENERATOR_SCHEMA_VERSION = 'resume-generator-v5';
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 const GENERATOR_KEYS = new Set([

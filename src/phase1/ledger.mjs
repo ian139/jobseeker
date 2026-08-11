@@ -6,7 +6,8 @@ export const DIFF_SCHEMA = 'phase1-diff-v1';
 
 export const ANSWER_SOURCES = Object.freeze([
   'memory',
-  'profile',
+  'profile_verified',
+  'profile_user_attested',
   'resume',
   'agent_inference',
   'user',
@@ -1653,7 +1654,7 @@ function optionSupportsSemanticChoice(option, choice) {
 }
 
 function blankStateIsSupported(field, control) {
-  if (!['memory', 'profile', 'agent_inference', 'user'].includes(field.answer_source)) return false;
+  if (!['memory', 'profile_verified', 'profile_user_attested', 'agent_inference', 'user'].includes(field.answer_source)) return false;
   if (!SEMANTIC_CHOICES.has(field.semantic_choice)) return false;
   const controlKinds = [control.kind, control.type, control.role]
     .filter((value) => typeof value === 'string')

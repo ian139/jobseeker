@@ -1,16 +1,26 @@
 import {
     MAX_ALIAS_LENGTH,
     MAX_PROFILE_BYTES,
+    PROFILE_INFERENCE_EVIDENCE_KEYS,
+    PROFILE_SCHEMA,
     ValidationError,
     canonicalJson,
     isPlainObject,
     readJsonFileSecure,
+    validateInferenceEntry,
 } from './contract.mjs';
 
-export const PROFILE_SCHEMA = 'phase1-profile-v1';
+export { PROFILE_SCHEMA } from './contract.mjs';
 
 export const PROFILE_KEYS = Object.freeze([
     'schema',
+    'verified_facts',
+    'user_attested_facts',
+    'inferred_facts',
+    'unknowns',
+]);
+
+export const PROFILE_BODY_KEYS = Object.freeze([
     'contact',
     'address',
     'links',
@@ -29,6 +39,7 @@ export const PROFILE_KEYS = Object.freeze([
 ]);
 
 const PROFILE_KEY_SET = new Set(PROFILE_KEYS);
+const PROFILE_BODY_KEY_SET = new Set(PROFILE_BODY_KEYS);
 
 function fail(code, location = '') {
     throw new ValidationError(code, location);
@@ -370,13 +381,110 @@ function validateDemographics(value) {
     checkOptional(demographics, 'prefer_not_to_say', location, optionalBoolean);
 }
 
+function requireProfileAlias(alias, location) {
+    if (typeof alias !== 'string'
+        || alias.length === 0
+        || alias.length > MAX_ALIAS_LENGTH
+        || alias.trim().length === 0
+        || alias.includes('\u0000')) {
+        fail('E_PROFILE_ALIAS', location);
+    }
+}
+
 function validateAliasMap(value, location, valueValidator) {
     const map = object(value, location);
     for (const [alias, answer] of Object.entries(map)) {
-        if (alias.length === 0 || alias.length > MAX_ALIAS_LENGTH || alias.trim().length === 0 || alias.includes('\u0000')) {
-            fail('E_PROFILE_ALIAS', `${location}.${alias}`);
-        }
+        requireProfileAlias(alias, `${location}.${alias}`);
         valueValidator(answer, `${location}.${alias}`);
+    }
+}
+
+const PROFILE_BODY_VALIDATORS = Object.freeze({
+    contact: validateContact,
+    address: validateAddress,
+    links: validateLinks,
+    education: validateEducation,
+    employment: validateEmployment,
+    skills: validateSkills,
+    availability: validateAvailability,
+    location_preferences: validateLocationPreferences,
+    relocation: validateRelocation,
+    compensation: validateCompensation,
+    work_authorization: validateWorkAuthorization,
+    sponsorship: validateSponsorship,
+    demographics: validateDemographics,
+    answers: (value, location) => validateAliasMap(value, location, validateJsonValue),
+    explanations: (value, location) => validateAliasMap(value, location, optionalString),
+});
+
+function validateTier(value, location) {
+    const tier = object(value, location);
+    unknownKeys(tier, PROFILE_BODY_KEY_SET, location);
+    for (const key of Object.keys(tier)) {
+        PROFILE_BODY_VALIDATORS[key](tier[key], `${location}.${key}`);
+    }
+}
+
+function validateInferredFacts(value) {
+    const location = 'inferred_facts';
+    const map = object(value, location);
+    for (const [alias, entry] of Object.entries(map)) {
+        requireProfileAlias(alias, `${location}.${alias}`);
+        validateInferenceEntry(entry, `${location}.${alias}`, {
+            evidenceKeys: PROFILE_INFERENCE_EVIDENCE_KEYS,
+            schemaCode: 'E_PROFILE_INFERENCE_SCHEMA',
+            rationaleCode: 'E_PROFILE_INFERENCE_RATIONALE',
+            evidenceCode: 'E_PROFILE_INFERENCE_EVIDENCE',
+        });
+    }
+}
+
+function validateUnknowns(value) {
+    const location = 'unknowns';
+    if (!Array.isArray(value)) {
+        fail('E_PROFILE_UNKNOWN', location);
+    }
+    const seen = new Set();
+    for (let index = 0; index < value.length; index += 1) {
+        const itemLocation = `${location}[${index}]`;
+        const alias = value[index];
+        if (typeof alias !== 'string'
+            || alias.length === 0
+            || alias.length > MAX_ALIAS_LENGTH
+            || alias.trim().length === 0
+            || alias.includes('\u0000')) {
+            fail('E_PROFILE_UNKNOWN', itemLocation);
+        }
+        if (seen.has(alias)) {
+            fail('E_PROFILE_UNKNOWN_DUPLICATE', itemLocation);
+        }
+        seen.add(alias);
+    }
+}
+
+function assertNoAliasConflicts(profile) {
+    const homes = new Map();
+    for (const tierKey of ['verified_facts', 'user_attested_facts']) {
+        const tier = profile[tierKey];
+        if (!isPlainObject(tier) || !isPlainObject(tier.answers)) {
+            continue;
+        }
+        for (const alias of Object.keys(tier.answers)) {
+            const previous = homes.get(alias);
+            if (previous !== undefined) {
+                fail('E_PROFILE_ALIAS_CONFLICT', `${previous}:${tierKey}.answers:${alias}`);
+            }
+            homes.set(alias, `${tierKey}.answers`);
+        }
+    }
+    if (isPlainObject(profile.inferred_facts)) {
+        for (const alias of Object.keys(profile.inferred_facts)) {
+            const previous = homes.get(alias);
+            if (previous !== undefined) {
+                fail('E_PROFILE_ALIAS_CONFLICT', `${previous}:inferred_facts:${alias}`);
+            }
+            homes.set(alias, 'inferred_facts');
+        }
     }
 }
 
@@ -421,23 +529,18 @@ export function validateProfile(input) {
     if (profile.schema !== PROFILE_SCHEMA) {
         fail('E_PROFILE_SCHEMA', 'schema');
     }
-    checkOptional(profile, 'contact', '', validateContact);
-    checkOptional(profile, 'address', '', validateAddress);
-    checkOptional(profile, 'links', '', validateLinks);
-    checkOptional(profile, 'education', '', validateEducation);
-    checkOptional(profile, 'employment', '', validateEmployment);
-    checkOptional(profile, 'skills', '', validateSkills);
-    checkOptional(profile, 'availability', '', validateAvailability);
-    checkOptional(profile, 'location_preferences', '', validateLocationPreferences);
-    checkOptional(profile, 'relocation', '', validateRelocation);
-    checkOptional(profile, 'compensation', '', validateCompensation);
-    checkOptional(profile, 'work_authorization', '', validateWorkAuthorization);
-    checkOptional(profile, 'sponsorship', '', validateSponsorship);
-    checkOptional(profile, 'demographics', '', validateDemographics);
-    checkOptional(profile, 'answers', '', (value, location) => validateAliasMap(value, 'answers', validateJsonValue));
-    checkOptional(profile, 'explanations', '', (value, location) => {
-        validateAliasMap(value, 'explanations', optionalString);
-    });
+    for (const key of ['verified_facts', 'user_attested_facts']) {
+        if (Object.hasOwn(profile, key)) {
+            validateTier(profile[key], key);
+        }
+    }
+    if (Object.hasOwn(profile, 'inferred_facts')) {
+        validateInferredFacts(profile.inferred_facts);
+    }
+    if (Object.hasOwn(profile, 'unknowns')) {
+        validateUnknowns(profile.unknowns);
+    }
+    assertNoAliasConflicts(profile);
     const encoded = canonicalJson(profile);
     if (Buffer.byteLength(encoded, 'utf8') > MAX_PROFILE_BYTES) {
         fail('E_JSON_OVERSIZE', 'profile');
@@ -455,16 +558,28 @@ export async function loadProfile(profilePath) {
 
 export function profileAnswer(profile, alias) {
     const validated = validateProfile(profile);
-    if (!Object.hasOwn(validated, 'answers') || !Object.hasOwn(validated.answers, alias)) {
-        return { found: false };
+    for (const [tierKey, source] of [
+        ['verified_facts', 'profile_verified'],
+        ['user_attested_facts', 'profile_user_attested'],
+    ]) {
+        const tier = validated[tierKey];
+        if (isPlainObject(tier) && isPlainObject(tier.answers) && Object.hasOwn(tier.answers, alias)) {
+            return { found: true, source, value: structuredClone(tier.answers[alias]) };
+        }
     }
-    return { found: true, value: structuredClone(validated.answers[alias]) };
+    return { found: false, unknown: Array.isArray(validated.unknowns) && validated.unknowns.includes(alias) };
 }
 
 export function profileExplanation(profile, alias) {
     const validated = validateProfile(profile);
-    if (!Object.hasOwn(validated, 'explanations') || !Object.hasOwn(validated.explanations, alias)) {
-        return { found: false };
+    for (const [tierKey, source] of [
+        ['verified_facts', 'profile_verified'],
+        ['user_attested_facts', 'profile_user_attested'],
+    ]) {
+        const tier = validated[tierKey];
+        if (isPlainObject(tier) && isPlainObject(tier.explanations) && Object.hasOwn(tier.explanations, alias)) {
+            return { found: true, source, value: structuredClone(tier.explanations[alias]) };
+        }
     }
-    return { found: true, value: validated.explanations[alias] };
+    return { found: false, unknown: Array.isArray(validated.unknowns) && validated.unknowns.includes(alias) };
 }

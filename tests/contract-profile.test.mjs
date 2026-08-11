@@ -17,6 +17,7 @@ import {
     createAnswerRecord,
     loadAnswerMemory,
     loadAnswerMemoryInventory,
+    loadRunInputs,
     readRegularFile,
     resolveAnswer,
     validateAnswerRecord,
@@ -70,21 +71,25 @@ function testAnswerRecord(alias, value, approved_at = '2026-01-01T00:00:00.000Z'
 function minimalProfile() {
     return {
         schema: PROFILE_SCHEMA,
-        contact: { name: 'Example Applicant', email: 'applicant@example.invalid' },
-        address: { city: 'Example City', country: 'Example Country' },
-        links: [{ label: 'Portfolio', url: 'https://example.invalid/portfolio' }],
-        education: [{ institution: 'Example University' }],
-        employment: [{ employer: 'Example Employer', title: 'Example Role' }],
-        skills: ['JavaScript'],
-        availability: { currently_available: true },
-        location_preferences: { remote: true },
-        relocation: { willing: false },
-        compensation: { currency: 'USD', negotiable: true },
-        work_authorization: { authorized: true },
-        sponsorship: { needed: false },
-        demographics: { prefer_not_to_say: true },
-        answers: { 'work-authorized': true },
-        explanations: { 'work-authorized': 'User-authored answer.' },
+        verified_facts: {
+            contact: { name: 'Example Applicant', email: 'applicant@example.invalid' },
+            address: { city: 'Example City', country: 'Example Country' },
+            links: [{ label: 'Portfolio', url: 'https://example.invalid/portfolio' }],
+            education: [{ institution: 'Example University' }],
+            employment: [{ employer: 'Example Employer', title: 'Example Role' }],
+            skills: ['JavaScript'],
+            availability: { currently_available: true },
+            location_preferences: { remote: true },
+            relocation: { willing: false },
+            compensation: { currency: 'USD', negotiable: true },
+            work_authorization: { authorized: true },
+            sponsorship: { needed: false },
+            demographics: { prefer_not_to_say: true },
+        },
+        user_attested_facts: {
+            answers: { 'work-authorized': true },
+            explanations: { 'work-authorized': 'User-authored answer.' },
+        },
     };
 }
 
@@ -233,10 +238,12 @@ test('profile values remain optional until a field is asked', () => {
 test('education levels, GPAs, and graduation dates validate and resolve without guessing', () => {
     const profile = {
         schema: PROFILE_SCHEMA,
-        education: [
-            { institution: 'Example University', level: 'college', gpa: 3.5, end_date: 'May 2026' },
-            { institution: 'Example Secondary School', level: 'high_school', gpa: 3.9, end_date: 'June 2022' },
-        ],
+        verified_facts: {
+            education: [
+                { institution: 'Example University', level: 'college', gpa: 3.5, end_date: 'May 2026' },
+                { institution: 'Example Secondary School', level: 'high_school', gpa: 3.9, end_date: 'June 2022' },
+            ],
+        },
     };
     assert.deepEqual(validateProfile(profile), profile);
     for (const [alias, value] of new Map([
@@ -253,7 +260,7 @@ test('education levels, GPAs, and graduation dates validate and resolve without 
     ])) {
         assert.deepEqual(resolveAnswer({ alias, profile }), {
             alias,
-            source: 'profile',
+            source: 'profile_verified',
             value,
             missing: false,
         });
@@ -266,14 +273,23 @@ test('education levels, GPAs, and graduation dates validate and resolve without 
     });
     assert.equal(resolveAnswer({
         alias: 'High School Name',
-        profile: { ...profile, answers: { 'High School Name': 'Exact Alias School' } },
+        profile: {
+            ...profile,
+            verified_facts: {
+                ...profile.verified_facts,
+                answers: { 'High School Name': 'Exact Alias School' },
+            },
+        },
     }).value, 'Exact Alias School');
     for (const education of [
         [{ institution: 'Example School', level: 'graduate' }],
         [{ institution: 'Example School', gpa: '3.9' }],
         [{ institution: 'Example School', gpa: Number.POSITIVE_INFINITY }],
     ]) {
-        assert.throws(() => validateProfile({ schema: PROFILE_SCHEMA, education }), /E_PROFILE_/);
+        assert.throws(() => validateProfile({
+            schema: PROFILE_SCHEMA,
+            verified_facts: { education },
+        }), /E_PROFILE_/);
     }
 });
 
@@ -306,11 +322,149 @@ test('unknown keys, fixed enum changes, and missing evidence fail closed', () =>
     }), /E_RUN_EVIDENCE_REQUIRED/);
 });
 
+test('v2 tiers reuse body field validation and reject nested schemas', () => {
+    assert.deepEqual(
+        validateProfile({
+            schema: PROFILE_SCHEMA,
+            verified_facts: { contact: { name: 'Verified Name' } },
+            user_attested_facts: { contact: { name: 'Attested Name' } },
+        }),
+        {
+            schema: PROFILE_SCHEMA,
+            verified_facts: { contact: { name: 'Verified Name' } },
+            user_attested_facts: { contact: { name: 'Attested Name' } },
+        },
+    );
+    for (const profile of [
+        { schema: PROFILE_SCHEMA, verified_facts: { unexpected: true } },
+        { schema: PROFILE_SCHEMA, user_attested_facts: { contact: { name: 42 } } },
+        { schema: PROFILE_SCHEMA, verified_facts: { schema: 'nested', contact: {} } },
+        { schema: PROFILE_SCHEMA, verified_facts: 'not-an-object' },
+        { schema: PROFILE_SCHEMA, inferred_facts: 'not-an-object' },
+        { schema: PROFILE_SCHEMA, unknowns: 'not-an-array' },
+    ]) {
+        assert.throws(() => validateProfile(profile), /E_PROFILE_/);
+    }
+});
+
+test('strict v1 profiles are rejected', () => {
+    assert.throws(() => validateProfile({ schema: 'phase1-profile-v1' }), /E_PROFILE_SCHEMA/);
+    assert.throws(() => validateProfile({
+        schema: 'phase1-profile-v1',
+        answers: { 'work-authorized': true },
+    }), /E_PROFILE_/);
+});
+
+test('secure local run checks reject a v1 profile on disk', async (t) => {
+    const root = await privateFixture(t);
+    const uploadPath = path.join(root, 'resume.pdf');
+    const memoryDirectory = path.join(root, 'memory');
+    const memoryPath = path.join(memoryDirectory, 'answers.jsonl');
+    const artifactPath = path.join(root, 'artifacts');
+    await fs.mkdir(memoryDirectory, { mode: 0o700 });
+    await fs.mkdir(artifactPath, { mode: 0o700 });
+    await fs.chmod(memoryDirectory, 0o700);
+    await fs.chmod(artifactPath, 0o700);
+    await privateFile(path.join(root, 'job.txt'), 'Synthetic job snapshot.');
+    await privateFile(uploadPath, '%PDF-1.7\nsynthetic pdf bytes');
+    const profilePath = path.join(root, 'profile.json');
+    await privateFile(profilePath, `${JSON.stringify({ schema: 'phase1-profile-v1' })}\n`);
+    await assert.rejects(
+        validateRunContractLocal(runFor(root, { profilePath, uploadPath, memoryPath, artifactPath })),
+        /E_RUN_PROFILE_SCHEMA/,
+    );
+    await privateFile(profilePath, `${JSON.stringify({ schema: PROFILE_SCHEMA })}\n`);
+    assert.deepEqual(
+        await validateRunContractLocal(runFor(root, { profilePath, uploadPath, memoryPath, artifactPath })),
+        runFor(root, { profilePath, uploadPath, memoryPath, artifactPath }),
+    );
+});
+
+test('inferred facts require rationale and both sha256 evidence digests', () => {
+    const rationale = 'Derived from the resume and the job description.';
+    const evidence = {
+        source_resume_sha256: 'a'.repeat(64),
+        job_description_sha256: 'b'.repeat(64),
+    };
+    const valid = {
+        schema: PROFILE_SCHEMA,
+        inferred_facts: {
+            'inferred-question': { value: 'inferred', rationale, evidence },
+        },
+    };
+    assert.deepEqual(validateProfile(valid), valid);
+    for (const [entry, error] of [
+        [{ value: 'x' }, /E_PROFILE_INFERENCE_SCHEMA/],
+        [{ value: 'x', rationale, evidence: { ...evidence, extra: 'c'.repeat(64) } }, /E_PROFILE_INFERENCE_SCHEMA/],
+        [{ value: 'x', rationale: '', evidence }, /E_PROFILE_INFERENCE_RATIONALE/],
+        [{ value: 'x', rationale: 42, evidence }, /E_PROFILE_INFERENCE_RATIONALE/],
+        [{ value: 'x', rationale, evidence: { ...evidence, source_resume_sha256: '' } }, /E_PROFILE_INFERENCE_EVIDENCE/],
+        [{
+            value: 'x',
+            rationale,
+            evidence: { ...evidence, job_description_sha256: 'not-a-sha256' },
+        }, /E_PROFILE_INFERENCE_EVIDENCE/],
+        [{
+            value: 'x',
+            rationale,
+            evidence: { source_resume_sha256: 'a'.repeat(64) },
+        }, /E_PROFILE_INFERENCE_SCHEMA/],
+    ]) {
+        assert.throws(
+            () => validateProfile({
+                schema: PROFILE_SCHEMA,
+                inferred_facts: { 'inferred-question': entry },
+            }),
+            error,
+        );
+    }
+});
+
+test('duplicate unknown aliases and cross-tier alias conflicts are rejected', () => {
+    assert.throws(() => validateProfile({
+        schema: PROFILE_SCHEMA,
+        unknowns: ['question-a', 'question-a'],
+    }), /E_PROFILE_UNKNOWN_DUPLICATE/);
+    assert.throws(() => validateProfile({
+        schema: PROFILE_SCHEMA,
+        verified_facts: { answers: { 'question-a': true } },
+        user_attested_facts: { answers: { 'question-a': 'attested' } },
+    }), /E_PROFILE_ALIAS_CONFLICT/);
+    assert.throws(() => validateProfile({
+        schema: PROFILE_SCHEMA,
+        verified_facts: { answers: { 'question-a': true } },
+        inferred_facts: {
+            'question-a': {
+                value: 'inferred',
+                rationale: 'rationale',
+                evidence: {
+                    source_resume_sha256: 'a'.repeat(64),
+                    job_description_sha256: 'b'.repeat(64),
+                },
+            },
+        },
+    }), /E_PROFILE_ALIAS_CONFLICT/);
+    assert.throws(() => validateProfile({
+        schema: PROFILE_SCHEMA,
+        user_attested_facts: { answers: { 'question-a': 'attested' } },
+        inferred_facts: {
+            'question-a': {
+                value: 'inferred',
+                rationale: 'rationale',
+                evidence: {
+                    source_resume_sha256: 'a'.repeat(64),
+                    job_description_sha256: 'b'.repeat(64),
+                },
+            },
+        },
+    }), /E_PROFILE_ALIAS_CONFLICT/);
+});
+
 test('memory outranks every lower source and aliases are exact', () => {
     const result = resolveAnswer({
         alias: 'Question-ID',
         memory: [testAnswerRecord('Question-ID', 'memory', '2026-01-01T00:00:00.000Z')],
-        profile: { answers: { 'Question-ID': 'profile' } },
+        profile: { user_attested_facts: { answers: { 'Question-ID': 'profile' } } },
         resume: { 'Question-ID': 'resume' },
         jobWording: { 'Question-ID': 'job' },
         agent_inference: {
@@ -333,24 +487,32 @@ test('memory outranks every lower source and aliases are exact', () => {
         }),
         (error) => error.code === 'E_ANSWER_MEMORY_SCHEMA',
     );
-    assert.equal(resolveAnswer({ alias: 'question-id', profile: { answers: { 'Question-ID': true } } }).missing, true);
+    assert.equal(
+        resolveAnswer({
+            alias: 'question-id',
+            profile: { user_attested_facts: { answers: { 'Question-ID': true } } },
+        }).missing,
+        true,
+    );
     const structuredProfile = {
         schema: PROFILE_SCHEMA,
-        address: { country: 'Structured Country' },
-        location_preferences: { onsite: true },
-        relocation: { willing: true },
-        links: [{
-            label: 'Portfolio',
-            kind: 'portfolio',
-            url: 'https://example.test/work',
-        }],
-        answers: { 'profile.address.country': 'Conflicting Alias Country' },
+        verified_facts: {
+            address: { country: 'Structured Country' },
+            location_preferences: { onsite: true },
+            relocation: { willing: true },
+            links: [{
+                label: 'Portfolio',
+                kind: 'portfolio',
+                url: 'https://example.test/work',
+            }],
+            answers: { 'profile.address.country': 'Conflicting Alias Country' },
+        },
     };
     assert.deepEqual(
         resolveAnswer({ alias: 'profile.address.country', profile: structuredProfile }),
         {
             alias: 'profile.address.country',
-            source: 'profile',
+            source: 'profile_verified',
             value: 'Structured Country',
             missing: false,
         },
@@ -358,21 +520,21 @@ test('memory outranks every lower source and aliases are exact', () => {
     assert.equal(
         resolveAnswer({
             alias: 'profile.address.city',
-            profile: { schema: PROFILE_SCHEMA, address: { city: 'Exact City' } },
+            profile: { schema: PROFILE_SCHEMA, verified_facts: { address: { city: 'Exact City' } } },
         }).value,
         'Exact City',
     );
     assert.equal(
         resolveAnswer({
             alias: 'profile.address.city.is:Exact City',
-            profile: { schema: PROFILE_SCHEMA, address: { city: 'Exact City' } },
+            profile: { schema: PROFILE_SCHEMA, verified_facts: { address: { city: 'Exact City' } } },
         }).value,
         true,
     );
     assert.equal(
         resolveAnswer({
             alias: 'profile.address.city.is_not:Los Angeles',
-            profile: { schema: PROFILE_SCHEMA, address: { city: 'Exact City' } },
+            profile: { schema: PROFILE_SCHEMA, verified_facts: { address: { city: 'Exact City' } } },
         }).value,
         true,
     );
@@ -393,14 +555,14 @@ test('memory outranks every lower source and aliases are exact', () => {
     assert.equal(
         resolveAnswer({
             alias: 'profile.sponsorship.not_needed',
-            profile: { schema: PROFILE_SCHEMA, sponsorship: { needed: false } },
+            profile: { schema: PROFILE_SCHEMA, verified_facts: { sponsorship: { needed: false } } },
         }).value,
         true,
     );
     assert.equal(
         resolveAnswer({
             alias: 'profile.sponsorship.not_needed',
-            profile: { schema: PROFILE_SCHEMA, sponsorship: { needed: true } },
+            profile: { schema: PROFILE_SCHEMA, verified_facts: { sponsorship: { needed: true } } },
         }).value,
         false,
     );
@@ -428,10 +590,62 @@ test('memory outranks every lower source and aliases are exact', () => {
             alias: 'profile.address.country',
             profile: {
                 schema: PROFILE_SCHEMA,
-                answers: { 'profile.address.country': 'Fallback Country' },
+                verified_facts: { answers: { 'profile.address.country': 'Fallback Country' } },
             },
         }).value,
         'Fallback Country',
+    );
+    assert.deepEqual(
+        resolveAnswer({
+            alias: 'tier-question',
+            profile: {
+                schema: PROFILE_SCHEMA,
+                verified_facts: { answers: { 'tier-question': 'verified' } },
+                user_attested_facts: { answers: { 'tier-question': 'attested' } },
+            },
+        }),
+        { alias: 'tier-question', source: 'profile_verified', value: 'verified', missing: false },
+    );
+    assert.deepEqual(
+        resolveAnswer({
+            alias: 'tier-question',
+            profile: {
+                schema: PROFILE_SCHEMA,
+                user_attested_facts: { answers: { 'tier-question': 'attested' } },
+            },
+        }),
+        { alias: 'tier-question', source: 'profile_user_attested', value: 'attested', missing: false },
+    );
+    assert.deepEqual(
+        resolveAnswer({
+            alias: 'profile.address.country',
+            profile: {
+                schema: PROFILE_SCHEMA,
+                verified_facts: { address: { country: 'Verified Country' } },
+                user_attested_facts: { answers: { 'profile.address.country': 'Attested Country' } },
+            },
+        }),
+        {
+            alias: 'profile.address.country',
+            source: 'profile_verified',
+            value: 'Verified Country',
+            missing: false,
+        },
+    );
+    assert.deepEqual(
+        resolveAnswer({
+            alias: 'profile.address.country',
+            profile: {
+                schema: PROFILE_SCHEMA,
+                user_attested_facts: { address: { country: 'Attested Country' } },
+            },
+        }),
+        {
+            alias: 'profile.address.country',
+            source: 'profile_user_attested',
+            value: 'Attested Country',
+            missing: false,
+        },
     );
     for (const alias of ['constructor', 'toString', '__proto__']) {
         assert.deepEqual(
@@ -491,8 +705,8 @@ test('exact agent inference returns digests and malformed inference fails closed
         },
         {
             alias: 'profile-question',
-            profile: { answers: { 'profile-question': 'profile' } },
-            source: 'profile',
+            profile: { user_attested_facts: { answers: { 'profile-question': 'profile' } } },
+            source: 'profile_user_attested',
             value: 'profile',
         },
         {
@@ -532,13 +746,15 @@ test('exact agent inference returns digests and malformed inference fails closed
 test('resolveAnswer reads exact standard contact aliases from the profile', () => {
     const profile = {
         schema: PROFILE_SCHEMA,
-        contact: {
-            name: 'Ada Lovelace',
-            preferred_name: 'Ada',
-            first_name: 'Ada',
-            last_name: 'Lovelace',
-            email: 'ada@example.test',
-            phone: '555-0100',
+        verified_facts: {
+            contact: {
+                name: 'Ada Lovelace',
+                preferred_name: 'Ada',
+                first_name: 'Ada',
+                last_name: 'Lovelace',
+                email: 'ada@example.test',
+                phone: '555-0100',
+            },
         },
     };
     for (const [alias, value] of Object.entries({
@@ -552,7 +768,7 @@ test('resolveAnswer reads exact standard contact aliases from the profile', () =
     })) {
         assert.deepEqual(resolveAnswer({ alias, profile }), {
             alias,
-            source: 'profile',
+            source: 'profile_verified',
             value,
             missing: false,
         });
@@ -565,11 +781,13 @@ test('profile aliases never redirect non-profile answer sources', () => {
     const profileAlias = 'profile.links.portfolio';
     const profile = {
         schema: PROFILE_SCHEMA,
-        links: [{ kind: 'portfolio', url: 'https://example.test/portfolio' }],
+        verified_facts: {
+            links: [{ kind: 'portfolio', url: 'https://example.test/portfolio' }],
+        },
     };
     assert.deepEqual(resolveAnswer({ alias, profileAlias, profile }), {
         alias,
-        source: 'profile',
+        source: 'profile_verified',
         value: 'https://example.test/portfolio',
         missing: false,
     });
@@ -579,11 +797,13 @@ test('profile aliases never redirect non-profile answer sources', () => {
         profileAlias: 'profile.links.github',
         profile: {
             schema: PROFILE_SCHEMA,
-            links: [{ kind: 'github', url: 'https://github.example.test/ada' }],
+            verified_facts: {
+                links: [{ kind: 'github', url: 'https://github.example.test/ada' }],
+            },
         },
     }), {
         alias: githubAlias,
-        source: 'profile',
+        source: 'profile_verified',
         value: 'https://github.example.test/ada',
         missing: false,
     });
@@ -611,14 +831,16 @@ test('canonical college institution resolves only one exact profile credential',
     const profileAlias = 'profile.education.college.institution';
     const profile = {
         schema: PROFILE_SCHEMA,
-        education: [{
-            institution: 'Example University',
-            level: 'college',
-        }],
+        verified_facts: {
+            education: [{
+                institution: 'Example University',
+                level: 'college',
+            }],
+        },
     };
     assert.deepEqual(resolveAnswer({ alias, profileAlias, profile }), {
         alias,
-        source: 'profile',
+        source: 'profile_verified',
         value: 'Example University',
         missing: false,
     });
@@ -627,10 +849,13 @@ test('canonical college institution resolves only one exact profile credential',
         profileAlias,
         profile: {
             ...profile,
-            education: [
-                ...profile.education,
-                { institution: 'Second University', level: 'college' },
-            ],
+            verified_facts: {
+                ...profile.verified_facts,
+                education: [
+                    ...profile.verified_facts.education,
+                    { institution: 'Second University', level: 'college' },
+                ],
+            },
         },
     }).missing, true);
 });
@@ -639,12 +864,14 @@ test('canonical college institution resolves only one exact profile credential',
 test('resolveAnswer maps novel status questions to canonical user-backed profile facts', () => {
     const profile = {
         schema: PROFILE_SCHEMA,
-        work_authorization: {
-            authorized: true,
-            countries: ['US'],
-            status: 'US citizen',
+        verified_facts: {
+            work_authorization: {
+                authorized: true,
+                countries: ['US'],
+                status: 'US citizen',
+            },
+            sponsorship: { needed: false },
         },
-        sponsorship: { needed: false },
     };
     const cases = new Map([
         ['What is your citizenship status?', 'US citizen'],
@@ -664,7 +891,7 @@ test('resolveAnswer maps novel status questions to canonical user-backed profile
     for (const [alias, value] of cases) {
         assert.deepEqual(resolveAnswer({ alias, profile }), {
             alias,
-            source: 'profile',
+            source: 'profile_verified',
             value,
             missing: false,
         });
@@ -692,7 +919,14 @@ test('resolveAnswer maps novel status questions to canonical user-backed profile
 });
 
 test('job-description wording cannot answer missing work authorization', () => {
-    assert.deepEqual(ANSWER_SOURCES, ['memory', 'profile', 'resume', 'agent_inference', 'user']);
+    assert.deepEqual(ANSWER_SOURCES, [
+        'memory',
+        'profile_verified',
+        'profile_user_attested',
+        'resume',
+        'agent_inference',
+        'user',
+    ]);
     assert.deepEqual(
         resolveAnswer({
             alias: 'work_authorization',
@@ -776,14 +1010,368 @@ test('symlink and unsafe permissions are rejected by local memory helpers', asyn
     await assert.rejects(appendAnswerRecord(target, record), /E_PATH_PERMISSIONS/);
 });
 
-test('profile answer and explanation lookup preserve exact aliases', () => {
+test('profile answer and explanation lookup preserve exact aliases and tier order', () => {
     const profile = validateProfile({
         schema: PROFILE_SCHEMA,
-        answers: { 'exact-alias': false },
-        explanations: { 'exact-alias': 'Synthetic explanation.' },
+        verified_facts: {
+            answers: { 'verified-alias': true },
+            explanations: { 'verified-alias': 'Verified explanation.' },
+        },
+        user_attested_facts: {
+            answers: { 'attested-alias': false },
+            explanations: { 'attested-alias': 'Attested explanation.' },
+        },
     });
-    assert.deepEqual(profileAnswer(profile, 'exact-alias'), { found: true, value: false });
-    assert.deepEqual(profileExplanation(profile, 'exact-alias'), { found: true, value: 'Synthetic explanation.' });
-    assert.deepEqual(profileAnswer(profile, 'EXACT-ALIAS'), { found: false });
+    assert.deepEqual(profileAnswer(profile, 'verified-alias'), {
+        found: true, source: 'profile_verified', value: true,
+    });
+    assert.deepEqual(profileExplanation(profile, 'verified-alias'), {
+        found: true, source: 'profile_verified', value: 'Verified explanation.',
+    });
+    assert.deepEqual(profileAnswer(profile, 'attested-alias'), {
+        found: true, source: 'profile_user_attested', value: false,
+    });
+    assert.deepEqual(profileExplanation(profile, 'attested-alias'), {
+        found: true, source: 'profile_user_attested', value: 'Attested explanation.',
+    });
+    assert.deepEqual(profileAnswer(profile, 'EXACT-ALIAS'), { found: false, unknown: false });
+    const attestedOnly = validateProfile({
+        schema: PROFILE_SCHEMA,
+        user_attested_facts: {
+            answers: { 'attested-alias': false },
+            explanations: { 'attested-alias': 'Attested explanation.' },
+        },
+    });
+    assert.deepEqual(profileAnswer(attestedOnly, 'attested-alias'), {
+        found: true, source: 'profile_user_attested', value: false,
+    });
+    assert.deepEqual(profileExplanation(attestedOnly, 'attested-alias'), {
+        found: true, source: 'profile_user_attested', value: 'Attested explanation.',
+    });
+    const cloned = validateProfile(profile);
+    cloned.verified_facts.answers['verified-alias'] = 'tampered';
+    assert.deepEqual(profileAnswer(profile, 'verified-alias'), {
+        found: true, source: 'profile_verified', value: true,
+    });
+});
+
+test('stored profile inferred facts resolve after resume and emit canonical agent inference digests', () => {
+    const rationale = 'Grounded in the verified source resume and job description.';
+    const evidence = {
+        source_resume_sha256: 'a'.repeat(64),
+        job_description_sha256: 'b'.repeat(64),
+    };
+    const profile = {
+        schema: PROFILE_SCHEMA,
+        inferred_facts: {
+            'inferred-question': { value: 'stored inference', rationale, evidence },
+        },
+    };
+    assert.deepEqual(
+        resolveAnswer({ alias: 'inferred-question', profile }),
+        {
+            alias: 'inferred-question',
+            source: 'agent_inference',
+            value: 'stored inference',
+            missing: false,
+            inference_rationale_digest: crypto.createHash('sha256').update(rationale, 'utf8').digest('hex'),
+            inference_evidence_digests: {
+                resume_sha256: 'a'.repeat(64),
+                job_description_sha256: 'b'.repeat(64),
+            },
+        },
+    );
+    assert.deepEqual(
+        resolveAnswer({ alias: 'inferred-question', profile, allowInference: false }),
+        { alias: 'inferred-question', source: 'user', value: undefined, missing: true },
+    );
+    assert.equal(
+        resolveAnswer({
+            alias: 'inferred-question',
+            resume: { 'inferred-question': 'resume wins' },
+            profile,
+        }).source,
+        'resume',
+    );
+    assert.equal(
+        resolveAnswer({
+            alias: 'inferred-question',
+            memory: [testAnswerRecord('inferred-question', 'memory wins', '2026-01-01T00:00:00.000Z')],
+            resume: { 'inferred-question': 'resume' },
+            profile,
+        }).source,
+        'memory',
+    );
+    const tampered = structuredClone(profile);
+    tampered.inferred_facts['inferred-question'].rationale = '';
+    assert.throws(
+        () => resolveAnswer({ alias: 'inferred-question', profile: tampered }),
+        /E_PROFILE_INFERENCE_RATIONALE/,
+    );
+});
+
+test('loadRunInputs binds every stored inferred fact to the active source resume and job description', async (t) => {
+    const root = await privateFixture(t);
+    const jobDescription = 'Synthetic job snapshot.';
+    const sourceResume = 'Synthetic source resume.';
+    const jobSha256 = crypto.createHash('sha256').update(jobDescription).digest('hex');
+    const sourceSha256 = crypto.createHash('sha256').update(sourceResume).digest('hex');
+    const jobPath = path.join(root, 'job.txt');
+    const sourceResumePath = path.join(root, 'source-resume.txt');
+    const uploadPath = path.join(root, 'resume.pdf');
+    const memoryDirectory = path.join(root, 'memory');
+    const memoryPath = path.join(memoryDirectory, 'answers.jsonl');
+    const artifactPath = path.join(root, 'artifacts');
+    await fs.mkdir(memoryDirectory, { mode: 0o700 });
+    await fs.mkdir(artifactPath, { mode: 0o700 });
+    await fs.chmod(memoryDirectory, 0o700);
+    await fs.chmod(artifactPath, 0o700);
+    await privateFile(jobPath, jobDescription);
+    await privateFile(sourceResumePath, sourceResume);
+    await privateFile(uploadPath, '%PDF-1.7\nsynthetic pdf bytes');
+
+    const profile = {
+        schema: PROFILE_SCHEMA,
+        inferred_facts: {
+            'inferred-question': {
+                value: 'stored inference',
+                rationale: 'Grounded in the active source resume and job description.',
+                evidence: {
+                    source_resume_sha256: sourceSha256,
+                    job_description_sha256: jobSha256,
+                },
+            },
+        },
+    };
+    const profilePath = path.join(root, 'profile.json');
+    await privateFile(profilePath, `${JSON.stringify(profile)}\n`);
+
+    const inputs = await loadRunInputs(runFor(root, {
+        profilePath,
+        sourceResumePath,
+        uploadPath,
+        memoryPath,
+        artifactPath,
+    }));
+    assert.equal(inputs.sourceResumeIdentity.sha256, sourceSha256);
+    assert.equal(inputs.jobDescriptionIdentity.sha256, jobSha256);
+    assert.equal(
+        inputs.profile.inferred_facts['inferred-question'].evidence.source_resume_sha256,
+        sourceSha256,
+    );
+
+    await assert.rejects(
+        loadRunInputs(runFor(root, {
+            profilePath,
+            uploadPath,
+            memoryPath,
+            artifactPath,
+        })),
+        (error) => error.code === 'E_RUN_INFERENCE_UNBOUND',
+    );
+
+    const resumeMismatched = structuredClone(profile);
+    resumeMismatched.inferred_facts['inferred-question'].evidence = {
+        source_resume_sha256: 'c'.repeat(64),
+        job_description_sha256: jobSha256,
+    };
+    const resumeMismatchedPath = path.join(root, 'profile-resume-mismatch.json');
+    await privateFile(resumeMismatchedPath, `${JSON.stringify(resumeMismatched)}\n`);
+    await assert.rejects(
+        loadRunInputs(runFor(root, {
+            profilePath: resumeMismatchedPath,
+            sourceResumePath,
+            uploadPath,
+            memoryPath,
+            artifactPath,
+        })),
+        (error) => error.code === 'E_RUN_INFERENCE_EVIDENCE_MISMATCH',
+    );
+
+    const jobMismatched = structuredClone(profile);
+    jobMismatched.inferred_facts['inferred-question'].evidence = {
+        source_resume_sha256: sourceSha256,
+        job_description_sha256: 'd'.repeat(64),
+    };
+    const jobMismatchedPath = path.join(root, 'profile-job-mismatch.json');
+    await privateFile(jobMismatchedPath, `${JSON.stringify(jobMismatched)}\n`);
+    await assert.rejects(
+        loadRunInputs(runFor(root, {
+            profilePath: jobMismatchedPath,
+            sourceResumePath,
+            uploadPath,
+            memoryPath,
+            artifactPath,
+        })),
+        (error) => error.code === 'E_RUN_INFERENCE_EVIDENCE_MISMATCH',
+    );
+});
+
+test('resolveAnswer inference permission gates both stored and runtime inference', () => {
+    const rationale = 'A grounded inference.';
+    const storedProfile = {
+        schema: PROFILE_SCHEMA,
+        inferred_facts: {
+            stored: {
+                value: 'stored',
+                rationale,
+                evidence: {
+                    source_resume_sha256: 'a'.repeat(64),
+                    job_description_sha256: 'b'.repeat(64),
+                },
+            },
+        },
+    };
+    const runtime = {
+        runtime: {
+            value: 'runtime',
+            rationale,
+            evidence: {
+                resume_sha256: 'a'.repeat(64),
+                job_description_sha256: 'b'.repeat(64),
+            },
+        },
+    };
+    assert.equal(resolveAnswer({ alias: 'stored', profile: storedProfile }).source, 'agent_inference');
+    assert.equal(
+        resolveAnswer({ alias: 'stored', profile: storedProfile, allowInference: false }).missing,
+        true,
+    );
+    assert.equal(resolveAnswer({ alias: 'runtime', agent_inference: runtime }).source, 'agent_inference');
+    assert.equal(
+        resolveAnswer({ alias: 'runtime', agent_inference: runtime, allowInference: false }).missing,
+        true,
+    );
+    assert.equal(
+        resolveAnswer({
+            alias: 'runtime',
+            agent_inference: runtime,
+            allowInference: false,
+            user: { runtime: 'explicit' },
+        }).source,
+        'user',
+    );
+    assert.equal(
+        resolveAnswer({ alias: 'runtime', agent_inference: runtime, user: { runtime: 'explicit' } }).source,
+        'agent_inference',
+    );
+});
+
+test('explicit unknowns block resume and inference but permit memory and explicit user', () => {
+    const profile = {
+        schema: PROFILE_SCHEMA,
+        unknowns: ['unknown-question'],
+        verified_facts: { answers: { 'unknown-question': 'verified' } },
+        inferred_facts: {
+            'unknown-question': {
+                value: 'inferred',
+                rationale: 'rationale',
+                evidence: {
+                    source_resume_sha256: 'a'.repeat(64),
+                    job_description_sha256: 'b'.repeat(64),
+                },
+            },
+        },
+    };
+    const runtimeInference = {
+        'unknown-question': {
+            value: 'runtime inference',
+            rationale: 'rationale',
+            evidence: {
+                resume_sha256: 'a'.repeat(64),
+                job_description_sha256: 'b'.repeat(64),
+            },
+        },
+    };
+    assert.deepEqual(
+        resolveAnswer({
+            alias: 'unknown-question',
+            profile,
+            resume: { 'unknown-question': 'resume' },
+            agent_inference: runtimeInference,
+        }),
+        { alias: 'unknown-question', source: 'user', value: undefined, missing: true },
+    );
+    assert.equal(
+        resolveAnswer({
+            alias: 'unknown-question',
+            memory: [testAnswerRecord('unknown-question', 'memory', '2026-01-01T00:00:00.000Z')],
+            profile,
+            resume: { 'unknown-question': 'resume' },
+            agent_inference: runtimeInference,
+        }).source,
+        'memory',
+    );
+    assert.deepEqual(
+        resolveAnswer({
+            alias: 'unknown-question',
+            profile,
+            resume: { 'unknown-question': 'resume' },
+            agent_inference: runtimeInference,
+            user: { 'unknown-question': 'explicit user' },
+        }),
+        { alias: 'unknown-question', source: 'user', value: 'explicit user', missing: false },
+    );
+    assert.equal(
+        resolveAnswer({
+            alias: 'known-question',
+            profile,
+            resume: { 'known-question': 'resume' },
+            agent_inference: runtimeInference,
+        }).source,
+        'resume',
+    );
+});
+
+test('provenance answer sources resolve in exact precedence order', () => {
+    const entry = {
+        value: 'runtime inference',
+        rationale: 'rationale',
+        evidence: {
+            resume_sha256: 'a'.repeat(64),
+            job_description_sha256: 'b'.repeat(64),
+        },
+    };
+    const sources = [
+        ['memory', {
+            memory: [testAnswerRecord('provenance', 'memory', '2026-01-01T00:00:00.000Z')],
+        }],
+        ['profile_verified', {
+            profile: {
+                schema: PROFILE_SCHEMA,
+                verified_facts: { answers: { provenance: 'verified' } },
+            },
+        }],
+        ['profile_user_attested', {
+            profile: {
+                schema: PROFILE_SCHEMA,
+                user_attested_facts: { answers: { provenance: 'attested' } },
+            },
+        }],
+        ['resume', { resume: { provenance: 'resume' } }],
+        ['agent_inference', { agent_inference: { provenance: entry } }],
+        ['user', { user: { provenance: 'explicit user' } }],
+    ];
+    for (let index = 0; index < sources.length; index += 1) {
+        const [source, options] = sources[index];
+        const overlap = Object.fromEntries(
+            sources.slice(0, index).map(([otherSource]) => [otherSource, undefined]),
+        );
+        assert.deepEqual(
+            resolveAnswer({ alias: 'provenance', ...overlap, ...options }),
+            {
+                alias: 'provenance',
+                source,
+                value: { memory: 'memory', profile_verified: 'verified', profile_user_attested: 'attested', resume: 'resume', agent_inference: 'runtime inference', user: 'explicit user' }[source],
+                missing: false,
+                ...(source === 'agent_inference'
+                    ? {
+                        inference_rationale_digest: crypto.createHash('sha256').update('rationale', 'utf8').digest('hex'),
+                        inference_evidence_digests: entry.evidence,
+                    }
+                    : {}),
+            },
+        );
+    }
 });
 

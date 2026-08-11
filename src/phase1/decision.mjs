@@ -15,7 +15,8 @@ export const FIELD_POLICIES = Object.freeze([
 
 export const ANSWER_SOURCES = Object.freeze([
   'memory',
-  'profile',
+  'profile_verified',
+  'profile_user_attested',
   'resume',
   'agent_inference',
   'user',
@@ -78,7 +79,7 @@ const FIELD_POLICY_SET = new Set(FIELD_POLICIES);
 const ANSWER_SOURCE_SET = new Set(ANSWER_SOURCES);
 const PROPOSED_ACTION_SET = new Set(PROPOSED_ACTIONS);
 const MODEL_TIER_SET = new Set(MODEL_TIERS);
-const EVIDENCE_REQUIRED_SOURCES = new Set(['memory', 'profile', 'resume']);
+const EVIDENCE_REQUIRED_SOURCES = new Set(['memory', 'profile_verified', 'profile_user_attested', 'resume']);
 const PROTECTED_POLICIES = new Set(['legal', 'demographic', 'identity', 'hard_fact']);
 const INFERENCE_EVIDENCE_KEYS = new Set(['resumeSha256', 'jobDescriptionSha256']);
 
@@ -95,10 +96,10 @@ const NO_CONTROL_ACTIONS = new Set(['close_dialog', 'navigate', 'wait', 'reobser
 const POLICY_ALLOWED_SOURCES = Object.freeze({
   subjective: ANSWER_SOURCE_SET,
   qualification: ANSWER_SOURCE_SET,
-  legal: new Set(['memory', 'profile', 'resume', 'user']),
-  demographic: new Set(['memory', 'profile', 'resume', 'user']),
-  identity: new Set(['memory', 'profile', 'resume', 'user']),
-  hard_fact: new Set(['memory', 'profile', 'resume', 'user']),
+  legal: new Set(['memory', 'profile_verified', 'profile_user_attested', 'resume', 'user']),
+  demographic: new Set(['memory', 'profile_verified', 'profile_user_attested', 'resume', 'user']),
+  identity: new Set(['memory', 'profile_verified', 'profile_user_attested', 'resume', 'user']),
+  hard_fact: new Set(['memory', 'profile_verified', 'profile_user_attested', 'resume', 'user']),
 });
 
 export class ApplicationDecisionValidationError extends TypeError {
